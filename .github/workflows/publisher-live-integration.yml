@@ -1,0 +1,370 @@
+name: Publisher live integration
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/publisher-live-integration.yml'
+      - '.github/workflows/publish-retained-evidence.yml'
+      - 'intelligence-os-control/publish_retained_evidence.py'
+      - 'intelligence-os-control/publication_attestation.py'
+
+permissions: {}
+
+concurrency:
+  group: publisher-live-integration-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: github.repository == 'AmazingBecca/agency-agents'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      envelope_b64: ${{ steps.fixture.outputs.envelope_b64 }}
+      repository: ${{ steps.fixture.outputs.repository }}
+      reviewed_head: ${{ steps.fixture.outputs.reviewed_head }}
+      reviewed_base: ${{ steps.fixture.outputs.reviewed_base }}
+      synthetic_merge: ${{ steps.fixture.outputs.synthetic_merge }}
+      workflow_ref: ${{ steps.fixture.outputs.workflow_ref }}
+      workflow_sha: ${{ steps.fixture.outputs.workflow_sha }}
+      run_id: ${{ steps.fixture.outputs.run_id }}
+      run_attempt: ${{ steps.fixture.outputs.run_attempt }}
+    steps:
+      - name: Build canonical live-call fixture
+        id: fixture
+        shell: bash
+        env:
+          FIXTURE_REPOSITORY: ${{ github.repository }}
+          FIXTURE_REVIEWED_HEAD: ${{ github.event.pull_request.head.sha }}
+          FIXTURE_REVIEWED_BASE: ${{ github.event.pull_request.base.sha }}
+          FIXTURE_SYNTHETIC_MERGE: ${{ github.event.pull_request.merge_commit_sha }}
+          FIXTURE_WORKFLOW_REF: ${{ github.workflow_ref }}
+          FIXTURE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          FIXTURE_RUN_ID: ${{ github.run_id }}
+          FIXTURE_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          hex40 = re.compile(r"^[0-9a-f]{40}$")
+          decimal = re.compile(r"^[1-9][0-9]*$")
+          authority = {
+              "repository": os.environ["FIXTURE_REPOSITORY"],
+              "reviewed_head": os.environ["FIXTURE_REVIEWED_HEAD"],
+              "reviewed_base": os.environ["FIXTURE_REVIEWED_BASE"],
+              "synthetic_merge": os.environ["FIXTURE_SYNTHETIC_MERGE"],
+              "workflow_ref": os.environ["FIXTURE_WORKFLOW_REF"],
+              "workflow_sha": os.environ["FIXTURE_WORKFLOW_SHA"],
+              "run_id": os.environ["FIXTURE_RUN_ID"],
+              "run_attempt": os.environ["FIXTURE_RUN_ATTEMPT"],
+          }
+          assert authority["repository"] == "AmazingBecca/agency-agents"
+          for field in ("reviewed_head", "reviewed_base", "synthetic_merge", "workflow_sha"):
+              assert hex40.fullmatch(authority[field]), field
+          assert len({
+              authority["reviewed_head"],
+              authority["reviewed_base"],
+              authority["synthetic_merge"],
+          }) == 3
+          assert authority["workflow_ref"].startswith(
+              "AmazingBecca/agency-agents/.github/workflows/publisher-live-integration.yml@refs/"
+          )
+          assert decimal.fullmatch(authority["run_id"])
+          assert decimal.fullmatch(authority["run_attempt"])
+
+          execution = {
+              "repository": authority["repository"],
+              "workflow_ref": authority["workflow_ref"],
+              "workflow_sha": authority["workflow_sha"],
+              "run_id": authority["run_id"],
+              "run_attempt": authority["run_attempt"],
+              "head_sha": authority["reviewed_head"],
+              "reviewed_base": authority["reviewed_base"],
+              "synthetic_merge": authority["synthetic_merge"],
+          }
+          manifest_sha = "1" * 64
+          archive_sha = "2" * 64
+          component_names = (
+              "archive_canonicality.py",
+              "retained_wheelhouse_evidence.py",
+              "retained_wheelhouse_evidence_core.py",
+          )
+          components = {}
+          for index, name in enumerate(component_names, start=3):
+              components[name] = {
+                  "name": name,
+                  "bytes": 100 + index,
+                  "sha256": f"{index:x}" * 64,
+                  "git_blob": f"{index:x}" * 40,
+              }
+          receipt = {
+              "schema": "amazingbecca.intelligence-os-wheelhouse-verification.v1",
+              "repository": authority["repository"],
+              "reviewed_head": authority["reviewed_head"],
+              "reviewed_base": authority["reviewed_base"],
+              "synthetic_merge": authority["synthetic_merge"],
+              "workflow_authority": {
+                  "ref": authority["workflow_ref"],
+                  "sha": authority["workflow_sha"],
+              },
+              "workflow_run": {
+                  "id": authority["run_id"],
+                  "attempt": int(authority["run_attempt"]),
+              },
+              "archive_manifest": {
+                  "name": "WHEELHOUSE_MANIFEST.json",
+                  "bytes": 512,
+                  "sha256": manifest_sha,
+                  "execution": execution,
+              },
+              "archive_canonicality": {
+                  "schema": "amazingbecca.intelligence-os-wheelhouse.v4",
+                  "archive_bytes": 4096,
+                  "archive_sha256": archive_sha,
+                  "manifest_bytes": 512,
+                  "manifest_sha256": manifest_sha,
+                  "execution": execution,
+                  "wheel_count": 1,
+                  "wheel_names": ["alpha-1.0-py3-none-any.whl"],
+              },
+              "members": {
+                  "intelligence-os-source-identity.json": {
+                      "bytes": 200,
+                      "sha256": "6" * 64,
+                  },
+                  "intelligence-os-wheelhouse.tar": {
+                      "bytes": 4096,
+                      "sha256": archive_sha,
+                  },
+                  "intelligence-os-wheelhouse-binding.json": {
+                      "bytes": 300,
+                      "sha256": "7" * 64,
+                  },
+              },
+              "synthetic_merge_commit": {
+                  "schema": "amazingbecca.intelligence-os-synthetic-merge-commit.v1",
+                  "name": "intelligence-os-synthetic-merge.commit",
+                  "bytes": 250,
+                  "sha256": "8" * 64,
+                  "git_commit": authority["synthetic_merge"],
+                  "parents": [authority["reviewed_base"], authority["reviewed_head"]],
+              },
+              "verifier_components": {
+                  "schema": "amazingbecca.intelligence-os-verifier-components.v1",
+                  "components": components,
+              },
+          }
+
+          def canonical(value):
+              return (
+                  json.dumps(
+                      value,
+                      sort_keys=True,
+                      separators=(",", ":"),
+                      ensure_ascii=True,
+                  )
+                  + "\n"
+              ).encode("ascii")
+
+          receipt_raw = canonical(receipt)
+          envelope = {
+              "schema": "amazingbecca.intelligence-os-verification-transfer.v1",
+              "authority": authority,
+              "receipt": {
+                  "encoding": "base64",
+                  "bytes": len(receipt_raw),
+                  "sha256": hashlib.sha256(receipt_raw).hexdigest(),
+                  "data": base64.b64encode(receipt_raw).decode("ascii"),
+              },
+          }
+          envelope_b64 = base64.b64encode(canonical(envelope)).decode("ascii")
+          assert len(envelope_b64) <= 132 * 1024
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as handle:
+              handle.write(f"envelope_b64={envelope_b64}\n")
+              for key, value in authority.items():
+                  handle.write(f"{key}={value}\n")
+          PY
+
+  publish-live:
+    needs: prepare
+    permissions: {}
+    uses: AmazingBecca/agency-agents/.github/workflows/publish-retained-evidence.yml@50ed0c417655c0744e691658882e5421ba20396b
+    with:
+      envelope_b64: ${{ needs.prepare.outputs.envelope_b64 }}
+      repository: ${{ needs.prepare.outputs.repository }}
+      reviewed_head: ${{ needs.prepare.outputs.reviewed_head }}
+      reviewed_base: ${{ needs.prepare.outputs.reviewed_base }}
+      synthetic_merge: ${{ needs.prepare.outputs.synthetic_merge }}
+      workflow_ref: ${{ needs.prepare.outputs.workflow_ref }}
+      workflow_sha: ${{ needs.prepare.outputs.workflow_sha }}
+      run_id: ${{ needs.prepare.outputs.run_id }}
+      run_attempt: ${{ needs.prepare.outputs.run_attempt }}
+
+  verify-live-publication:
+    needs:
+      - prepare
+      - publish-live
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      contents: none
+    env:
+      EXPECTED_PUBLISHER_SHA: 50ed0c417655c0744e691658882e5421ba20396b
+      EXPECTED_REPOSITORY: ${{ needs.prepare.outputs.repository }}
+      EXPECTED_REVIEWED_HEAD: ${{ needs.prepare.outputs.reviewed_head }}
+      EXPECTED_REVIEWED_BASE: ${{ needs.prepare.outputs.reviewed_base }}
+      EXPECTED_SYNTHETIC_MERGE: ${{ needs.prepare.outputs.synthetic_merge }}
+      EXPECTED_WORKFLOW_REF: ${{ needs.prepare.outputs.workflow_ref }}
+      EXPECTED_WORKFLOW_SHA: ${{ needs.prepare.outputs.workflow_sha }}
+      EXPECTED_RUN_ID: ${{ needs.prepare.outputs.run_id }}
+      EXPECTED_RUN_ATTEMPT: ${{ needs.prepare.outputs.run_attempt }}
+      ARTIFACT_NAME: intelligence-os-retained-evidence-publication-head-${{ needs.prepare.outputs.reviewed_head }}-merge-${{ needs.prepare.outputs.synthetic_merge }}-publisher-50ed0c417655c0744e691658882e5421ba20396b-run-${{ needs.prepare.outputs.run_id }}-${{ needs.prepare.outputs.run_attempt }}
+    steps:
+      - name: Download exact publication artifact from this run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GITHUB_TOKEN"
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts"
+          curl --fail-with-body --location --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api?name=$ARTIFACT_NAME" > "$RUNNER_TEMP/artifacts.json"
+          artifact_id="$(
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads((Path(os.environ["RUNNER_TEMP"]) / "artifacts.json").read_text())
+          artifacts = payload.get("artifacts")
+          assert payload.get("total_count") == 1
+          assert isinstance(artifacts, list) and len(artifacts) == 1
+          artifact = artifacts[0]
+          assert artifact.get("name") == os.environ["ARTIFACT_NAME"]
+          assert artifact.get("expired") is False
+          artifact_id = artifact.get("id")
+          assert isinstance(artifact_id, int) and artifact_id > 0
+          print(artifact_id)
+          PY
+          )"
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+          curl --fail-with-body --location --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+            -o "$RUNNER_TEMP/publication.zip"
+
+      - name: Authenticate downloaded publisher-bound publication
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import zipfile
+          from pathlib import Path
+
+          def strict_object(pairs):
+              value = {}
+              for key, item in pairs:
+                  assert key not in value, f"duplicate key: {key}"
+                  value[key] = item
+              return value
+
+          def canonical(value):
+              return (
+                  json.dumps(
+                      value,
+                      sort_keys=True,
+                      separators=(",", ":"),
+                      ensure_ascii=True,
+                  )
+                  + "\n"
+              ).encode("ascii")
+
+          archive = Path(os.environ["RUNNER_TEMP"]) / "publication.zip"
+          with zipfile.ZipFile(archive) as handle:
+              names = handle.namelist()
+              assert names == ["intelligence-os-retained-evidence-publication.json"], names
+              info = handle.getinfo(names[0])
+              assert not info.is_dir()
+              raw = handle.read(info)
+
+          publication = json.loads(
+              raw.decode("ascii"),
+              object_pairs_hook=strict_object,
+          )
+          assert raw == canonical(publication)
+          assert set(publication) == {
+              "schema",
+              "publisher_authority",
+              "caller_authority",
+              "verification_receipt",
+          }
+          assert publication["schema"] == (
+              "amazingbecca.intelligence-os-retained-evidence-publication.v1"
+          )
+          caller = {
+              "repository": os.environ["EXPECTED_REPOSITORY"],
+              "reviewed_head": os.environ["EXPECTED_REVIEWED_HEAD"],
+              "reviewed_base": os.environ["EXPECTED_REVIEWED_BASE"],
+              "synthetic_merge": os.environ["EXPECTED_SYNTHETIC_MERGE"],
+              "workflow_ref": os.environ["EXPECTED_WORKFLOW_REF"],
+              "workflow_sha": os.environ["EXPECTED_WORKFLOW_SHA"],
+              "run_id": os.environ["EXPECTED_RUN_ID"],
+              "run_attempt": os.environ["EXPECTED_RUN_ATTEMPT"],
+          }
+          assert publication["caller_authority"] == caller
+          publisher_sha = os.environ["EXPECTED_PUBLISHER_SHA"]
+          assert publication["publisher_authority"] == {
+              "repository": "AmazingBecca/agency-agents",
+              "workflow_path": ".github/workflows/publish-retained-evidence.yml",
+              "workflow_ref": (
+                  "AmazingBecca/agency-agents/"
+                  f".github/workflows/publish-retained-evidence.yml@{publisher_sha}"
+              ),
+              "workflow_sha": publisher_sha,
+          }
+          record = publication["verification_receipt"]
+          assert set(record) == {"name", "encoding", "bytes", "sha256", "data"}
+          assert record["name"] == "intelligence-os-wheelhouse-verification.json"
+          assert record["encoding"] == "base64"
+          receipt_raw = base64.b64decode(record["data"], validate=True)
+          assert base64.b64encode(receipt_raw).decode("ascii") == record["data"]
+          assert len(receipt_raw) == record["bytes"]
+          assert hashlib.sha256(receipt_raw).hexdigest() == record["sha256"]
+          receipt = json.loads(
+              receipt_raw.decode("ascii"),
+              object_pairs_hook=strict_object,
+          )
+          assert receipt_raw == canonical(receipt)
+          assert receipt["repository"] == caller["repository"]
+          assert receipt["reviewed_head"] == caller["reviewed_head"]
+          assert receipt["reviewed_base"] == caller["reviewed_base"]
+          assert receipt["synthetic_merge"] == caller["synthetic_merge"]
+          assert receipt["workflow_authority"] == {
+              "ref": caller["workflow_ref"],
+              "sha": caller["workflow_sha"],
+          }
+          assert receipt["workflow_run"] == {
+              "id": caller["run_id"],
+              "attempt": int(caller["run_attempt"]),
+          }
+          PY
