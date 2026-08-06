@@ -1,0 +1,39 @@
+name: Intelligence OS Control CI
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/intelligence-os-control-ci.yml'
+      - '.github/workflows/publish-retained-evidence.yml'
+      - 'intelligence-os-control/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intelligence-os-control-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.repository == 'AmazingBecca/agency-agents'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      PYTHONWARNINGS: error
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.13'
+          check-latest: false
+      - name: Compile trusted publisher sources
+        run: python -m compileall -q intelligence-os-control
+      - name: Run trusted publisher regressions
+        run: python -m unittest discover -s intelligence-os-control/tests -v
