@@ -54,15 +54,19 @@ jobs:
         env:
           CONTROL_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           CONTROL_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          CONTROL_WORKFLOW_REF: ${{ job.workflow_ref }}
           CONTROL_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -Eeuo pipefail
           test "$CONTROL_WORKFLOW_REPOSITORY" = 'AmazingBecca/agency-agents'
           test "$CONTROL_WORKFLOW_FILE_PATH" = '.github/workflows/publish-retained-evidence.yml'
           [[ "$CONTROL_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$CONTROL_WORKFLOW_REF" = "$CONTROL_WORKFLOW_REPOSITORY/$CONTROL_WORKFLOW_FILE_PATH@$CONTROL_WORKFLOW_SHA"
           test "$(git rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"
           test "$(git remote get-url origin)" = 'https://github.com/AmazingBecca/agency-agents'
-          python -m py_compile intelligence-os-control/publish_retained_evidence.py
+          python -m py_compile \
+            intelligence-os-control/publish_retained_evidence.py \
+            intelligence-os-control/publication_attestation.py
       - name: Materialize independently verified receipt
         id: publish
         shell: bash
@@ -78,6 +82,7 @@ jobs:
           PUBLISH_RUN_ATTEMPT: ${{ inputs.run_attempt }}
           CONTROL_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           CONTROL_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          CONTROL_WORKFLOW_REF: ${{ job.workflow_ref }}
           CONTROL_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -Eeuo pipefail
@@ -98,11 +103,50 @@ jobs:
           test "$(sha256sum "$output" | cut -d' ' -f1)" = "$receipt_sha256"
           test "$(stat -c '%a' "$output")" = 600
           printf 'receipt_sha256=%s\n' "$receipt_sha256" >> "$GITHUB_OUTPUT"
-      - name: Upload exact retained verification receipt
+      - name: Bind publisher authority into final publication
+        id: attest
+        shell: bash
+        env:
+          EXPECTED_RECEIPT_SHA256: ${{ steps.publish.outputs.receipt_sha256 }}
+          PUBLISH_REPOSITORY: ${{ inputs.repository }}
+          PUBLISH_REVIEWED_HEAD: ${{ inputs.reviewed_head }}
+          PUBLISH_REVIEWED_BASE: ${{ inputs.reviewed_base }}
+          PUBLISH_SYNTHETIC_MERGE: ${{ inputs.synthetic_merge }}
+          PUBLISH_WORKFLOW_REF: ${{ inputs.workflow_ref }}
+          PUBLISH_WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+          PUBLISH_RUN_ID: ${{ inputs.run_id }}
+          PUBLISH_RUN_ATTEMPT: ${{ inputs.run_attempt }}
+          CONTROL_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROL_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          CONTROL_WORKFLOW_REF: ${{ job.workflow_ref }}
+          CONTROL_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/intelligence-os-wheelhouse-verification.json"
+          output="$RUNNER_TEMP/intelligence-os-retained-evidence-publication.json"
+          test ! -e "$output"
+          publication_sha256="$(python -I intelligence-os-control/publication_attestation.py \
+            --receipt "$receipt" \
+            --output "$output" \
+            --expected-receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
+            --repository "$PUBLISH_REPOSITORY" \
+            --reviewed-head "$PUBLISH_REVIEWED_HEAD" \
+            --reviewed-base "$PUBLISH_REVIEWED_BASE" \
+            --synthetic-merge "$PUBLISH_SYNTHETIC_MERGE" \
+            --workflow-ref "$PUBLISH_WORKFLOW_REF" \
+            --workflow-sha "$PUBLISH_WORKFLOW_SHA" \
+            --run-id "$PUBLISH_RUN_ID" \
+            --run-attempt "$PUBLISH_RUN_ATTEMPT")"
+          [[ "$publication_sha256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "$output" | cut -d' ' -f1)" = "$publication_sha256"
+          test "$(stat -c '%a' "$output")" = 600
+          printf 'publication_sha256=%s\n' "$publication_sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload publisher-bound retained evidence publication
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: intelligence-os-wheelhouse-verification-head-${{ inputs.reviewed_head }}-merge-${{ inputs.synthetic_merge }}-run-${{ inputs.run_id }}-${{ inputs.run_attempt }}
-          path: ${{ runner.temp }}/intelligence-os-wheelhouse-verification.json
+          name: intelligence-os-retained-evidence-publication-head-${{ inputs.reviewed_head }}-merge-${{ inputs.synthetic_merge }}-publisher-${{ job.workflow_sha }}-run-${{ inputs.run_id }}-${{ inputs.run_attempt }}
+          path: ${{ runner.temp }}/intelligence-os-retained-evidence-publication.json
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
