@@ -29,21 +29,54 @@ class PublisherWorkflowContractTests(unittest.TestCase):
         self.assertEqual(block.count("        required: true"), len(expected))
         self.assertEqual(block.count("        type: string"), len(expected))
 
-    def test_job_checks_out_only_its_exact_workflow_repository(self) -> None:
-        self.assertEqual(WORKFLOW.count("actions/checkout@"), 1)
-        self.assertIn("repository: ${{ job.workflow_repository }}", WORKFLOW)
-        self.assertIn("ref: ${{ job.workflow_sha }}", WORKFLOW)
-        self.assertIn("persist-credentials: false", WORKFLOW)
-        self.assertIn("fetch-depth: 1", WORKFLOW)
-        self.assertNotIn("${{ github.repository }}", WORKFLOW)
+    def test_job_has_no_caller_repository_token_authority(self) -> None:
+        self.assertIn("\npermissions: {}\n", WORKFLOW)
+        self.assertNotIn("contents: read", WORKFLOW)
+        self.assertNotIn("actions: read", WORKFLOW)
+        self.assertNotIn("id-token:", WORKFLOW)
         self.assertNotIn("secrets:", WORKFLOW)
         self.assertNotIn("github.token", WORKFLOW)
+        self.assertNotIn("secrets.GITHUB_TOKEN", WORKFLOW)
 
-    def test_actions_and_runtime_are_immutable(self) -> None:
+    def test_job_fetches_only_exact_public_control_source_without_credentials(self) -> None:
+        self.assertNotIn("actions/checkout@", WORKFLOW)
+        self.assertIn("GIT_TERMINAL_PROMPT: '0'", WORKFLOW)
+        self.assertIn("unset GITHUB_TOKEN GH_TOKEN", WORKFLOW)
+        self.assertIn("git init .", WORKFLOW)
         self.assertIn(
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'",
             WORKFLOW,
         )
+        self.assertIn(
+            'git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"',
+            WORKFLOW,
+        )
+        self.assertIn("git checkout --detach FETCH_HEAD", WORKFLOW)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"', WORKFLOW)
+        self.assertNotIn("${{ github.repository }}", WORKFLOW)
+
+    def test_control_identity_is_bound_before_network_fetch(self) -> None:
+        bind = WORKFLOW.index("Bind protected publisher identity before source fetch")
+        fetch = WORKFLOW.index("Fetch exact public publisher source without caller credentials")
+        network = WORKFLOW.index("git -c credential.helper= -c http.extraHeader= fetch")
+        self.assertLess(bind, fetch)
+        self.assertLess(fetch, network)
+        bind_block = WORKFLOW[bind:fetch]
+        self.assertIn(
+            'test "$CONTROL_WORKFLOW_REPOSITORY" = \'AmazingBecca/agency-agents\'',
+            bind_block,
+        )
+        self.assertIn(
+            "test \"$CONTROL_WORKFLOW_FILE_PATH\" = '.github/workflows/publish-retained-evidence.yml'",
+            bind_block,
+        )
+        self.assertIn('[[ "$CONTROL_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]', bind_block)
+        self.assertIn(
+            'test "$CONTROL_WORKFLOW_REF" = "$CONTROL_WORKFLOW_REPOSITORY/$CONTROL_WORKFLOW_FILE_PATH@$CONTROL_WORKFLOW_SHA"',
+            bind_block,
+        )
+
+    def test_actions_and_runtime_are_immutable(self) -> None:
         self.assertIn(
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             WORKFLOW,
