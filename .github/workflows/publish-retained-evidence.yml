@@ -31,8 +31,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   publish:
@@ -41,15 +40,9 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONNOUSERSITE: '1'
+      GIT_TERMINAL_PROMPT: '0'
     steps:
-      - name: Check out exact protected publisher source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          persist-credentials: false
-          fetch-depth: 1
-      - name: Bind protected publisher source
+      - name: Bind protected publisher identity before source fetch
         shell: bash
         env:
           CONTROL_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
@@ -62,8 +55,22 @@ jobs:
           test "$CONTROL_WORKFLOW_FILE_PATH" = '.github/workflows/publish-retained-evidence.yml'
           [[ "$CONTROL_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$CONTROL_WORKFLOW_REF" = "$CONTROL_WORKFLOW_REPOSITORY/$CONTROL_WORKFLOW_FILE_PATH@$CONTROL_WORKFLOW_SHA"
+      - name: Fetch exact public publisher source without caller credentials
+        shell: bash
+        env:
+          CONTROL_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROL_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -Eeuo pipefail
+          test "$CONTROL_WORKFLOW_REPOSITORY" = 'AmazingBecca/agency-agents'
+          [[ "$CONTROL_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          unset GITHUB_TOKEN GH_TOKEN
+          git init .
+          git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"
+          git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"
-          test "$(git remote get-url origin)" = 'https://github.com/AmazingBecca/agency-agents'
+          test "$(git remote get-url origin)" = 'https://github.com/AmazingBecca/agency-agents.git'
           python -m py_compile \
             intelligence-os-control/publish_retained_evidence.py \
             intelligence-os-control/publication_attestation.py
