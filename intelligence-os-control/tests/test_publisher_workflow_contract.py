@@ -30,6 +30,7 @@ class PublisherWorkflowContractTests(unittest.TestCase):
         self.assertEqual(block.count("        type: string"), len(expected))
 
     def test_job_checks_out_only_its_exact_workflow_repository(self) -> None:
+        self.assertEqual(WORKFLOW.count("actions/checkout@"), 1)
         self.assertIn("repository: ${{ job.workflow_repository }}", WORKFLOW)
         self.assertIn("ref: ${{ job.workflow_sha }}", WORKFLOW)
         self.assertIn("persist-credentials: false", WORKFLOW)
@@ -55,6 +56,7 @@ class PublisherWorkflowContractTests(unittest.TestCase):
         for context in (
             "job.workflow_repository",
             "job.workflow_file_path",
+            "job.workflow_ref",
             "job.workflow_sha",
             "inputs.repository",
             "inputs.reviewed_head",
@@ -66,19 +68,44 @@ class PublisherWorkflowContractTests(unittest.TestCase):
             "inputs.run_attempt",
         ):
             self.assertIn("${{ " + context + " }}", WORKFLOW)
+        self.assertIn(
+            'test "$CONTROL_WORKFLOW_REF" = "$CONTROL_WORKFLOW_REPOSITORY/'
+            '$CONTROL_WORKFLOW_FILE_PATH@$CONTROL_WORKFLOW_SHA"',
+            WORKFLOW,
+        )
         self.assertIn("python -I intelligence-os-control/publish_retained_evidence.py", WORKFLOW)
+        self.assertIn("python -I intelligence-os-control/publication_attestation.py", WORKFLOW)
 
-    def test_only_trusted_publisher_uploads_the_exact_receipt(self) -> None:
+    def test_only_publisher_bound_attestation_is_uploaded(self) -> None:
         self.assertEqual(WORKFLOW.count("actions/upload-artifact@"), 1)
         self.assertIn(
+            "path: ${{ runner.temp }}/intelligence-os-retained-evidence-publication.json",
+            WORKFLOW,
+        )
+        self.assertNotIn(
             "path: ${{ runner.temp }}/intelligence-os-wheelhouse-verification.json",
             WORKFLOW,
         )
+        self.assertIn("publisher-${{ job.workflow_sha }}", WORKFLOW)
         self.assertIn("if-no-files-found: error", WORKFLOW)
         self.assertIn("compression-level: 0", WORKFLOW)
         self.assertIn("overwrite: false", WORKFLOW)
         self.assertIn("include-hidden-files: false", WORKFLOW)
         self.assertNotIn("actions/download-artifact@", WORKFLOW)
+
+    def test_attestation_is_digest_bound_to_verified_receipt(self) -> None:
+        self.assertIn(
+            "EXPECTED_RECEIPT_SHA256: ${{ steps.publish.outputs.receipt_sha256 }}",
+            WORKFLOW,
+        )
+        self.assertIn(
+            '--expected-receipt-sha256 "$EXPECTED_RECEIPT_SHA256"',
+            WORKFLOW,
+        )
+        self.assertIn(
+            "intelligence-os-control/publication_attestation.py",
+            WORKFLOW,
+        )
 
 
 if __name__ == "__main__":
