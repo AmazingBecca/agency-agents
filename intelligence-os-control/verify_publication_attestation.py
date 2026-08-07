@@ -16,6 +16,7 @@ if str(CONTROL_DIR) not in sys.path:
     sys.path.insert(0, str(CONTROL_DIR))
 
 import publication_attestation as attestation
+import publish_retained_evidence as receipt_verifier
 
 PUBLICATION_KEYS = {
     "schema",
@@ -140,9 +141,7 @@ def _read_bounded_regular(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def _validate_receipt_record(
-    record: Any, expected: dict[str, str]
-) -> str:
+def _validate_receipt_record(record: Any, expected: dict[str, str]) -> str:
     if not isinstance(record, dict) or set(record) != RECEIPT_RECORD_KEYS:
         raise VerificationError("verification receipt record inventory is not exact")
     if record.get("name") != attestation.RECEIPT_NAME:
@@ -177,8 +176,8 @@ def _validate_receipt_record(
     if hashlib.sha256(receipt_raw).hexdigest() != digest:
         raise VerificationError("verification receipt digest does not match data")
     try:
-        attestation._validate_receipt(receipt_raw, expected)
-    except attestation.AttestationError as exc:
+        receipt_verifier._validate_receipt(receipt_raw, expected)
+    except receipt_verifier.PublicationError as exc:
         raise VerificationError(str(exc)) from exc
     return digest
 
