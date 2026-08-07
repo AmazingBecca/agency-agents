@@ -99,7 +99,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         xp = self.write(self.candidate / "execution.json", execution(m))
         return m, ep, mp, xp
 
-    def issue(self, ep, mp, xp, manifest_uid=None, execution_uid=None):
+    def issue(self, ep, mp, xp, manifest_uid=None, execution_uid=None, expected_compiler_head=CONTROL_HEAD):
         manifest_uid = self.candidate_uid if manifest_uid is None else manifest_uid
         execution_uid = self.candidate_uid if execution_uid is None else execution_uid
         original = ee._read_regular
@@ -117,7 +117,13 @@ class ExecutionExpectationTests(unittest.TestCase):
             return raw, observed, resolved
 
         with mock.patch.object(ee, "_read_regular", side_effect=observed_read):
-            return ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            return ee.issue_receipt_from_files(
+                ep,
+                mp,
+                xp,
+                self.trusted,
+                expected_compiler_head,
+            )
 
     def test_exact_trusted_channel_issues_receipt(self):
         m, ep, mp, xp = self.files()
@@ -128,13 +134,44 @@ class ExecutionExpectationTests(unittest.TestCase):
     def test_candidate_uid_is_trusted_expectation_data_not_cli_input(self):
         m, ep, mp, xp = self.files()
         with self.assertRaises(TypeError):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted, self.candidate_uid)
+            ee.issue_receipt_from_files(
+                ep,
+                mp,
+                xp,
+                self.trusted,
+                CONTROL_HEAD,
+                self.candidate_uid,
+            )
+
+    def test_expected_compiler_head_is_required_and_validated(self):
+        m, ep, mp, xp = self.files()
+        with self.assertRaises(TypeError):
+            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+        for invalid in ("", "A" * 40, "1" * 39, "1" * 41):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "trusted expected compiler head"
+            ):
+                self.issue(ep, mp, xp, expected_compiler_head=invalid)
+
+    def test_compiler_identity_is_bound_outside_expectation(self):
+        m, ep, mp, xp = self.files()
+        value = expectation(m, self.candidate_uid)
+        value["compiler_repository"] = "Mallory/control"
+        ep.write_bytes(canonical(value))
+        with self.assertRaisesRegex(ValueError, "compiler repository"):
+            self.issue(ep, mp, xp)
+
+        value = expectation(m, self.candidate_uid)
+        value["compiler_head"] = "5" * 40
+        ep.write_bytes(canonical(value))
+        with self.assertRaisesRegex(ValueError, "compiler head"):
+            self.issue(ep, mp, xp)
 
     def test_verifier_process_must_run_as_trusted_root_owner(self):
         m, ep, mp, xp = self.files()
         with mock.patch.object(ee.os, "geteuid", return_value=os.geteuid() + 1):
             with self.assertRaisesRegex(ValueError, "verifier must run as trusted root owner"):
-                ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+                ee.issue_receipt_from_files(ep, mp, xp, self.trusted, CONTROL_HEAD)
 
     def test_same_uid_expectation_authority_is_rejected(self):
         m, ep, mp, xp = self.files(candidate_uid=os.geteuid())
@@ -149,7 +186,7 @@ class ExecutionExpectationTests(unittest.TestCase):
     def test_real_same_uid_candidate_files_cannot_satisfy_claimed_uid(self):
         m, ep, mp, xp = self.files()
         with self.assertRaisesRegex(ValueError, "owner does not match trusted candidate uid"):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            ee.issue_receipt_from_files(ep, mp, xp, self.trusted, CONTROL_HEAD)
 
     def test_manifest_and_execution_owners_must_match_trusted_candidate_uid(self):
         m, ep, mp, xp = self.files()
@@ -181,7 +218,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         alias = self.root / "trusted-alias"
         alias.symlink_to(self.trusted, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "root is unavailable"):
-            ee.issue_receipt_from_files(ep, mp, xp, alias)
+            ee.issue_receipt_from_files(ep, mp, xp, alias, CONTROL_HEAD)
 
     def test_manifest_substitution_fails_while_expectation_stays_fixed(self):
         m, ep, mp, xp = self.files()
