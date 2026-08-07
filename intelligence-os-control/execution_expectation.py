@@ -148,6 +148,16 @@ def _require_expected_compiler_head(value: object) -> str:
     return value
 
 
+def _require_root_identity(value: object) -> tuple[int, int]:
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value)
+    ):
+        raise ValueError("trusted expectation root identity must be an exact device/inode pair")
+    return value
+
+
 def _validate_expectation(expectation: object, root_uid: int, expected_compiler_head: str) -> dict:
     expected_compiler_head = _require_expected_compiler_head(expected_compiler_head)
     if not isinstance(expectation, dict) or set(expectation) != EXPECTATION_KEYS:
@@ -279,18 +289,19 @@ def load_expectation(
             "expectation_sha256": hashlib.sha256(expectation_raw).hexdigest(),
             "manifest": _load_canonical_bytes(manifest_raw, "manifest"),
             "execution": _load_canonical_bytes(execution_raw, "execution report"),
+            "trusted_root_identity": (root_info.st_dev, root_info.st_ino),
         }
     finally:
         os.close(root_fd)
 
 
-def issue_receipt_from_files(
+def issue_bound_receipt_from_files(
     expectation_path: pathlib.Path,
     manifest_path: pathlib.Path,
     execution_path: pathlib.Path,
     trusted_root: pathlib.Path,
     expected_compiler_head: str,
-) -> dict:
+) -> tuple[dict, tuple[int, int]]:
     bound = load_expectation(
         expectation_path,
         manifest_path,
@@ -303,21 +314,89 @@ def issue_receipt_from_files(
         if expectation[field] != manifest.get(field):
             raise ValueError(f"trusted expectation {field} does not match manifest")
     base_receipt = er.issue_receipt(manifest, execution, expectation["execution_id"])
-    return _finalize_trusted_receipt(
+    receipt = _finalize_trusted_receipt(
         base_receipt,
         expectation,
         bound["expectation_sha256"],
     )
+    return receipt, _require_root_identity(bound["trusted_root_identity"])
+
+
+def issue_receipt_from_files(
+    expectation_path: pathlib.Path,
+    manifest_path: pathlib.Path,
+    execution_path: pathlib.Path,
+    trusted_root: pathlib.Path,
+    expected_compiler_head: str,
+) -> dict:
+    receipt, _ = issue_bound_receipt_from_files(
+        expectation_path,
+        manifest_path,
+        execution_path,
+        trusted_root,
+        expected_compiler_head,
+    )
+    return receipt
 
 
 def materialize_trusted_receipt(
     receipt: dict,
     output: pathlib.Path,
     trusted_root: pathlib.Path,
+    expected_root_identity: tuple[int, int],
 ) -> str:
     verify_trusted_receipt(receipt)
-    _direct_child_leaf(output, trusted_root, "executor receipt output")
-    return er.materialize_receipt(receipt, output)
+    expected_root_identity = _require_root_identity(expected_root_identity)
+    leaf = _direct_child_leaf(output, trusted_root, "executor receipt output")
+    root_fd, root_info, _ = _open_trusted_root(trusted_root)
+    descriptor = None
+    created_identity = None
+    published = False
+    try:
+        observed_root_identity = (root_info.st_dev, root_info.st_ino)
+        if observed_root_identity != expected_root_identity:
+            raise ValueError("trusted expectation root identity changed before receipt publication")
+
+        data = er.canonical_bytes(receipt)
+        create_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(leaf, create_flags, 0o600, dir_fd=root_fd)
+        except FileExistsError as exc:
+            raise ValueError("executor receipt output already exists") from exc
+        bound = os.fstat(descriptor)
+        created_identity = (bound.st_dev, bound.st_ino)
+
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ValueError("executor receipt write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        er._verify_materialized_receipt(root_fd, leaf, descriptor, len(data))
+        os.fsync(root_fd)
+        published = True
+        return receipt["receipt_id"]
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created_identity is not None and not published:
+            try:
+                current = os.stat(leaf, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if current is not None and (current.st_dev, current.st_ino) == created_identity:
+                try:
+                    os.unlink(leaf, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+        os.close(root_fd)
 
 
 def main() -> int:
@@ -330,14 +409,19 @@ def main() -> int:
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
     try:
-        receipt = issue_receipt_from_files(
+        receipt, root_identity = issue_bound_receipt_from_files(
             args.expectation,
             args.manifest,
             args.execution,
             args.trusted_expectation_root,
             args.expected_compiler_head,
         )
-        materialize_trusted_receipt(receipt, args.output, args.trusted_expectation_root)
+        materialize_trusted_receipt(
+            receipt,
+            args.output,
+            args.trusted_expectation_root,
+            root_identity,
+        )
     except Exception as exc:
         print(f"executor expectation channel rejected input: {exc}", file=sys.stderr)
         return 2
