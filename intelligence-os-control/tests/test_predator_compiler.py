@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 import pathlib
@@ -62,10 +61,53 @@ class PredatorCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing required mentors"):
             pc.compile_manifest(state(), mentors()[:2], policy())
 
-    def test_forbidden_path_escalation_fails_closed(self):
+    def test_all_non_ready_states_yield_nonexecuting_manifest(self):
+        for recommendation in ("BLOCKED", "RECOMPILE", "ESCALATE"):
+            reports = mentors()
+            reports[2]["recommendation"] = recommendation
+            reports[2]["reason"] = f"{recommendation.lower()} requested"
+            with self.subTest(recommendation=recommendation):
+                manifest = pc.compile_manifest(state(), reports, policy())
+                self.assertEqual(manifest["status"], "BLOCKED")
+                self.assertEqual(
+                    manifest["blockers"],
+                    [f"adversary:{recommendation.lower()} requested"],
+                )
+
+    def test_all_non_ready_states_require_reason(self):
+        for recommendation in ("BLOCKED", "RECOMPILE", "ESCALATE"):
+            reports = mentors()
+            reports[2]["recommendation"] = recommendation
+            with self.subTest(recommendation=recommendation), self.assertRaisesRegex(
+                ValueError, "non-ready mentor report requires reason"
+            ):
+                pc.compile_manifest(state(), reports, policy())
+
+    def test_forbidden_path_ranges_fail_closed(self):
+        for attack in ("Zo", "Zo/subdir", "production/migrate.sql"):
+            reports = mentors()
+            reports[0]["allowed_paths"] = [attack]
+            with self.subTest(attack=attack), self.assertRaisesRegex(ValueError, "forbidden path"):
+                pc.compile_manifest(state(), reports, policy())
+
         reports = mentors()
-        reports[0]["allowed_paths"].append("Zo")
+        reports[0]["allowed_paths"] = ["scripts"]
+        current_policy = policy()
+        current_policy["forbidden_paths"] = ["scripts/private"]
         with self.assertRaisesRegex(ValueError, "forbidden path"):
+            pc.compile_manifest(state(), reports, current_policy)
+
+    def test_path_escape_is_rejected_without_adapter(self):
+        for attack in ("../Zo", "/tmp/payload", "scripts/../Zo", "scripts\\evil", "scripts//nested", "scripts/"):
+            reports = mentors()
+            reports[0]["allowed_paths"] = [attack]
+            with self.subTest(attack=attack), self.assertRaisesRegex(ValueError, "allowed path"):
+                pc.compile_manifest(state(), reports, policy())
+
+    def test_invalid_required_test_identifier_is_rejected(self):
+        reports = mentors()
+        reports[0]["required_tests"] = ["security\ncommand"]
+        with self.assertRaisesRegex(ValueError, "invalid required_tests"):
             pc.compile_manifest(state(), reports, policy())
 
     def test_production_mutation_cannot_be_compiled(self):
@@ -73,14 +115,6 @@ class PredatorCompilerTests(unittest.TestCase):
         current["production_mutation"] = True
         with self.assertRaisesRegex(ValueError, "production mutation"):
             pc.compile_manifest(current, mentors(), policy())
-
-    def test_blocker_yields_nonexecuting_manifest(self):
-        reports = mentors()
-        reports[2]["recommendation"] = "BLOCKED"
-        reports[2]["reason"] = "runner identity unavailable"
-        manifest = pc.compile_manifest(state(), reports, policy())
-        self.assertEqual(manifest["status"], "BLOCKED")
-        self.assertEqual(manifest["blockers"], ["adversary:runner identity unavailable"])
 
     def test_noncanonical_input_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
