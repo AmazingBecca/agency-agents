@@ -35,7 +35,7 @@ def _path(value: object) -> str:
     parts = pathlib.PurePosixPath(value).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise ValueError("allowed path must be normalized")
-    if "\\" in value or value.endswith("/"):
+    if "\\" in value or value.endswith("/") or str(pathlib.PurePosixPath(value)) != value:
         raise ValueError("allowed path must use normalized POSIX form")
     return value
 
@@ -63,8 +63,8 @@ def adapt(raw: dict, state: dict) -> dict:
     reason = raw.get("reason", "")
     if not isinstance(reason, str):
         raise ValueError("mentor reason must be text")
-    if recommendation in {"BLOCKED", "ESCALATE"} and not reason.strip():
-        raise ValueError("blocking mentor report requires reason")
+    if recommendation != "READY" and not reason.strip():
+        raise ValueError("non-ready mentor report requires reason")
     findings = raw.get("findings", [])
     if not isinstance(findings, list) or not all(isinstance(x, str) and x.strip() for x in findings):
         raise ValueError("invalid mentor findings")
