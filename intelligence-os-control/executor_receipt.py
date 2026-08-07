@@ -218,6 +218,14 @@ def materialize_receipt(receipt: dict, output: pathlib.Path) -> str:
     created_identity = None
     published = False
     try:
+        parent_info = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent_info.st_mode):
+            raise ValueError("executor receipt output parent must be a directory")
+        if parent_info.st_uid != os.geteuid():
+            raise ValueError("executor receipt output parent must be owned by receipt authority")
+        if parent_info.st_mode & 0o022:
+            raise ValueError("executor receipt output parent must not be group/world writable")
+
         create_flags = (
             os.O_WRONLY
             | os.O_CREAT
@@ -260,23 +268,11 @@ def materialize_receipt(receipt: dict, output: pathlib.Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=pathlib.Path, required=True)
-    parser.add_argument("--execution", type=pathlib.Path, required=True)
-    parser.add_argument("--expected-execution-id", required=True)
-    parser.add_argument("--output", type=pathlib.Path, required=True)
-    args = parser.parse_args()
-    try:
-        receipt = issue_receipt(
-            load_canonical(args.manifest),
-            load_canonical(args.execution),
-            args.expected_execution_id,
-        )
-        materialize_receipt(receipt, args.output)
-    except Exception as exc:
-        print(f"executor receipt rejected input: {exc}", file=sys.stderr)
-        return 2
-    return 0
+    print(
+        "direct executor receipt CLI is disabled; use execution_expectation.py with a trusted expectation root",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":
