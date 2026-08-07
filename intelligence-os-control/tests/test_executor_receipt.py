@@ -86,6 +86,18 @@ class ExecutorReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "head does not match"):
             er.issue_receipt(m, value)
 
+    def test_execution_authority_fields_are_exact(self):
+        m = manifest()
+        value = execution(m)
+        value["command"] = "deploy --production"
+        with self.assertRaisesRegex(ValueError, "exact authority schema"):
+            er.issue_receipt(m, value)
+
+        value = execution(m)
+        value.pop("attempted_paths")
+        with self.assertRaisesRegex(ValueError, "exact authority schema"):
+            er.issue_receipt(m, value)
+
     def test_path_outside_manifest_is_rejected(self):
         m = manifest()
         value = execution(m)
