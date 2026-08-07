@@ -1,8 +1,12 @@
 import copy
 import hashlib
+import os
 import pathlib
+import stat
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -176,6 +180,49 @@ class ExecutorReceiptTests(unittest.TestCase):
         value["production_mutation"] = True
         with self.assertRaisesRegex(ValueError, "production mutation"):
             er.issue_receipt(m, value, m["execution_id"])
+
+    def test_receipt_materialization_is_exclusive_private_and_alias_safe(self):
+        m = manifest()
+        receipt = er.issue_receipt(m, execution(m), m["execution_id"])
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            output = root / "receipt.json"
+            self.assertEqual(er.materialize_receipt(receipt, output), receipt["receipt_id"])
+            self.assertEqual(output.read_bytes(), er.canonical_bytes(receipt))
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                er.materialize_receipt(receipt, output)
+
+            victim = root / "victim"
+            victim.write_bytes(b"keep")
+            symlink = root / "symlink.json"
+            symlink.symlink_to(victim)
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                er.materialize_receipt(receipt, symlink)
+            self.assertEqual(victim.read_bytes(), b"keep")
+
+            hard_source = root / "hard-source"
+            hard_source.write_bytes(b"keep-hard")
+            hardlink = root / "hardlink.json"
+            os.link(hard_source, hardlink)
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                er.materialize_receipt(receipt, hardlink)
+            self.assertEqual(hard_source.read_bytes(), b"keep-hard")
+
+    def test_failed_receipt_post_write_verification_removes_created_output(self):
+        m = manifest()
+        receipt = er.issue_receipt(m, execution(m), m["execution_id"])
+        with tempfile.TemporaryDirectory() as td:
+            output = pathlib.Path(td) / "receipt.json"
+            with mock.patch.object(
+                er,
+                "_verify_materialized_receipt",
+                side_effect=ValueError("verification failed"),
+            ):
+                with self.assertRaisesRegex(ValueError, "verification failed"):
+                    er.materialize_receipt(receipt, output)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
