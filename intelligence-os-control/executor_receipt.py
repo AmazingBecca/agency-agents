@@ -23,6 +23,21 @@ EXECUTION_KEYS = {
     "attempted_paths",
     "tests",
 }
+MANIFEST_KEYS = {
+    "schema",
+    "status",
+    "repository",
+    "head",
+    "base",
+    "merge",
+    "production_mutation",
+    "mentor_set",
+    "required_tests",
+    "allowed_paths",
+    "forbidden_paths",
+    "blockers",
+    "execution_id",
+}
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -53,6 +68,8 @@ def _under(path: str, allowed: str) -> bool:
 def verify_manifest(manifest: dict) -> str:
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be an object")
+    if set(manifest) != MANIFEST_KEYS:
+        raise ValueError("manifest fields must match the exact authority schema")
     if manifest.get("schema") != "amazingbecca.predator-compiler.v1":
         raise ValueError("unsupported manifest schema")
     execution_id = manifest.get("execution_id")
