@@ -57,20 +57,23 @@ def execution(m):
 class ExecutorReceiptTests(unittest.TestCase):
     def test_pass_receipt_is_deterministic(self):
         m = manifest()
-        first = er.issue_receipt(m, execution(m))
-        second = er.issue_receipt(m, execution(m))
+        expected = m["execution_id"]
+        first = er.issue_receipt(m, execution(m), expected)
+        second = er.issue_receipt(m, execution(m), expected)
         self.assertEqual(first, second)
-        self.assertEqual(first["execution_id"], m["execution_id"])
+        self.assertEqual(first["execution_id"], expected)
         self.assertEqual(first["status"], "PASS")
 
     def test_manifest_tampering_is_rejected(self):
         m = manifest()
+        expected = m["execution_id"]
         m["head"] = "4" * 40
         with self.assertRaisesRegex(ValueError, "execution_id mismatch"):
-            er.issue_receipt(m, execution(manifest()))
+            er.issue_receipt(m, execution(manifest()), expected)
 
     def test_manifest_authority_fields_are_exact(self):
         m = manifest()
+        expected = m["execution_id"]
         core = dict(m)
         core.pop("execution_id")
         core["command"] = "deploy --production"
@@ -79,7 +82,7 @@ class ExecutorReceiptTests(unittest.TestCase):
             "execution_id": hashlib.sha256(er.canonical_bytes(core)).hexdigest(),
         }
         with self.assertRaisesRegex(ValueError, "exact authority schema"):
-            er.issue_receipt(injected, execution(injected))
+            er.issue_receipt(injected, execution(injected), expected)
 
         core = dict(m)
         core.pop("execution_id")
@@ -89,7 +92,31 @@ class ExecutorReceiptTests(unittest.TestCase):
             "execution_id": hashlib.sha256(er.canonical_bytes(core)).hexdigest(),
         }
         with self.assertRaisesRegex(ValueError, "exact authority schema"):
-            er.issue_receipt(incomplete, execution(incomplete))
+            er.issue_receipt(incomplete, execution(incomplete), expected)
+
+    def test_independent_expected_execution_id_rejects_manifest_substitution(self):
+        trusted = manifest()
+        expected = trusted["execution_id"]
+
+        core = dict(trusted)
+        core.pop("execution_id")
+        core["allowed_paths"] = sorted(set(core["allowed_paths"]) | {".github"})
+        forged = {
+            **core,
+            "execution_id": hashlib.sha256(er.canonical_bytes(core)).hexdigest(),
+        }
+        self.assertNotEqual(forged["execution_id"], expected)
+        with self.assertRaisesRegex(ValueError, "trusted expected execution_id"):
+            er.issue_receipt(forged, execution(forged), expected)
+
+    def test_expected_execution_id_is_mandatory_and_well_formed(self):
+        m = manifest()
+        value = execution(m)
+        for expected in (None, "", "A" * 64, "0" * 63, "0" * 65):
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, "trusted expected execution_id"
+            ):
+                er.issue_receipt(m, value, expected)
 
     def test_blocked_manifest_cannot_execute(self):
         m = manifest()
@@ -99,56 +126,56 @@ class ExecutorReceiptTests(unittest.TestCase):
         core_id = hashlib.sha256(er.canonical_bytes(core)).hexdigest()
         blocked = {**core, "execution_id": core_id}
         with self.assertRaisesRegex(ValueError, "not executable"):
-            er.issue_receipt(blocked, execution(m))
+            er.issue_receipt(blocked, execution(m), core_id)
 
     def test_candidate_identity_pivot_is_rejected(self):
         m = manifest()
         value = execution(m)
         value["head"] = "4" * 40
         with self.assertRaisesRegex(ValueError, "head does not match"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
 
     def test_execution_authority_fields_are_exact(self):
         m = manifest()
         value = execution(m)
         value["command"] = "deploy --production"
         with self.assertRaisesRegex(ValueError, "exact authority schema"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
 
         value = execution(m)
         value.pop("attempted_paths")
         with self.assertRaisesRegex(ValueError, "exact authority schema"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
 
     def test_path_outside_manifest_is_rejected(self):
         m = manifest()
         value = execution(m)
         value["attempted_paths"].append(".github/workflows/pwn.yml")
         with self.assertRaisesRegex(ValueError, "outside manifest"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
 
     def test_missing_failed_and_skipped_required_tests_are_rejected(self):
         m = manifest()
         value = execution(m)
         value["tests"] = value["tests"][:-1]
         with self.assertRaisesRegex(ValueError, "missing required tests"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
         for status in ["FAIL", "SKIP"]:
             value = execution(m)
             value["tests"][0]["status"] = status
             with self.subTest(status=status), self.assertRaisesRegex(ValueError, "not passing"):
-                er.issue_receipt(m, value)
+                er.issue_receipt(m, value, m["execution_id"])
 
     def test_duplicate_test_and_production_mutation_are_rejected(self):
         m = manifest()
         value = execution(m)
         value["tests"].append(copy.deepcopy(value["tests"][0]))
         with self.assertRaisesRegex(ValueError, "duplicate test"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
         value = execution(m)
         value["production_mutation"] = True
         with self.assertRaisesRegex(ValueError, "production mutation"):
-            er.issue_receipt(m, value)
+            er.issue_receipt(m, value, m["execution_id"])
 
 
 if __name__ == "__main__":
