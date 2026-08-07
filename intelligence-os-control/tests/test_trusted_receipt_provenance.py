@@ -15,6 +15,9 @@ HEAD = "1" * 40
 BASE = "2" * 40
 MERGE = "3" * 40
 CONTROL_HEAD = "4" * 40
+CANDIDATE_UID = 4242
+EXECUTOR_UID = 4343
+EXECUTOR = "predator-private-executor"
 
 
 def manifest():
@@ -46,7 +49,7 @@ def execution(m):
         "head": m["head"],
         "base": m["base"],
         "merge": m["merge"],
-        "executor": "predator-private-executor",
+        "executor": EXECUTOR,
         "production_mutation": False,
         "attempted_paths": ["scripts/fix.py", "tests/test_fix.py"],
         "tests": [
@@ -59,7 +62,7 @@ def execution(m):
 
 def expectation(m):
     return {
-        "schema": "amazingbecca.predator-execution-expectation.v2",
+        "schema": "amazingbecca.predator-execution-expectation.v3",
         "source": "predator-compiler-control",
         "compiler_repository": "AmazingBecca/agency-agents",
         "compiler_head": CONTROL_HEAD,
@@ -68,7 +71,9 @@ def expectation(m):
         "base": m["base"],
         "merge": m["merge"],
         "execution_id": m["execution_id"],
-        "candidate_uid": 4242,
+        "candidate_uid": CANDIDATE_UID,
+        "executor_uid": EXECUTOR_UID,
+        "executor": EXECUTOR,
     }
 
 
@@ -84,11 +89,14 @@ class TrustedReceiptProvenanceTests(unittest.TestCase):
             hashlib.sha256(exp_bytes).hexdigest(),
         ), exp, base
 
-    def test_final_receipt_binds_compiler_and_expectation_provenance(self):
+    def test_final_receipt_binds_compiler_expectation_and_principal_provenance(self):
         receipt, exp, base = self.trusted_receipt()
-        self.assertEqual(receipt["schema"], "amazingbecca.predator-executor-receipt.v2")
+        self.assertEqual(receipt["schema"], "amazingbecca.predator-executor-receipt.v3")
         self.assertEqual(receipt["compiler_repository"], exp["compiler_repository"])
         self.assertEqual(receipt["compiler_head"], exp["compiler_head"])
+        self.assertEqual(receipt["candidate_uid"], CANDIDATE_UID)
+        self.assertEqual(receipt["executor_uid"], EXECUTOR_UID)
+        self.assertEqual(receipt["executor"], EXECUTOR)
         self.assertEqual(
             receipt["expectation_sha256"],
             hashlib.sha256(ee._canonical(exp)).hexdigest(),
@@ -105,6 +113,8 @@ class TrustedReceiptProvenanceTests(unittest.TestCase):
             ("compiler_head", "5" * 40),
             ("expectation_sha256", "0" * 64),
             ("verifier_receipt_sha256", "1" * 64),
+            ("candidate_uid", CANDIDATE_UID + 1),
+            ("executor_uid", EXECUTOR_UID + 1),
         ]:
             altered = dict(receipt)
             altered[field] = value
@@ -128,6 +138,16 @@ class TrustedReceiptProvenanceTests(unittest.TestCase):
         pivot["receipt_id"] = hashlib.sha256(ee._canonical(core)).hexdigest()
         with self.assertRaisesRegex(ValueError, "compiler repository mismatch"):
             ee.verify_trusted_receipt(pivot)
+
+    def test_recomputed_receipt_cannot_collapse_candidate_and_executor_principals(self):
+        receipt, _, _ = self.trusted_receipt()
+        altered = dict(receipt)
+        altered["executor_uid"] = altered["candidate_uid"]
+        core = dict(altered)
+        core.pop("receipt_id")
+        altered["receipt_id"] = hashlib.sha256(ee._canonical(core)).hexdigest()
+        with self.assertRaisesRegex(ValueError, "candidate/executor uid collision"):
+            ee.verify_trusted_receipt(altered)
 
     def test_materialization_reverifies_trusted_receipt_and_root_identity(self):
         receipt, _, _ = self.trusted_receipt()
