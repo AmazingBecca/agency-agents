@@ -12,6 +12,17 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 EXECUTOR = re.compile(r"^[a-z][a-z0-9-]{1,47}$")
 TEST = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
+EXECUTION_KEYS = {
+    "execution_id",
+    "repository",
+    "head",
+    "base",
+    "merge",
+    "executor",
+    "production_mutation",
+    "attempted_paths",
+    "tests",
+}
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -65,6 +76,8 @@ def issue_receipt(manifest: dict, execution: dict) -> dict:
     execution_id = verify_manifest(manifest)
     if not isinstance(execution, dict):
         raise ValueError("execution report must be an object")
+    if set(execution) != EXECUTION_KEYS:
+        raise ValueError("execution report fields must match the exact authority schema")
     for field in ("execution_id", "repository", "head", "base", "merge"):
         if execution.get(field) != manifest.get(field):
             raise ValueError(f"execution {field} does not match manifest")
