@@ -147,9 +147,9 @@ def issue_receipt(manifest: dict, execution: dict, expected_execution_id: str) -
     missing = sorted(set(required) - set(observed))
     if missing:
         raise ValueError(f"missing required tests: {','.join(missing)}")
-    bad = sorted(name for name in required if observed[name] != "PASS")
+    bad = sorted(name for name, status in observed.items() if status != "PASS")
     if bad:
-        raise ValueError(f"required tests not passing: {','.join(bad)}")
+        raise ValueError(f"execution tests not passing: {','.join(bad)}")
 
     execution_core = {
         "schema": "amazingbecca.predator-execution-report.v1",
