@@ -79,6 +79,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         self.candidate = self.root / "candidate"
         self.trusted.mkdir(mode=0o700)
         self.candidate.mkdir(mode=0o700)
+        self.candidate_uid = os.geteuid() + 10000
 
     def tearDown(self):
         self.temp.cleanup()
@@ -94,11 +95,45 @@ class ExecutionExpectationTests(unittest.TestCase):
         xp = self.write(self.candidate / "execution.json", execution(m))
         return m, ep, mp, xp
 
+    def issue(self, ep, mp, xp, candidate_uid=None):
+        return ee.issue_receipt_from_files(
+            ep,
+            mp,
+            xp,
+            self.trusted,
+            self.candidate_uid if candidate_uid is None else candidate_uid,
+        )
+
     def test_exact_trusted_channel_issues_receipt(self):
         m, ep, mp, xp = self.files()
-        receipt = ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+        receipt = self.issue(ep, mp, xp)
         self.assertEqual(receipt["execution_id"], m["execution_id"])
         self.assertEqual(receipt["status"], "PASS")
+
+    def test_same_uid_expectation_authority_is_rejected(self):
+        m, ep, mp, xp = self.files()
+        with self.assertRaisesRegex(ValueError, "authority uid distinct from candidate uid"):
+            self.issue(ep, mp, xp, os.geteuid())
+
+    def test_root_candidate_uid_is_rejected(self):
+        m, ep, mp, xp = self.files()
+        with self.assertRaisesRegex(ValueError, "non-root account"):
+            self.issue(ep, mp, xp, 0)
+
+    def test_expectation_must_be_direct_child_of_bound_root(self):
+        m, ep, mp, xp = self.files()
+        nested = self.trusted / "nested"
+        nested.mkdir(mode=0o700)
+        nested_ep = self.write(nested / "expectation.json", expectation(m))
+        with self.assertRaisesRegex(ValueError, "direct child"):
+            self.issue(nested_ep, mp, xp)
+
+    def test_root_symlink_is_rejected_by_descriptor_open(self):
+        m, ep, mp, xp = self.files()
+        alias = self.root / "trusted-alias"
+        alias.symlink_to(self.trusted, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "root is unavailable"):
+            ee.issue_receipt_from_files(ep, mp, xp, alias, self.candidate_uid)
 
     def test_manifest_substitution_fails_while_expectation_stays_fixed(self):
         m, ep, mp, xp = self.files()
@@ -109,30 +144,30 @@ class ExecutionExpectationTests(unittest.TestCase):
         mp.write_bytes(canonical(forged))
         xp.write_bytes(canonical(execution(forged)))
         with self.assertRaisesRegex(ValueError, "trusted expected execution_id"):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            self.issue(ep, mp, xp)
 
     def test_expectation_must_be_inside_trusted_root(self):
         m, ep, mp, xp = self.files()
         outside = self.write(self.candidate / "expectation.json", expectation(m))
-        with self.assertRaisesRegex(ValueError, "trusted expectation root"):
-            ee.issue_receipt_from_files(outside, mp, xp, self.trusted)
+        with self.assertRaisesRegex(ValueError, "direct child"):
+            self.issue(outside, mp, xp)
 
     def test_candidate_inputs_must_be_outside_trusted_root(self):
         m, ep, mp, xp = self.files()
         inside = self.write(self.trusted / "manifest.json", m)
         with self.assertRaisesRegex(ValueError, "must remain outside"):
-            ee.issue_receipt_from_files(ep, inside, xp, self.trusted)
+            self.issue(ep, inside, xp)
 
     def test_symlink_and_hardlink_expectations_fail_closed(self):
         m, ep, mp, xp = self.files()
         symlink = self.trusted / "alias.json"
         symlink.symlink_to(ep.name)
-        with self.assertRaisesRegex(ValueError, "symlink"):
-            ee.issue_receipt_from_files(symlink, mp, xp, self.trusted)
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            self.issue(symlink, mp, xp)
         hard = self.trusted / "hard.json"
         os.link(ep, hard)
         with self.assertRaisesRegex(ValueError, "exactly one hard link"):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            self.issue(ep, mp, xp)
 
     def test_expectation_identity_pivot_fails_before_receipt(self):
         m, ep, mp, xp = self.files()
@@ -140,7 +175,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         value["head"] = "5" * 40
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "head does not match manifest"):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            self.issue(ep, mp, xp)
 
     def test_noncanonical_and_extra_authority_fields_fail_closed(self):
         m, ep, mp, xp = self.files()
@@ -148,10 +183,10 @@ class ExecutionExpectationTests(unittest.TestCase):
         value["command"] = "deploy"
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "exact channel schema"):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            self.issue(ep, mp, xp)
         ep.write_text(json.dumps(expectation(m), indent=2) + "\n")
         with self.assertRaisesRegex(ValueError, "not canonical JSON"):
-            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+            self.issue(ep, mp, xp)
 
 
 if __name__ == "__main__":
