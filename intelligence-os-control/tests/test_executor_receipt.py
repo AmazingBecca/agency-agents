@@ -220,6 +220,23 @@ class ExecutorReceiptTests(unittest.TestCase):
                 er.materialize_receipt(receipt, hardlink)
             self.assertEqual(hard_source.read_bytes(), b"keep-hard")
 
+    def test_receipt_output_parent_must_be_private_and_authority_owned(self):
+        m = manifest()
+        receipt = er.issue_receipt(m, execution(m), m["execution_id"])
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            root.chmod(0o777)
+            with self.assertRaisesRegex(ValueError, "must not be group/world writable"):
+                er.materialize_receipt(receipt, root / "receipt.json")
+            root.chmod(0o700)
+            with mock.patch.object(er.os, "geteuid", return_value=os.geteuid() + 1):
+                with self.assertRaisesRegex(ValueError, "owned by receipt authority"):
+                    er.materialize_receipt(receipt, root / "receipt.json")
+
+    def test_direct_cli_cannot_self_supply_expected_execution_id(self):
+        with mock.patch.object(er.sys, "stderr"):
+            self.assertEqual(er.main(), 2)
+
     def test_failed_receipt_post_write_verification_removes_created_output(self):
         m = manifest()
         receipt = er.issue_receipt(m, execution(m), m["execution_id"])
