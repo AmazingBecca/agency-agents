@@ -130,6 +130,12 @@ class ExecutionExpectationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ee.issue_receipt_from_files(ep, mp, xp, self.trusted, self.candidate_uid)
 
+    def test_verifier_process_must_run_as_trusted_root_owner(self):
+        m, ep, mp, xp = self.files()
+        with mock.patch.object(ee.os, "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaisesRegex(ValueError, "verifier must run as trusted root owner"):
+                ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+
     def test_same_uid_expectation_authority_is_rejected(self):
         m, ep, mp, xp = self.files(candidate_uid=os.geteuid())
         with self.assertRaisesRegex(ValueError, "authority uid distinct from candidate uid"):
@@ -199,6 +205,21 @@ class ExecutionExpectationTests(unittest.TestCase):
         inside = self.write(self.trusted / "manifest.json", m)
         with self.assertRaisesRegex(ValueError, "must remain outside"):
             self.issue(ep, inside, xp)
+
+    def test_receipt_output_must_remain_under_trusted_root(self):
+        m, ep, mp, xp = self.files()
+        receipt = self.issue(ep, mp, xp)
+        trusted_output = self.trusted / "receipt.json"
+        self.assertEqual(
+            ee.materialize_trusted_receipt(receipt, trusted_output, self.trusted),
+            receipt["receipt_id"],
+        )
+        self.assertEqual(trusted_output.read_bytes(), er.canonical_bytes(receipt))
+
+        outside_output = self.candidate / "receipt.json"
+        with self.assertRaisesRegex(ValueError, "direct child"):
+            ee.materialize_trusted_receipt(receipt, outside_output, self.trusted)
+        self.assertFalse(outside_output.exists())
 
     def test_symlink_and_hardlink_expectations_fail_closed(self):
         m, ep, mp, xp = self.files()
