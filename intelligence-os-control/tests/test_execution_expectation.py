@@ -57,9 +57,9 @@ def execution(m):
     }
 
 
-def expectation(m):
+def expectation(m, candidate_uid):
     return {
-        "schema": "amazingbecca.predator-execution-expectation.v1",
+        "schema": "amazingbecca.predator-execution-expectation.v2",
         "source": "predator-compiler-control",
         "compiler_repository": "AmazingBecca/agency-agents",
         "compiler_head": CONTROL_HEAD,
@@ -68,6 +68,7 @@ def expectation(m):
         "base": m["base"],
         "merge": m["merge"],
         "execution_id": m["execution_id"],
+        "candidate_uid": candidate_uid,
     }
 
 
@@ -88,21 +89,16 @@ class ExecutionExpectationTests(unittest.TestCase):
         path.write_bytes(canonical(value))
         return path
 
-    def files(self):
+    def files(self, candidate_uid=None):
         m = manifest()
-        ep = self.write(self.trusted / "expectation.json", expectation(m))
+        uid = self.candidate_uid if candidate_uid is None else candidate_uid
+        ep = self.write(self.trusted / "expectation.json", expectation(m, uid))
         mp = self.write(self.candidate / "manifest.json", m)
         xp = self.write(self.candidate / "execution.json", execution(m))
         return m, ep, mp, xp
 
-    def issue(self, ep, mp, xp, candidate_uid=None):
-        return ee.issue_receipt_from_files(
-            ep,
-            mp,
-            xp,
-            self.trusted,
-            self.candidate_uid if candidate_uid is None else candidate_uid,
-        )
+    def issue(self, ep, mp, xp):
+        return ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
 
     def test_exact_trusted_channel_issues_receipt(self):
         m, ep, mp, xp = self.files()
@@ -110,21 +106,26 @@ class ExecutionExpectationTests(unittest.TestCase):
         self.assertEqual(receipt["execution_id"], m["execution_id"])
         self.assertEqual(receipt["status"], "PASS")
 
-    def test_same_uid_expectation_authority_is_rejected(self):
+    def test_candidate_uid_is_trusted_expectation_data_not_cli_input(self):
         m, ep, mp, xp = self.files()
+        with self.assertRaises(TypeError):
+            ee.issue_receipt_from_files(ep, mp, xp, self.trusted, self.candidate_uid)
+
+    def test_same_uid_expectation_authority_is_rejected(self):
+        m, ep, mp, xp = self.files(candidate_uid=os.geteuid())
         with self.assertRaisesRegex(ValueError, "authority uid distinct from candidate uid"):
-            self.issue(ep, mp, xp, os.geteuid())
+            self.issue(ep, mp, xp)
 
     def test_root_candidate_uid_is_rejected(self):
-        m, ep, mp, xp = self.files()
+        m, ep, mp, xp = self.files(candidate_uid=0)
         with self.assertRaisesRegex(ValueError, "non-root account"):
-            self.issue(ep, mp, xp, 0)
+            self.issue(ep, mp, xp)
 
     def test_expectation_must_be_direct_child_of_bound_root(self):
         m, ep, mp, xp = self.files()
         nested = self.trusted / "nested"
         nested.mkdir(mode=0o700)
-        nested_ep = self.write(nested / "expectation.json", expectation(m))
+        nested_ep = self.write(nested / "expectation.json", expectation(m, self.candidate_uid))
         with self.assertRaisesRegex(ValueError, "direct child"):
             self.issue(nested_ep, mp, xp)
 
@@ -133,7 +134,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         alias = self.root / "trusted-alias"
         alias.symlink_to(self.trusted, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "root is unavailable"):
-            ee.issue_receipt_from_files(ep, mp, xp, alias, self.candidate_uid)
+            ee.issue_receipt_from_files(ep, mp, xp, alias)
 
     def test_manifest_substitution_fails_while_expectation_stays_fixed(self):
         m, ep, mp, xp = self.files()
@@ -148,7 +149,7 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_expectation_must_be_inside_trusted_root(self):
         m, ep, mp, xp = self.files()
-        outside = self.write(self.candidate / "expectation.json", expectation(m))
+        outside = self.write(self.candidate / "expectation.json", expectation(m, self.candidate_uid))
         with self.assertRaisesRegex(ValueError, "direct child"):
             self.issue(outside, mp, xp)
 
@@ -171,7 +172,7 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_expectation_identity_pivot_fails_before_receipt(self):
         m, ep, mp, xp = self.files()
-        value = expectation(m)
+        value = expectation(m, self.candidate_uid)
         value["head"] = "5" * 40
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "head does not match manifest"):
@@ -179,12 +180,12 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_noncanonical_and_extra_authority_fields_fail_closed(self):
         m, ep, mp, xp = self.files()
-        value = expectation(m)
+        value = expectation(m, self.candidate_uid)
         value["command"] = "deploy"
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "exact channel schema"):
             self.issue(ep, mp, xp)
-        ep.write_text(json.dumps(expectation(m), indent=2) + "\n")
+        ep.write_text(json.dumps(expectation(m, self.candidate_uid), indent=2) + "\n")
         with self.assertRaisesRegex(ValueError, "not canonical JSON"):
             self.issue(ep, mp, xp)
 
