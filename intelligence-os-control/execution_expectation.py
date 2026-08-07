@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -18,6 +19,12 @@ TRUSTED_COMPILER_REPOSITORY = "AmazingBecca/agency-agents"
 EXPECTATION_KEYS = {
     "schema", "source", "compiler_repository", "compiler_head",
     "repository", "head", "base", "merge", "execution_id", "candidate_uid",
+}
+TRUSTED_RECEIPT_KEYS = {
+    "schema", "execution_id", "manifest_sha256", "execution_report_sha256",
+    "repository", "head", "base", "merge", "executor", "status",
+    "compiler_repository", "compiler_head", "expectation_sha256",
+    "verifier_receipt_sha256", "receipt_id",
 }
 
 
@@ -172,6 +179,62 @@ def _validate_expectation(expectation: object, root_uid: int, expected_compiler_
     return expectation
 
 
+def _finalize_trusted_receipt(base_receipt: dict, expectation: dict, expectation_sha256: str) -> dict:
+    if not isinstance(expectation_sha256, str) or not SHA64.fullmatch(expectation_sha256):
+        raise ValueError("invalid trusted expectation digest")
+    verifier_receipt_sha256 = hashlib.sha256(er.canonical_bytes(base_receipt)).hexdigest()
+    core = {
+        "schema": "amazingbecca.predator-executor-receipt.v2",
+        "execution_id": base_receipt["execution_id"],
+        "manifest_sha256": base_receipt["manifest_sha256"],
+        "execution_report_sha256": base_receipt["execution_report_sha256"],
+        "repository": base_receipt["repository"],
+        "head": base_receipt["head"],
+        "base": base_receipt["base"],
+        "merge": base_receipt["merge"],
+        "executor": base_receipt["executor"],
+        "status": base_receipt["status"],
+        "compiler_repository": expectation["compiler_repository"],
+        "compiler_head": expectation["compiler_head"],
+        "expectation_sha256": expectation_sha256,
+        "verifier_receipt_sha256": verifier_receipt_sha256,
+    }
+    return {**core, "receipt_id": hashlib.sha256(_canonical(core)).hexdigest()}
+
+
+def verify_trusted_receipt(receipt: object) -> str:
+    if not isinstance(receipt, dict) or set(receipt) != TRUSTED_RECEIPT_KEYS:
+        raise ValueError("trusted executor receipt fields must match the exact authority schema")
+    if receipt.get("schema") != "amazingbecca.predator-executor-receipt.v2":
+        raise ValueError("unsupported trusted executor receipt schema")
+    if receipt.get("status") != "PASS":
+        raise ValueError("trusted executor receipt is not PASS")
+    if receipt.get("compiler_repository") != TRUSTED_COMPILER_REPOSITORY:
+        raise ValueError("trusted executor receipt compiler repository mismatch")
+    if not isinstance(receipt.get("compiler_head"), str) or not SHA40.fullmatch(receipt["compiler_head"]):
+        raise ValueError("invalid trusted executor receipt compiler_head")
+    repository = receipt.get("repository")
+    if not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
+        raise ValueError("invalid trusted executor receipt repository")
+    for field in ("head", "base", "merge"):
+        if not isinstance(receipt.get(field), str) or not SHA40.fullmatch(receipt[field]):
+            raise ValueError(f"invalid trusted executor receipt {field}")
+    for field in (
+        "execution_id", "manifest_sha256", "execution_report_sha256",
+        "expectation_sha256", "verifier_receipt_sha256", "receipt_id",
+    ):
+        if not isinstance(receipt.get(field), str) or not SHA64.fullmatch(receipt[field]):
+            raise ValueError(f"invalid trusted executor receipt {field}")
+    executor = receipt.get("executor")
+    if not isinstance(executor, str) or not er.EXECUTOR.fullmatch(executor):
+        raise ValueError("invalid trusted executor receipt executor")
+    core = dict(receipt)
+    receipt_id = core.pop("receipt_id")
+    if hashlib.sha256(_canonical(core)).hexdigest() != receipt_id:
+        raise ValueError("trusted executor receipt digest mismatch")
+    return receipt_id
+
+
 def load_expectation(
     expectation_path: pathlib.Path,
     manifest_path: pathlib.Path,
@@ -213,6 +276,7 @@ def load_expectation(
 
         return {
             "expectation": expectation,
+            "expectation_sha256": hashlib.sha256(expectation_raw).hexdigest(),
             "manifest": _load_canonical_bytes(manifest_raw, "manifest"),
             "execution": _load_canonical_bytes(execution_raw, "execution report"),
         }
@@ -238,7 +302,12 @@ def issue_receipt_from_files(
     for field in ("repository", "head", "base", "merge"):
         if expectation[field] != manifest.get(field):
             raise ValueError(f"trusted expectation {field} does not match manifest")
-    return er.issue_receipt(manifest, execution, expectation["execution_id"])
+    base_receipt = er.issue_receipt(manifest, execution, expectation["execution_id"])
+    return _finalize_trusted_receipt(
+        base_receipt,
+        expectation,
+        bound["expectation_sha256"],
+    )
 
 
 def materialize_trusted_receipt(
@@ -246,6 +315,7 @@ def materialize_trusted_receipt(
     output: pathlib.Path,
     trusted_root: pathlib.Path,
 ) -> str:
+    verify_trusted_receipt(receipt)
     _direct_child_leaf(output, trusted_root, "executor receipt output")
     return er.materialize_receipt(receipt, output)
 
