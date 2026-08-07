@@ -140,5 +140,75 @@ def _read_regular(path: pathlib.Path, label: str) -> tuple[bytes, os.stat_result
         os.close(fd)
 
 
+def verify_trusted_receipt_from_root(
+    receipt_path: pathlib.Path,
+    expectation_path: pathlib.Path,
+    trusted_root: pathlib.Path,
+    expected_compiler_head: str,
+) -> str:
+    """Verify a materialized receipt against the authority-owned expectation channel.
+
+    ``verify_trusted_receipt`` validates receipt structure and its self-digest. This
+    verifier additionally requires both the receipt and expectation to be direct,
+    authority-owned children of the trusted root, binds the receipt to the exact
+    expectation bytes, and rechecks every authority field carried by the receipt.
+    """
+    expected_compiler_head = _require_expected_compiler_head(expected_compiler_head)
+    root_fd, root_info, _ = _open_trusted_root(trusted_root)
+    try:
+        expectation_leaf = _expectation_leaf(expectation_path, trusted_root)
+        receipt_leaf = _direct_child_leaf(receipt_path, trusted_root, "trusted executor receipt")
+        if receipt_leaf == expectation_leaf:
+            raise ValueError("trusted expectation and executor receipt must be distinct files")
+
+        expectation_raw, expectation_info = _read_regular_at(
+            root_fd,
+            expectation_leaf,
+            "trusted expectation",
+            root_info.st_uid,
+        )
+        receipt_raw, receipt_info = _read_regular_at(
+            root_fd,
+            receipt_leaf,
+            "trusted executor receipt",
+            root_info.st_uid,
+        )
+        if stat.S_IMODE(receipt_info.st_mode) != 0o600:
+            raise ValueError("trusted executor receipt must have mode 0600")
+        if (expectation_info.st_dev, expectation_info.st_ino) == (receipt_info.st_dev, receipt_info.st_ino):
+            raise ValueError("trusted expectation and executor receipt must be distinct file objects")
+
+        expectation = _validate_expectation(
+            _load_canonical_bytes(expectation_raw, "trusted expectation"),
+            root_info.st_uid,
+            expected_compiler_head,
+        )
+        receipt = _load_canonical_bytes(receipt_raw, "trusted executor receipt")
+        receipt_id = verify_trusted_receipt(receipt)
+
+        expected_expectation_sha256 = hashlib.sha256(expectation_raw).hexdigest()
+        if receipt.get("expectation_sha256") != expected_expectation_sha256:
+            raise ValueError("trusted executor receipt expectation digest mismatch")
+
+        bindings = {
+            "compiler_repository": expectation["compiler_repository"],
+            "compiler_head": expectation["compiler_head"],
+            "repository": expectation["repository"],
+            "head": expectation["head"],
+            "base": expectation["base"],
+            "merge": expectation["merge"],
+            "execution_id": expectation["execution_id"],
+            "candidate_uid": expectation["candidate_uid"],
+            "executor_uid": expectation["executor_uid"],
+            "executor": expectation["executor"],
+        }
+        for field, expected in bindings.items():
+            if receipt.get(field) != expected:
+                raise ValueError(f"trusted executor receipt {field} does not match trusted expectation")
+        return receipt_id
+    finally:
+        os.close(root_fd)
+
+
 if _ENTRYPOINT_NAME == "__main__":
     raise SystemExit(main())
