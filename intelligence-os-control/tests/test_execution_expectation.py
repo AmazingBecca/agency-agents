@@ -59,9 +59,9 @@ def execution(m):
     }
 
 
-def expectation(m, candidate_uid):
+def expectation(m, candidate_uid, executor_uid, executor_name="predator-private-executor"):
     return {
-        "schema": "amazingbecca.predator-execution-expectation.v2",
+        "schema": "amazingbecca.predator-execution-expectation.v3",
         "source": "predator-compiler-control",
         "compiler_repository": "AmazingBecca/agency-agents",
         "compiler_head": CONTROL_HEAD,
@@ -71,6 +71,8 @@ def expectation(m, candidate_uid):
         "merge": m["merge"],
         "execution_id": m["execution_id"],
         "candidate_uid": candidate_uid,
+        "executor_uid": executor_uid,
+        "executor": executor_name,
     }
 
 
@@ -83,6 +85,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         self.trusted.mkdir(mode=0o700)
         self.candidate.mkdir(mode=0o700)
         self.candidate_uid = os.geteuid() + 10000
+        self.executor_uid = os.geteuid() + 20000
 
     def tearDown(self):
         self.temp.cleanup()
@@ -91,17 +94,18 @@ class ExecutionExpectationTests(unittest.TestCase):
         path.write_bytes(canonical(value))
         return path
 
-    def files(self, candidate_uid=None):
+    def files(self, candidate_uid=None, executor_uid=None, executor_name="predator-private-executor"):
         m = manifest()
         uid = self.candidate_uid if candidate_uid is None else candidate_uid
-        ep = self.write(self.trusted / "expectation.json", expectation(m, uid))
+        xuid = self.executor_uid if executor_uid is None else executor_uid
+        ep = self.write(self.trusted / "expectation.json", expectation(m, uid, xuid, executor_name))
         mp = self.write(self.candidate / "manifest.json", m)
         xp = self.write(self.candidate / "execution.json", execution(m))
         return m, ep, mp, xp
 
     def _patched_candidate_reads(self, manifest_uid=None, execution_uid=None):
         manifest_uid = self.candidate_uid if manifest_uid is None else manifest_uid
-        execution_uid = self.candidate_uid if execution_uid is None else execution_uid
+        execution_uid = self.executor_uid if execution_uid is None else execution_uid
         original = ee._read_regular
 
         def observed_read(path, label):
@@ -168,13 +172,13 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_compiler_identity_is_bound_outside_expectation(self):
         m, ep, mp, xp = self.files()
-        value = expectation(m, self.candidate_uid)
+        value = expectation(m, self.candidate_uid, self.executor_uid)
         value["compiler_repository"] = "Mallory/control"
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "compiler repository"):
             self.issue(ep, mp, xp)
 
-        value = expectation(m, self.candidate_uid)
+        value = expectation(m, self.candidate_uid, self.executor_uid)
         value["compiler_head"] = "5" * 40
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "compiler head"):
@@ -196,19 +200,54 @@ class ExecutionExpectationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-root account"):
             self.issue(ep, mp, xp)
 
+    def test_executor_uid_must_be_non_root_and_distinct(self):
+        m, ep, mp, xp = self.files(executor_uid=0)
+        with self.assertRaisesRegex(ValueError, "executor_uid must identify a non-root account"):
+            self.issue(ep, mp, xp)
+
+        m, ep, mp, xp = self.files(executor_uid=os.geteuid())
+        with self.assertRaisesRegex(ValueError, "authority uid distinct from executor uid"):
+            self.issue(ep, mp, xp)
+
+        m, ep, mp, xp = self.files(executor_uid=self.candidate_uid)
+        with self.assertRaisesRegex(ValueError, "executor uid must be distinct from candidate uid"):
+            self.issue(ep, mp, xp)
+
+    def test_candidate_owned_execution_report_is_rejected(self):
+        m, ep, mp, xp = self.files()
+        with self.assertRaisesRegex(ValueError, "execution report owner does not match trusted executor uid"):
+            self.issue(ep, mp, xp, execution_uid=self.candidate_uid)
+
+    def test_executor_identity_is_bound_by_trusted_expectation(self):
+        m, ep, mp, xp = self.files()
+        value = execution(m)
+        value["executor"] = "mallory-executor"
+        xp.write_bytes(canonical(value))
+        with self.assertRaisesRegex(ValueError, "trusted expectation executor does not match execution report"):
+            self.issue(ep, mp, xp)
+
+    def test_trusted_receipt_carries_distinct_uid_provenance(self):
+        m, ep, mp, xp = self.files()
+        receipt = self.issue(ep, mp, xp)
+        self.assertEqual(receipt["schema"], "amazingbecca.predator-executor-receipt.v3")
+        self.assertEqual(receipt["candidate_uid"], self.candidate_uid)
+        self.assertEqual(receipt["executor_uid"], self.executor_uid)
+        self.assertNotEqual(receipt["candidate_uid"], receipt["executor_uid"])
+        self.assertEqual(ee.verify_trusted_receipt(receipt), receipt["receipt_id"])
+
     def test_real_same_uid_candidate_files_cannot_satisfy_claimed_uid(self):
         m, ep, mp, xp = self.files()
         with self.assertRaisesRegex(ValueError, "owner does not match trusted candidate uid"):
             ee.issue_receipt_from_files(ep, mp, xp, self.trusted, CONTROL_HEAD)
 
-    def test_manifest_and_execution_owners_must_match_trusted_candidate_uid(self):
+    def test_manifest_and_execution_owners_must_match_distinct_trusted_uids(self):
         m, ep, mp, xp = self.files()
         with self.subTest(input="manifest"), self.assertRaisesRegex(
             ValueError, "owner does not match trusted candidate uid"
         ):
             self.issue(ep, mp, xp, manifest_uid=os.geteuid())
         with self.subTest(input="execution"), self.assertRaisesRegex(
-            ValueError, "owner does not match trusted candidate uid"
+            ValueError, "execution report owner does not match trusted executor uid"
         ):
             self.issue(ep, mp, xp, execution_uid=os.geteuid())
 
@@ -222,7 +261,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         m, ep, mp, xp = self.files()
         nested = self.trusted / "nested"
         nested.mkdir(mode=0o700)
-        nested_ep = self.write(nested / "expectation.json", expectation(m, self.candidate_uid))
+        nested_ep = self.write(nested / "expectation.json", expectation(m, self.candidate_uid, self.executor_uid))
         with self.assertRaisesRegex(ValueError, "direct child"):
             self.issue(nested_ep, mp, xp)
 
@@ -246,7 +285,7 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_expectation_must_be_inside_trusted_root(self):
         m, ep, mp, xp = self.files()
-        outside = self.write(self.candidate / "expectation.json", expectation(m, self.candidate_uid))
+        outside = self.write(self.candidate / "expectation.json", expectation(m, self.candidate_uid, self.executor_uid))
         with self.assertRaisesRegex(ValueError, "direct child"):
             self.issue(outside, mp, xp)
 
@@ -306,7 +345,7 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_expectation_identity_pivot_fails_before_receipt(self):
         m, ep, mp, xp = self.files()
-        value = expectation(m, self.candidate_uid)
+        value = expectation(m, self.candidate_uid, self.executor_uid)
         value["head"] = "5" * 40
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "head does not match manifest"):
@@ -314,12 +353,12 @@ class ExecutionExpectationTests(unittest.TestCase):
 
     def test_noncanonical_and_extra_authority_fields_fail_closed(self):
         m, ep, mp, xp = self.files()
-        value = expectation(m, self.candidate_uid)
+        value = expectation(m, self.candidate_uid, self.executor_uid)
         value["command"] = "deploy"
         ep.write_bytes(canonical(value))
         with self.assertRaisesRegex(ValueError, "exact channel schema"):
             self.issue(ep, mp, xp)
-        ep.write_text(json.dumps(expectation(m, self.candidate_uid), indent=2) + "\n")
+        ep.write_text(json.dumps(expectation(m, self.candidate_uid, self.executor_uid), indent=2) + "\n")
         with self.assertRaisesRegex(ValueError, "not canonical JSON"):
             self.issue(ep, mp, xp)
 

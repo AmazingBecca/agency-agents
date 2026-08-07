@@ -19,12 +19,13 @@ TRUSTED_COMPILER_REPOSITORY = "AmazingBecca/agency-agents"
 EXPECTATION_KEYS = {
     "schema", "source", "compiler_repository", "compiler_head",
     "repository", "head", "base", "merge", "execution_id", "candidate_uid",
+    "executor_uid", "executor",
 }
 TRUSTED_RECEIPT_KEYS = {
     "schema", "execution_id", "manifest_sha256", "execution_report_sha256",
     "repository", "head", "base", "merge", "executor", "status",
     "compiler_repository", "compiler_head", "expectation_sha256",
-    "verifier_receipt_sha256", "receipt_id",
+    "verifier_receipt_sha256", "candidate_uid", "executor_uid", "receipt_id",
 }
 
 
@@ -162,7 +163,7 @@ def _validate_expectation(expectation: object, root_uid: int, expected_compiler_
     expected_compiler_head = _require_expected_compiler_head(expected_compiler_head)
     if not isinstance(expectation, dict) or set(expectation) != EXPECTATION_KEYS:
         raise ValueError("trusted expectation fields must match the exact channel schema")
-    if expectation.get("schema") != "amazingbecca.predator-execution-expectation.v2":
+    if expectation.get("schema") != "amazingbecca.predator-execution-expectation.v3":
         raise ValueError("unsupported trusted expectation schema")
     if expectation.get("source") != "predator-compiler-control":
         raise ValueError("unexpected trusted expectation source")
@@ -186,6 +187,16 @@ def _validate_expectation(expectation: object, root_uid: int, expected_compiler_
         raise ValueError("trusted expectation candidate_uid must identify a non-root account")
     if candidate_uid == root_uid:
         raise ValueError("trusted expectation root must be owned by an authority uid distinct from candidate uid")
+    executor_uid = expectation.get("executor_uid")
+    if isinstance(executor_uid, bool) or not isinstance(executor_uid, int) or executor_uid <= 0 or executor_uid > 0xFFFFFFFF:
+        raise ValueError("trusted expectation executor_uid must identify a non-root account")
+    if executor_uid == root_uid:
+        raise ValueError("trusted expectation root must be owned by an authority uid distinct from executor uid")
+    if executor_uid == candidate_uid:
+        raise ValueError("trusted executor uid must be distinct from candidate uid")
+    executor = expectation.get("executor")
+    if not isinstance(executor, str) or not er.EXECUTOR.fullmatch(executor):
+        raise ValueError("invalid trusted expectation executor")
     return expectation
 
 
@@ -194,7 +205,7 @@ def _finalize_trusted_receipt(base_receipt: dict, expectation: dict, expectation
         raise ValueError("invalid trusted expectation digest")
     verifier_receipt_sha256 = hashlib.sha256(er.canonical_bytes(base_receipt)).hexdigest()
     core = {
-        "schema": "amazingbecca.predator-executor-receipt.v2",
+        "schema": "amazingbecca.predator-executor-receipt.v3",
         "execution_id": base_receipt["execution_id"],
         "manifest_sha256": base_receipt["manifest_sha256"],
         "execution_report_sha256": base_receipt["execution_report_sha256"],
@@ -208,6 +219,8 @@ def _finalize_trusted_receipt(base_receipt: dict, expectation: dict, expectation
         "compiler_head": expectation["compiler_head"],
         "expectation_sha256": expectation_sha256,
         "verifier_receipt_sha256": verifier_receipt_sha256,
+        "candidate_uid": expectation["candidate_uid"],
+        "executor_uid": expectation["executor_uid"],
     }
     return {**core, "receipt_id": hashlib.sha256(_canonical(core)).hexdigest()}
 
@@ -215,7 +228,7 @@ def _finalize_trusted_receipt(base_receipt: dict, expectation: dict, expectation
 def verify_trusted_receipt(receipt: object) -> str:
     if not isinstance(receipt, dict) or set(receipt) != TRUSTED_RECEIPT_KEYS:
         raise ValueError("trusted executor receipt fields must match the exact authority schema")
-    if receipt.get("schema") != "amazingbecca.predator-executor-receipt.v2":
+    if receipt.get("schema") != "amazingbecca.predator-executor-receipt.v3":
         raise ValueError("unsupported trusted executor receipt schema")
     if receipt.get("status") != "PASS":
         raise ValueError("trusted executor receipt is not PASS")
@@ -238,6 +251,13 @@ def verify_trusted_receipt(receipt: object) -> str:
     executor = receipt.get("executor")
     if not isinstance(executor, str) or not er.EXECUTOR.fullmatch(executor):
         raise ValueError("invalid trusted executor receipt executor")
+    candidate_uid = receipt.get("candidate_uid")
+    executor_uid = receipt.get("executor_uid")
+    for label, uid in (("candidate_uid", candidate_uid), ("executor_uid", executor_uid)):
+        if isinstance(uid, bool) or not isinstance(uid, int) or uid <= 0 or uid > 0xFFFFFFFF:
+            raise ValueError(f"invalid trusted executor receipt {label}")
+    if candidate_uid == executor_uid:
+        raise ValueError("trusted executor receipt candidate/executor uid collision")
     core = dict(receipt)
     receipt_id = core.pop("receipt_id")
     if hashlib.sha256(_canonical(core)).hexdigest() != receipt_id:
@@ -268,8 +288,11 @@ def load_expectation(
         execution_raw, execution_info, execution_resolved = _read_regular(execution_path, "execution report")
 
         candidate_uid = expectation["candidate_uid"]
-        if manifest_info.st_uid != candidate_uid or execution_info.st_uid != candidate_uid:
-            raise ValueError("candidate manifest/execution owner does not match trusted candidate uid")
+        executor_uid = expectation["executor_uid"]
+        if manifest_info.st_uid != candidate_uid:
+            raise ValueError("candidate manifest owner does not match trusted candidate uid")
+        if execution_info.st_uid != executor_uid:
+            raise ValueError("execution report owner does not match trusted executor uid")
         if manifest_info.st_mode & 0o022 or execution_info.st_mode & 0o022:
             raise ValueError("candidate manifest/execution inputs must not be group/world writable")
 
@@ -313,6 +336,8 @@ def issue_bound_receipt_from_files(
     for field in ("repository", "head", "base", "merge"):
         if expectation[field] != manifest.get(field):
             raise ValueError(f"trusted expectation {field} does not match manifest")
+    if execution.get("executor") != expectation["executor"]:
+        raise ValueError("trusted expectation executor does not match execution report")
     base_receipt = er.issue_receipt(manifest, execution, expectation["execution_id"])
     receipt = _finalize_trusted_receipt(
         base_receipt,
