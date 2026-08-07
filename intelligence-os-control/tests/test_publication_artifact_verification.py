@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -166,7 +167,12 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
         )
         for members in attacks:
             with self.subTest(member_count=len(members)):
-                attacked_raw = zip_bytes(members)
+                # Duplicate filenames are intentionally malformed attack material.
+                # Keep global warnings-as-errors intact and suppress only the
+                # constructor warning needed to materialize this hostile ZIP.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    attacked_raw = zip_bytes(members)
                 with self.assertRaisesRegex(
                     artifact_verifier.ArtifactVerificationError,
                     "artifact member inventory is not exact",
