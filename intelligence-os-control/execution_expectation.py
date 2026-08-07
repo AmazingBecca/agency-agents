@@ -170,6 +170,12 @@ def load_expectation(
         manifest_raw, manifest_info, manifest_resolved = _read_regular(manifest_path, "manifest")
         execution_raw, execution_info, execution_resolved = _read_regular(execution_path, "execution report")
 
+        candidate_uid = expectation["candidate_uid"]
+        if manifest_info.st_uid != candidate_uid or execution_info.st_uid != candidate_uid:
+            raise ValueError("candidate manifest/execution owner does not match trusted candidate uid")
+        if manifest_info.st_mode & 0o022 or execution_info.st_mode & 0o022:
+            raise ValueError("candidate manifest/execution inputs must not be group/world writable")
+
         if _inside(manifest_resolved, root_resolved) or _inside(execution_resolved, root_resolved):
             raise ValueError("candidate manifest/execution inputs must remain outside the trusted expectation root")
 
