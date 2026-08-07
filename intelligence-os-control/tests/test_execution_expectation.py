@@ -99,7 +99,7 @@ class ExecutionExpectationTests(unittest.TestCase):
         xp = self.write(self.candidate / "execution.json", execution(m))
         return m, ep, mp, xp
 
-    def issue(self, ep, mp, xp, manifest_uid=None, execution_uid=None, expected_compiler_head=CONTROL_HEAD):
+    def _patched_candidate_reads(self, manifest_uid=None, execution_uid=None):
         manifest_uid = self.candidate_uid if manifest_uid is None else manifest_uid
         execution_uid = self.candidate_uid if execution_uid is None else execution_uid
         original = ee._read_regular
@@ -116,8 +116,21 @@ class ExecutionExpectationTests(unittest.TestCase):
             )
             return raw, observed, resolved
 
-        with mock.patch.object(ee, "_read_regular", side_effect=observed_read):
+        return mock.patch.object(ee, "_read_regular", side_effect=observed_read)
+
+    def issue(self, ep, mp, xp, manifest_uid=None, execution_uid=None, expected_compiler_head=CONTROL_HEAD):
+        with self._patched_candidate_reads(manifest_uid, execution_uid):
             return ee.issue_receipt_from_files(
+                ep,
+                mp,
+                xp,
+                self.trusted,
+                expected_compiler_head,
+            )
+
+    def issue_bound(self, ep, mp, xp, manifest_uid=None, execution_uid=None, expected_compiler_head=CONTROL_HEAD):
+        with self._patched_candidate_reads(manifest_uid, execution_uid):
+            return ee.issue_bound_receipt_from_files(
                 ep,
                 mp,
                 xp,
@@ -243,20 +256,42 @@ class ExecutionExpectationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must remain outside"):
             self.issue(ep, inside, xp)
 
-    def test_receipt_output_must_remain_under_trusted_root(self):
+    def test_receipt_output_must_remain_under_same_trusted_root_object(self):
         m, ep, mp, xp = self.files()
-        receipt = self.issue(ep, mp, xp)
+        receipt, root_identity = self.issue_bound(ep, mp, xp)
         trusted_output = self.trusted / "receipt.json"
         self.assertEqual(
-            ee.materialize_trusted_receipt(receipt, trusted_output, self.trusted),
+            ee.materialize_trusted_receipt(receipt, trusted_output, self.trusted, root_identity),
             receipt["receipt_id"],
         )
         self.assertEqual(trusted_output.read_bytes(), er.canonical_bytes(receipt))
 
         outside_output = self.candidate / "receipt.json"
         with self.assertRaisesRegex(ValueError, "direct child"):
-            ee.materialize_trusted_receipt(receipt, outside_output, self.trusted)
+            ee.materialize_trusted_receipt(receipt, outside_output, self.trusted, root_identity)
         self.assertFalse(outside_output.exists())
+
+    def test_trusted_root_path_substitution_fails_before_publication(self):
+        m, ep, mp, xp = self.files()
+        receipt, root_identity = self.issue_bound(ep, mp, xp)
+        original = self.root / "trusted-original"
+        self.trusted.rename(original)
+        self.trusted.mkdir(mode=0o700)
+        output = self.trusted / "receipt.json"
+
+        with self.assertRaisesRegex(ValueError, "root identity changed"):
+            ee.materialize_trusted_receipt(receipt, output, self.trusted, root_identity)
+        self.assertFalse(output.exists())
+        self.assertFalse((original / "receipt.json").exists())
+
+    def test_root_identity_argument_must_be_exact_pair(self):
+        m, ep, mp, xp = self.files()
+        receipt, root_identity = self.issue_bound(ep, mp, xp)
+        output = self.trusted / "receipt.json"
+        for invalid in (None, [1, 2], (1,), (1, 2, 3), (True, 2), (-1, 2)):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "device/inode pair"):
+                ee.materialize_trusted_receipt(receipt, output, self.trusted, invalid)
+        self.assertFalse(output.exists())
 
     def test_symlink_and_hardlink_expectations_fail_closed(self):
         m, ep, mp, xp = self.files()
