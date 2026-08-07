@@ -149,7 +149,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         receipt = issue_receipt_from_files(args.expectation, args.manifest, args.execution, args.trusted_expectation_root)
-        args.output.write_bytes(_canonical(receipt))
+        er.materialize_receipt(receipt, args.output)
     except Exception as exc:
         print(f"executor expectation channel rejected input: {exc}", file=sys.stderr)
         return 2
