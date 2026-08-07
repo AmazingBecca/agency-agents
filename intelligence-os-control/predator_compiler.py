@@ -9,6 +9,7 @@ import re
 import sys
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+TEST = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
 ALLOWED_STATES = {"READY", "BLOCKED", "RECOMPILE", "ESCALATE"}
 
 
@@ -20,6 +21,26 @@ def require_sha(name: str, value: object) -> str:
     if not isinstance(value, str) or not SHA40.fullmatch(value):
         raise ValueError(f"{name} must be a lowercase 40-character Git SHA")
     return value
+
+
+def require_repo_path(name: str, value: object) -> str:
+    if not isinstance(value, str) or not value or value.startswith(("/", "~")):
+        raise ValueError(f"{name} must be repository-relative")
+    if "\\" in value or value.endswith("/"):
+        raise ValueError(f"{name} must use normalized POSIX form")
+    normalized = str(pathlib.PurePosixPath(value))
+    parts = pathlib.PurePosixPath(value).parts
+    if normalized != value or not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"{name} must be normalized")
+    return value
+
+
+def path_ranges_overlap(left: str, right: str) -> bool:
+    return (
+        left == right
+        or left.startswith(right + "/")
+        or right.startswith(left + "/")
+    )
 
 
 def compile_manifest(state: dict, mentors: list[dict], policy: dict) -> dict:
@@ -43,11 +64,17 @@ def compile_manifest(state: dict, mentors: list[dict], policy: dict) -> dict:
     if production_mutation is not False:
         raise ValueError("production mutation is not compiler-authorized")
 
+    raw_forbidden_paths = policy.get("forbidden_paths", [])
+    if not isinstance(raw_forbidden_paths, list):
+        raise ValueError("invalid forbidden_paths policy")
+    forbidden_paths = {
+        require_repo_path("forbidden path", value) for value in raw_forbidden_paths
+    }
+
     mentor_names: list[str] = []
     blockers: list[str] = []
     required_tests: set[str] = set()
     allowed_paths: set[str] = set()
-    forbidden_paths = set(policy.get("forbidden_paths", []))
 
     if not mentors:
         raise ValueError("at least one mentor report is required")
@@ -65,27 +92,33 @@ def compile_manifest(state: dict, mentors: list[dict], policy: dict) -> dict:
         recommendation = report.get("recommendation")
         if recommendation not in ALLOWED_STATES:
             raise ValueError("invalid mentor recommendation")
-        if recommendation in {"BLOCKED", "ESCALATE"}:
+        if recommendation != "READY":
             reason = report.get("reason")
             if not isinstance(reason, str) or not reason.strip():
-                raise ValueError("blocking mentor report requires reason")
+                raise ValueError("non-ready mentor report requires reason")
             blockers.append(f"{name}:{reason.strip()}")
         tests = report.get("required_tests", [])
         paths = report.get("allowed_paths", [])
-        if not isinstance(tests, list) or not all(isinstance(x, str) and x for x in tests):
+        if not isinstance(tests, list) or not all(
+            isinstance(value, str) and TEST.fullmatch(value) for value in tests
+        ):
             raise ValueError("invalid required_tests")
-        if not isinstance(paths, list) or not all(isinstance(x, str) and x for x in paths):
+        if not isinstance(paths, list):
             raise ValueError("invalid allowed_paths")
+        normalized_paths = {
+            require_repo_path(f"mentor {name} allowed path", value) for value in paths
+        }
         required_tests.update(tests)
-        allowed_paths.update(paths)
+        allowed_paths.update(normalized_paths)
 
     required_mentors = set(policy.get("required_mentors", []))
     missing = sorted(required_mentors - set(mentor_names))
     if missing:
         raise ValueError(f"missing required mentors: {','.join(missing)}")
 
-    if forbidden_paths.intersection(allowed_paths):
-        raise ValueError("mentor attempted to authorize a forbidden path")
+    for allowed_path in allowed_paths:
+        if any(path_ranges_overlap(allowed_path, forbidden_path) for forbidden_path in forbidden_paths):
+            raise ValueError("mentor attempted to authorize a forbidden path")
 
     status = "BLOCKED" if blockers else "READY"
     manifest_core = {
