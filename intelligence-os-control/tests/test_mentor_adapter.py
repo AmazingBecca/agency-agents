@@ -1,4 +1,3 @@
-import copy
 import pathlib
 import sys
 import unittest
@@ -49,17 +48,36 @@ class MentorAdapterTests(unittest.TestCase):
             ma.adapt(value, STATE)
 
     def test_path_escape_is_rejected(self):
-        for attack in ["../Zo", "/tmp/payload", "scripts/../Zo", "scripts\\evil", "scripts/"]:
+        for attack in [
+            "../Zo",
+            "/tmp/payload",
+            "scripts/../Zo",
+            "scripts\\evil",
+            "scripts//nested",
+            "scripts/",
+        ]:
             value = report()
             value["allowed_paths"] = [attack]
             with self.subTest(attack=attack), self.assertRaises(ValueError):
                 ma.adapt(value, STATE)
 
-    def test_blocking_report_requires_reason(self):
-        value = report()
-        value["recommendation"] = "BLOCKED"
-        with self.assertRaisesRegex(ValueError, "requires reason"):
-            ma.adapt(value, STATE)
+    def test_all_non_ready_reports_require_reason(self):
+        for recommendation in ("BLOCKED", "RECOMPILE", "ESCALATE"):
+            value = report()
+            value["recommendation"] = recommendation
+            with self.subTest(recommendation=recommendation), self.assertRaisesRegex(
+                ValueError, "non-ready mentor report requires reason"
+            ):
+                ma.adapt(value, STATE)
+
+    def test_non_ready_reason_is_preserved_canonically(self):
+        for recommendation in ("BLOCKED", "RECOMPILE", "ESCALATE"):
+            value = report()
+            value["recommendation"] = recommendation
+            value["reason"] = "  exact source must be reviewed again  "
+            with self.subTest(recommendation=recommendation):
+                adapted = ma.adapt(value, STATE)
+                self.assertEqual(adapted["reason"], "exact source must be reviewed again")
 
     def test_duplicate_lists_are_canonicalized(self):
         value = report()
