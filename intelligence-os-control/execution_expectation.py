@@ -53,6 +53,8 @@ def _open_trusted_root(root: pathlib.Path) -> tuple[int, os.stat_result, pathlib
             raise ValueError("trusted expectation root must be a directory")
         if info.st_mode & 0o022:
             raise ValueError("trusted expectation root must not be group/world writable")
+        if info.st_uid != os.geteuid():
+            raise ValueError("trusted expectation verifier must run as trusted root owner")
         resolved = pathlib.Path(os.path.realpath(root_abs))
         return fd, info, resolved
     except Exception:
@@ -60,15 +62,19 @@ def _open_trusted_root(root: pathlib.Path) -> tuple[int, os.stat_result, pathlib
         raise
 
 
-def _expectation_leaf(expectation_path: pathlib.Path, trusted_root: pathlib.Path) -> str:
-    expectation_abs = _absolute(expectation_path)
-    root_abs = _absolute(trusted_root)
-    if expectation_abs.parent != root_abs:
-        raise ValueError("trusted expectation must be a direct child of the trusted expectation root")
-    leaf = expectation_abs.name
+def _direct_child_leaf(path: pathlib.Path, root: pathlib.Path, label: str) -> str:
+    path_abs = _absolute(path)
+    root_abs = _absolute(root)
+    if path_abs.parent != root_abs:
+        raise ValueError(f"{label} must be a direct child of the trusted expectation root")
+    leaf = path_abs.name
     if not leaf or leaf in {".", ".."} or "/" in leaf or "\\" in leaf:
-        raise ValueError("trusted expectation leaf is invalid")
+        raise ValueError(f"{label} leaf is invalid")
     return leaf
+
+
+def _expectation_leaf(expectation_path: pathlib.Path, trusted_root: pathlib.Path) -> str:
+    return _direct_child_leaf(expectation_path, trusted_root, "trusted expectation")
 
 
 def _read_regular_at(parent_fd: int, leaf: str, label: str, required_uid: int) -> tuple[bytes, os.stat_result]:
@@ -210,6 +216,15 @@ def issue_receipt_from_files(
     return er.issue_receipt(manifest, execution, expectation["execution_id"])
 
 
+def materialize_trusted_receipt(
+    receipt: dict,
+    output: pathlib.Path,
+    trusted_root: pathlib.Path,
+) -> str:
+    _direct_child_leaf(output, trusted_root, "executor receipt output")
+    return er.materialize_receipt(receipt, output)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expectation", type=pathlib.Path, required=True)
@@ -225,7 +240,7 @@ def main() -> int:
             args.execution,
             args.trusted_expectation_root,
         )
-        er.materialize_receipt(receipt, args.output)
+        materialize_trusted_receipt(receipt, args.output, args.trusted_expectation_root)
     except Exception as exc:
         print(f"executor expectation channel rejected input: {exc}", file=sys.stderr)
         return 2
