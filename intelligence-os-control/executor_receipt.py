@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
+import stat
 import sys
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
@@ -177,6 +179,86 @@ def issue_receipt(manifest: dict, execution: dict, expected_execution_id: str) -
     return {**receipt_core, "receipt_id": hashlib.sha256(canonical_bytes(receipt_core)).hexdigest()}
 
 
+def _verify_materialized_receipt(parent_fd: int, leaf: str, descriptor: int, size: int) -> tuple[int, int]:
+    bound = os.fstat(descriptor)
+    try:
+        published = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"executor receipt output path is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISREG(bound.st_mode)
+        or not stat.S_ISREG(published.st_mode)
+        or (bound.st_dev, bound.st_ino) != (published.st_dev, published.st_ino)
+        or bound.st_nlink != 1
+        or published.st_nlink != 1
+        or stat.S_IMODE(bound.st_mode) != 0o600
+        or stat.S_IMODE(published.st_mode) != 0o600
+        or bound.st_size != size
+        or published.st_size != size
+    ):
+        raise ValueError("executor receipt output does not reference verified descriptor")
+    return bound.st_dev, bound.st_ino
+
+
+def materialize_receipt(receipt: dict, output: pathlib.Path) -> str:
+    data = canonical_bytes(receipt)
+    if not output.name:
+        raise ValueError("executor receipt output path is invalid")
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_DIRECTORY"):
+        parent_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
+    try:
+        parent_fd = os.open(output.parent, parent_flags)
+    except OSError as exc:
+        raise ValueError(f"executor receipt output parent is unavailable: {exc}") from exc
+
+    descriptor = None
+    created_identity = None
+    published = False
+    try:
+        create_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(output.name, create_flags, 0o600, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise ValueError("executor receipt output already exists") from exc
+        bound = os.fstat(descriptor)
+        created_identity = (bound.st_dev, bound.st_ino)
+
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ValueError("executor receipt write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        _verify_materialized_receipt(parent_fd, output.name, descriptor, len(data))
+        os.fsync(parent_fd)
+        published = True
+        return receipt["receipt_id"]
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created_identity is not None and not published:
+            try:
+                current = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if current is not None and (current.st_dev, current.st_ino) == created_identity:
+                try:
+                    os.unlink(output.name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+        os.close(parent_fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=pathlib.Path, required=True)
@@ -190,7 +272,7 @@ def main() -> int:
             load_canonical(args.execution),
             args.expected_execution_id,
         )
-        args.output.write_bytes(canonical_bytes(receipt))
+        materialize_receipt(receipt, args.output)
     except Exception as exc:
         print(f"executor receipt rejected input: {exc}", file=sys.stderr)
         return 2
