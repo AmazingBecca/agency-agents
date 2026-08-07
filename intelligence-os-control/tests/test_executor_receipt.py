@@ -170,6 +170,16 @@ class ExecutorReceiptTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaisesRegex(ValueError, "not passing"):
                 er.issue_receipt(m, value, m["execution_id"])
 
+    def test_nonrequired_failed_or_skipped_tests_are_rejected(self):
+        m = manifest()
+        for status in ["FAIL", "SKIP"]:
+            value = execution(m)
+            value["tests"].append({"name": "optional-extra", "status": status})
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ValueError, "execution tests not passing: optional-extra"
+            ):
+                er.issue_receipt(m, value, m["execution_id"])
+
     def test_duplicate_test_and_production_mutation_are_rejected(self):
         m = manifest()
         value = execution(m)
