@@ -60,7 +60,7 @@ class PredatorControlLoopTests(unittest.TestCase):
                 {"name": "mirofish-security", "status": "PASS"},
             ],
         }
-        receipt = er.issue_receipt(manifest, execution)
+        receipt = er.issue_receipt(manifest, execution, manifest["execution_id"])
         self.assertEqual(receipt["status"], "PASS")
         self.assertEqual(receipt["execution_id"], manifest["execution_id"])
         self.assertEqual(receipt["head"], STATE["head"])
@@ -85,7 +85,7 @@ class PredatorControlLoopTests(unittest.TestCase):
                 "merge": STATE["merge"],
                 "executor": "predator-public-control",
                 "tests": [{"name": "mirofish-security", "status": "PASS"}],
-            })
+            }, manifest["execution_id"])
 
 
 if __name__ == "__main__":
