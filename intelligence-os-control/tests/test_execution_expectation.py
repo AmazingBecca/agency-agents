@@ -4,7 +4,9 @@ import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -97,8 +99,25 @@ class ExecutionExpectationTests(unittest.TestCase):
         xp = self.write(self.candidate / "execution.json", execution(m))
         return m, ep, mp, xp
 
-    def issue(self, ep, mp, xp):
-        return ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+    def issue(self, ep, mp, xp, manifest_uid=None, execution_uid=None):
+        manifest_uid = self.candidate_uid if manifest_uid is None else manifest_uid
+        execution_uid = self.candidate_uid if execution_uid is None else execution_uid
+        original = ee._read_regular
+
+        def observed_read(path, label):
+            raw, info, resolved = original(path, label)
+            uid = manifest_uid if label == "manifest" else execution_uid
+            observed = types.SimpleNamespace(
+                st_mode=info.st_mode,
+                st_nlink=info.st_nlink,
+                st_uid=uid,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+            )
+            return raw, observed, resolved
+
+        with mock.patch.object(ee, "_read_regular", side_effect=observed_read):
+            return ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
 
     def test_exact_trusted_channel_issues_receipt(self):
         m, ep, mp, xp = self.files()
@@ -119,6 +138,28 @@ class ExecutionExpectationTests(unittest.TestCase):
     def test_root_candidate_uid_is_rejected(self):
         m, ep, mp, xp = self.files(candidate_uid=0)
         with self.assertRaisesRegex(ValueError, "non-root account"):
+            self.issue(ep, mp, xp)
+
+    def test_real_same_uid_candidate_files_cannot_satisfy_claimed_uid(self):
+        m, ep, mp, xp = self.files()
+        with self.assertRaisesRegex(ValueError, "owner does not match trusted candidate uid"):
+            ee.issue_receipt_from_files(ep, mp, xp, self.trusted)
+
+    def test_manifest_and_execution_owners_must_match_trusted_candidate_uid(self):
+        m, ep, mp, xp = self.files()
+        with self.subTest(input="manifest"), self.assertRaisesRegex(
+            ValueError, "owner does not match trusted candidate uid"
+        ):
+            self.issue(ep, mp, xp, manifest_uid=os.geteuid())
+        with self.subTest(input="execution"), self.assertRaisesRegex(
+            ValueError, "owner does not match trusted candidate uid"
+        ):
+            self.issue(ep, mp, xp, execution_uid=os.geteuid())
+
+    def test_candidate_inputs_must_not_be_group_or_world_writable(self):
+        m, ep, mp, xp = self.files()
+        mp.chmod(0o666)
+        with self.assertRaisesRegex(ValueError, "must not be group/world writable"):
             self.issue(ep, mp, xp)
 
     def test_expectation_must_be_direct_child_of_bound_root(self):
