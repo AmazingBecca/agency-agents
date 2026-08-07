@@ -65,7 +65,14 @@ def _under(path: str, allowed: str) -> bool:
     return path == allowed or path.startswith(allowed.rstrip("/") + "/")
 
 
-def verify_manifest(manifest: dict) -> str:
+def require_expected_execution_id(value: object) -> str:
+    if not isinstance(value, str) or not SHA64.fullmatch(value):
+        raise ValueError("trusted expected execution_id must be a lowercase 64-character SHA-256")
+    return value
+
+
+def verify_manifest(manifest: dict, expected_execution_id: str) -> str:
+    expected_execution_id = require_expected_execution_id(expected_execution_id)
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be an object")
     if set(manifest) != MANIFEST_KEYS:
@@ -75,6 +82,8 @@ def verify_manifest(manifest: dict) -> str:
     execution_id = manifest.get("execution_id")
     if not isinstance(execution_id, str) or not SHA64.fullmatch(execution_id):
         raise ValueError("invalid execution_id")
+    if execution_id != expected_execution_id:
+        raise ValueError("manifest execution_id does not match trusted expected execution_id")
     core = dict(manifest)
     core.pop("execution_id", None)
     if hashlib.sha256(canonical_bytes(core)).hexdigest() != execution_id:
@@ -89,8 +98,8 @@ def verify_manifest(manifest: dict) -> str:
     return execution_id
 
 
-def issue_receipt(manifest: dict, execution: dict) -> dict:
-    execution_id = verify_manifest(manifest)
+def issue_receipt(manifest: dict, execution: dict, expected_execution_id: str) -> dict:
+    execution_id = verify_manifest(manifest, expected_execution_id)
     if not isinstance(execution, dict):
         raise ValueError("execution report must be an object")
     if set(execution) != EXECUTION_KEYS:
@@ -172,10 +181,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=pathlib.Path, required=True)
     parser.add_argument("--execution", type=pathlib.Path, required=True)
+    parser.add_argument("--expected-execution-id", required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
     try:
-        receipt = issue_receipt(load_canonical(args.manifest), load_canonical(args.execution))
+        receipt = issue_receipt(
+            load_canonical(args.manifest),
+            load_canonical(args.execution),
+            args.expected_execution_id,
+        )
         args.output.write_bytes(canonical_bytes(receipt))
     except Exception as exc:
         print(f"executor receipt rejected input: {exc}", file=sys.stderr)
