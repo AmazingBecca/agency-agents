@@ -16,7 +16,7 @@ SHA64 = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 EXPECTATION_KEYS = {
     "schema", "source", "compiler_repository", "compiler_head",
-    "repository", "head", "base", "merge", "execution_id",
+    "repository", "head", "base", "merge", "execution_id", "candidate_uid",
 }
 
 
@@ -36,9 +36,7 @@ def _absolute(path: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(os.path.abspath(os.fspath(path)))
 
 
-def _open_trusted_root(root: pathlib.Path, candidate_uid: int) -> tuple[int, os.stat_result, pathlib.Path]:
-    if not isinstance(candidate_uid, int) or candidate_uid <= 0:
-        raise ValueError("candidate uid must identify a non-root account")
+def _open_trusted_root(root: pathlib.Path) -> tuple[int, os.stat_result, pathlib.Path]:
     root_abs = _absolute(root)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_DIRECTORY"):
@@ -53,8 +51,6 @@ def _open_trusted_root(root: pathlib.Path, candidate_uid: int) -> tuple[int, os.
         info = os.fstat(fd)
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError("trusted expectation root must be a directory")
-        if info.st_uid == candidate_uid:
-            raise ValueError("trusted expectation root must be owned by an authority uid distinct from candidate uid")
         if info.st_mode & 0o022:
             raise ValueError("trusted expectation root must not be group/world writable")
         resolved = pathlib.Path(os.path.realpath(root_abs))
@@ -75,12 +71,7 @@ def _expectation_leaf(expectation_path: pathlib.Path, trusted_root: pathlib.Path
     return leaf
 
 
-def _read_regular_at(
-    parent_fd: int,
-    leaf: str,
-    label: str,
-    required_uid: int,
-) -> tuple[bytes, os.stat_result]:
+def _read_regular_at(parent_fd: int, leaf: str, label: str, required_uid: int) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(leaf, flags, dir_fd=parent_fd)
@@ -137,18 +128,44 @@ def _load_canonical_bytes(raw: bytes, label: str):
     return value
 
 
+def _validate_expectation(expectation: object, root_uid: int) -> dict:
+    if not isinstance(expectation, dict) or set(expectation) != EXPECTATION_KEYS:
+        raise ValueError("trusted expectation fields must match the exact channel schema")
+    if expectation.get("schema") != "amazingbecca.predator-execution-expectation.v2":
+        raise ValueError("unsupported trusted expectation schema")
+    if expectation.get("source") != "predator-compiler-control":
+        raise ValueError("unexpected trusted expectation source")
+    for field in ("compiler_repository", "repository"):
+        if not isinstance(expectation.get(field), str) or not REPOSITORY.fullmatch(expectation[field]):
+            raise ValueError(f"invalid trusted expectation {field}")
+    for field in ("compiler_head", "head", "base", "merge"):
+        if not isinstance(expectation.get(field), str) or not SHA40.fullmatch(expectation[field]):
+            raise ValueError(f"invalid trusted expectation {field}")
+    if not isinstance(expectation.get("execution_id"), str) or not SHA64.fullmatch(expectation["execution_id"]):
+        raise ValueError("invalid trusted expectation execution_id")
+    candidate_uid = expectation.get("candidate_uid")
+    if isinstance(candidate_uid, bool) or not isinstance(candidate_uid, int) or candidate_uid <= 0 or candidate_uid > 0xFFFFFFFF:
+        raise ValueError("trusted expectation candidate_uid must identify a non-root account")
+    if candidate_uid == root_uid:
+        raise ValueError("trusted expectation root must be owned by an authority uid distinct from candidate uid")
+    return expectation
+
+
 def load_expectation(
     expectation_path: pathlib.Path,
     manifest_path: pathlib.Path,
     execution_path: pathlib.Path,
     trusted_root: pathlib.Path,
-    candidate_uid: int,
 ) -> dict:
-    root_fd, root_info, root_resolved = _open_trusted_root(trusted_root, candidate_uid)
+    root_fd, root_info, root_resolved = _open_trusted_root(trusted_root)
     try:
         leaf = _expectation_leaf(expectation_path, trusted_root)
         expectation_raw, expectation_info = _read_regular_at(
             root_fd, leaf, "trusted expectation", root_info.st_uid
+        )
+        expectation = _validate_expectation(
+            _load_canonical_bytes(expectation_raw, "trusted expectation"),
+            root_info.st_uid,
         )
         manifest_raw, manifest_info, manifest_resolved = _read_regular(manifest_path, "manifest")
         execution_raw, execution_info, execution_resolved = _read_regular(execution_path, "execution report")
@@ -164,22 +181,6 @@ def load_expectation(
         if len(identities) != 3:
             raise ValueError("trusted expectation, manifest, and execution report must be distinct file objects")
 
-        expectation = _load_canonical_bytes(expectation_raw, "trusted expectation")
-        if not isinstance(expectation, dict) or set(expectation) != EXPECTATION_KEYS:
-            raise ValueError("trusted expectation fields must match the exact channel schema")
-        if expectation.get("schema") != "amazingbecca.predator-execution-expectation.v1":
-            raise ValueError("unsupported trusted expectation schema")
-        if expectation.get("source") != "predator-compiler-control":
-            raise ValueError("unexpected trusted expectation source")
-        for field in ("compiler_repository", "repository"):
-            if not isinstance(expectation.get(field), str) or not REPOSITORY.fullmatch(expectation[field]):
-                raise ValueError(f"invalid trusted expectation {field}")
-        for field in ("compiler_head", "head", "base", "merge"):
-            if not isinstance(expectation.get(field), str) or not SHA40.fullmatch(expectation[field]):
-                raise ValueError(f"invalid trusted expectation {field}")
-        if not isinstance(expectation.get("execution_id"), str) or not SHA64.fullmatch(expectation["execution_id"]):
-            raise ValueError("invalid trusted expectation execution_id")
-
         return {
             "expectation": expectation,
             "manifest": _load_canonical_bytes(manifest_raw, "manifest"),
@@ -194,11 +195,8 @@ def issue_receipt_from_files(
     manifest_path: pathlib.Path,
     execution_path: pathlib.Path,
     trusted_root: pathlib.Path,
-    candidate_uid: int,
 ) -> dict:
-    bound = load_expectation(
-        expectation_path, manifest_path, execution_path, trusted_root, candidate_uid
-    )
+    bound = load_expectation(expectation_path, manifest_path, execution_path, trusted_root)
     expectation, manifest, execution = bound["expectation"], bound["manifest"], bound["execution"]
     for field in ("repository", "head", "base", "merge"):
         if expectation[field] != manifest.get(field):
@@ -210,7 +208,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expectation", type=pathlib.Path, required=True)
     parser.add_argument("--trusted-expectation-root", type=pathlib.Path, required=True)
-    parser.add_argument("--candidate-uid", type=int, required=True)
     parser.add_argument("--manifest", type=pathlib.Path, required=True)
     parser.add_argument("--execution", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
@@ -221,7 +218,6 @@ def main() -> int:
             args.manifest,
             args.execution,
             args.trusted_expectation_root,
-            args.candidate_uid,
         )
         er.materialize_receipt(receipt, args.output)
     except Exception as exc:
