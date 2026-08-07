@@ -14,6 +14,7 @@ import executor_receipt as er
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+TRUSTED_COMPILER_REPOSITORY = "AmazingBecca/agency-agents"
 EXPECTATION_KEYS = {
     "schema", "source", "compiler_repository", "compiler_head",
     "repository", "head", "base", "merge", "execution_id", "candidate_uid",
@@ -134,17 +135,31 @@ def _load_canonical_bytes(raw: bytes, label: str):
     return value
 
 
-def _validate_expectation(expectation: object, root_uid: int) -> dict:
+def _require_expected_compiler_head(value: object) -> str:
+    if not isinstance(value, str) or not SHA40.fullmatch(value):
+        raise ValueError("trusted expected compiler head must be a lowercase 40-character Git SHA")
+    return value
+
+
+def _validate_expectation(expectation: object, root_uid: int, expected_compiler_head: str) -> dict:
+    expected_compiler_head = _require_expected_compiler_head(expected_compiler_head)
     if not isinstance(expectation, dict) or set(expectation) != EXPECTATION_KEYS:
         raise ValueError("trusted expectation fields must match the exact channel schema")
     if expectation.get("schema") != "amazingbecca.predator-execution-expectation.v2":
         raise ValueError("unsupported trusted expectation schema")
     if expectation.get("source") != "predator-compiler-control":
         raise ValueError("unexpected trusted expectation source")
-    for field in ("compiler_repository", "repository"):
-        if not isinstance(expectation.get(field), str) or not REPOSITORY.fullmatch(expectation[field]):
-            raise ValueError(f"invalid trusted expectation {field}")
-    for field in ("compiler_head", "head", "base", "merge"):
+    if expectation.get("compiler_repository") != TRUSTED_COMPILER_REPOSITORY:
+        raise ValueError("trusted expectation compiler repository does not match trusted compiler authority")
+    compiler_head = expectation.get("compiler_head")
+    if not isinstance(compiler_head, str) or not SHA40.fullmatch(compiler_head):
+        raise ValueError("invalid trusted expectation compiler_head")
+    if compiler_head != expected_compiler_head:
+        raise ValueError("trusted expectation compiler head does not match trusted expected compiler head")
+    repository = expectation.get("repository")
+    if not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
+        raise ValueError("invalid trusted expectation repository")
+    for field in ("head", "base", "merge"):
         if not isinstance(expectation.get(field), str) or not SHA40.fullmatch(expectation[field]):
             raise ValueError(f"invalid trusted expectation {field}")
     if not isinstance(expectation.get("execution_id"), str) or not SHA64.fullmatch(expectation["execution_id"]):
@@ -162,7 +177,9 @@ def load_expectation(
     manifest_path: pathlib.Path,
     execution_path: pathlib.Path,
     trusted_root: pathlib.Path,
+    expected_compiler_head: str,
 ) -> dict:
+    expected_compiler_head = _require_expected_compiler_head(expected_compiler_head)
     root_fd, root_info, root_resolved = _open_trusted_root(trusted_root)
     try:
         leaf = _expectation_leaf(expectation_path, trusted_root)
@@ -172,6 +189,7 @@ def load_expectation(
         expectation = _validate_expectation(
             _load_canonical_bytes(expectation_raw, "trusted expectation"),
             root_info.st_uid,
+            expected_compiler_head,
         )
         manifest_raw, manifest_info, manifest_resolved = _read_regular(manifest_path, "manifest")
         execution_raw, execution_info, execution_resolved = _read_regular(execution_path, "execution report")
@@ -207,8 +225,15 @@ def issue_receipt_from_files(
     manifest_path: pathlib.Path,
     execution_path: pathlib.Path,
     trusted_root: pathlib.Path,
+    expected_compiler_head: str,
 ) -> dict:
-    bound = load_expectation(expectation_path, manifest_path, execution_path, trusted_root)
+    bound = load_expectation(
+        expectation_path,
+        manifest_path,
+        execution_path,
+        trusted_root,
+        expected_compiler_head,
+    )
     expectation, manifest, execution = bound["expectation"], bound["manifest"], bound["execution"]
     for field in ("repository", "head", "base", "merge"):
         if expectation[field] != manifest.get(field):
@@ -229,6 +254,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expectation", type=pathlib.Path, required=True)
     parser.add_argument("--trusted-expectation-root", type=pathlib.Path, required=True)
+    parser.add_argument("--expected-compiler-head", required=True)
     parser.add_argument("--manifest", type=pathlib.Path, required=True)
     parser.add_argument("--execution", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
@@ -239,6 +265,7 @@ def main() -> int:
             args.manifest,
             args.execution,
             args.trusted_expectation_root,
+            args.expected_compiler_head,
         )
         materialize_trusted_receipt(receipt, args.output, args.trusted_expectation_root)
     except Exception as exc:
