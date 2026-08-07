@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import pathlib
 import sys
 import unittest
@@ -68,12 +69,33 @@ class ExecutorReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "execution_id mismatch"):
             er.issue_receipt(m, execution(manifest()))
 
+    def test_manifest_authority_fields_are_exact(self):
+        m = manifest()
+        core = dict(m)
+        core.pop("execution_id")
+        core["command"] = "deploy --production"
+        injected = {
+            **core,
+            "execution_id": hashlib.sha256(er.canonical_bytes(core)).hexdigest(),
+        }
+        with self.assertRaisesRegex(ValueError, "exact authority schema"):
+            er.issue_receipt(injected, execution(injected))
+
+        core = dict(m)
+        core.pop("execution_id")
+        core.pop("forbidden_paths")
+        incomplete = {
+            **core,
+            "execution_id": hashlib.sha256(er.canonical_bytes(core)).hexdigest(),
+        }
+        with self.assertRaisesRegex(ValueError, "exact authority schema"):
+            er.issue_receipt(incomplete, execution(incomplete))
+
     def test_blocked_manifest_cannot_execute(self):
         m = manifest()
         core = dict(m)
         core.pop("execution_id")
         core["status"] = "BLOCKED"
-        import hashlib
         core_id = hashlib.sha256(er.canonical_bytes(core)).hexdigest()
         blocked = {**core, "execution_id": core_id}
         with self.assertRaisesRegex(ValueError, "not executable"):
