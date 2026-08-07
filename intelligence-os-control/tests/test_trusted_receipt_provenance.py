@@ -129,19 +129,21 @@ class TrustedReceiptProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "compiler repository mismatch"):
             ee.verify_trusted_receipt(pivot)
 
-    def test_materialization_reverifies_trusted_receipt(self):
+    def test_materialization_reverifies_trusted_receipt_and_root_identity(self):
         receipt, _, _ = self.trusted_receipt()
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
+            info = root.stat()
+            root_identity = (info.st_dev, info.st_ino)
             output = root / "receipt.json"
             altered = dict(receipt)
             altered["compiler_head"] = "5" * 40
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
-                ee.materialize_trusted_receipt(altered, output, root)
+                ee.materialize_trusted_receipt(altered, output, root, root_identity)
             self.assertFalse(output.exists())
 
             self.assertEqual(
-                ee.materialize_trusted_receipt(receipt, output, root),
+                ee.materialize_trusted_receipt(receipt, output, root, root_identity),
                 receipt["receipt_id"],
             )
             self.assertEqual(output.read_bytes(), er.canonical_bytes(receipt))
