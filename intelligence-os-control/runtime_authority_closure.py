@@ -62,7 +62,7 @@ def _stable_file(path: pathlib.Path) -> RuntimeFileSnapshot:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise RuntimeError(f"runtime closure member must be a regular single-link file: {resolved}")
-        if before.st_size < 1 or before.st_size > _MAX_FILE_BYTES:
+        if before.st_size > _MAX_FILE_BYTES:
             raise RuntimeError(f"runtime closure member size is outside policy: {resolved}")
         digest = hashlib.sha256()
         total = 0
