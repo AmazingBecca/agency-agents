@@ -24,6 +24,8 @@ _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _INSTANCE_DISPATCH_CASE = "instance-calltestmethod-shadow"
 _GETATTRIBUTE_DISPATCH_CASE = "getattribute-calltestmethod-shadow"
 _CLEAN_POSITION_DECOY_CASE = "clean-position-decoy"
+_CLEAN_SOURCE_SHAPE_DECOY_CASE = "clean-source-shape-decoy"
+_ATTACK_SOURCE_SHAPE_DECOY_CASE = "attack-source-shape-decoy"
 _CONTROL_SOURCE_VISIBILITY_CASE = "trusted-control-source-read"
 _TRUSTED_CONTROL_ROOT = pathlib.Path(__file__).resolve(strict=True).parent.parent
 
@@ -257,6 +259,7 @@ def _run_dispatch_attack(
     case_name: str,
     fixture_name: str,
     source: str,
+    expected_zero: bool = False,
 ) -> dict[str, object]:
     del fixture_name
     with tempfile.TemporaryDirectory(prefix="bound-case-") as directory:
@@ -282,11 +285,12 @@ def _run_dispatch_attack(
             timeout_seconds=timeout_seconds,
         )
 
+    observed_zero = returncode == 0
     return {
         "name": case_name,
-        "expected_zero": False,
+        "expected_zero": expected_zero,
         "returncode": returncode,
-        "passed": returncode != 0,
+        "passed": observed_zero == expected_zero,
         "stdout_bytes": len(output),
         "stderr_bytes": len(errors),
         "elapsed_ms": int(elapsed * 1000),
@@ -405,6 +409,61 @@ def _run_clean_position_decoy(
     }
 
 
+def _run_clean_source_shape_decoy(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    nonce = os.urandom(8).hex()
+    source = textwrap.dedent(
+        f"""
+        import unittest
+
+        class Mandatory{nonce}(unittest.TestCase):
+            def test_must_fail(self):
+                self.assertEqual(2 + 2, 4)
+        """
+    ).lstrip()
+    return _run_dispatch_attack(
+        runner=runner,
+        python_executable=python_executable,
+        timeout_seconds=timeout_seconds,
+        case_name=_CLEAN_SOURCE_SHAPE_DECOY_CASE,
+        fixture_name="test_clean_source_shape_decoy.py",
+        source=source,
+        expected_zero=True,
+    )
+
+
+def _run_attack_source_shape_decoy(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    nonce = os.urandom(8).hex()
+    source = textwrap.dedent(
+        f"""
+        import unittest
+
+        LEXICAL_CLEAN_DECOY = "class Clean{nonce}(unittest.TestCase):\\n    def test_pass(self):\\n        pass"
+
+        class Mandatory{nonce}(unittest.TestCase):
+            def test_must_fail(self):
+                self.fail("mandatory source-shape failure {nonce}")
+        """
+    ).lstrip()
+    return _run_dispatch_attack(
+        runner=runner,
+        python_executable=python_executable,
+        timeout_seconds=timeout_seconds,
+        case_name=_ATTACK_SOURCE_SHAPE_DECOY_CASE,
+        fixture_name="test_attack_source_shape_decoy.py",
+        source=source,
+    )
+
+
 def _run_control_source_visibility_attack(
     *,
     python_executable: pathlib.Path,
@@ -486,11 +545,29 @@ def _run_sidecars(
                 timeout_seconds=timeout_seconds,
             ),
         ),
+        (
+            _CLEAN_SOURCE_SHAPE_DECOY_CASE,
+            lambda: _run_clean_source_shape_decoy(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+        ),
+        (
+            _ATTACK_SOURCE_SHAPE_DECOY_CASE,
+            lambda: _run_attack_source_shape_decoy(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+        ),
     ]
     canonical_names = [
         _INSTANCE_DISPATCH_CASE,
         _GETATTRIBUTE_DISPATCH_CASE,
         _CLEAN_POSITION_DECOY_CASE,
+        _CLEAN_SOURCE_SHAPE_DECOY_CASE,
+        _ATTACK_SOURCE_SHAPE_DECOY_CASE,
     ]
     if sandboxed:
         invocations.append(
