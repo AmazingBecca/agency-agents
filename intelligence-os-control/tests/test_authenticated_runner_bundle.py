@@ -241,6 +241,50 @@ class AuthenticatedRunnerBundleTests(unittest.TestCase):
                     self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
         verifier.assert_not_called()
 
+    def test_world_writable_bundle_parent_is_rejected_before_inner_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            candidate_parent = root / "candidate-parent"
+            candidate_parent.mkdir()
+            candidate_parent.chmod(0o777)
+            bundle, runner, _helper = self._bundle(candidate_parent)
+            expected_bundle = subject.snapshot_bundle(bundle).sha256
+            identity = SimpleNamespace(uid=os.getuid() + 100000, gid=os.getgid() + 100000)
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity), patch.object(
+                subject.bound, "verify_bound"
+            ) as verifier:
+                with self.assertRaisesRegex(RuntimeError, "replaceable through sandbox-writable ancestry"):
+                    self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
+        verifier.assert_not_called()
+
+    def test_group_writable_bundle_parent_is_rejected_before_inner_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            candidate_parent = root / "candidate-parent"
+            candidate_parent.mkdir()
+            candidate_parent.chmod(0o770)
+            bundle, runner, _helper = self._bundle(candidate_parent)
+            expected_bundle = subject.snapshot_bundle(bundle).sha256
+            identity = SimpleNamespace(uid=os.getuid() + 100000, gid=os.getgid())
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity), patch.object(
+                subject.bound, "verify_bound"
+            ) as verifier:
+                with self.assertRaisesRegex(RuntimeError, "replaceable through sandbox-writable ancestry"):
+                    self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
+        verifier.assert_not_called()
+
+    def test_sticky_world_writable_ancestor_protects_control_owned_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            sticky_parent = root / "sticky-parent"
+            sticky_parent.mkdir()
+            sticky_parent.chmod(0o1777)
+            bundle, _runner, _helper = self._bundle(sticky_parent)
+            snapshot = subject.snapshot_bundle(bundle)
+            identity = SimpleNamespace(uid=os.getuid() + 100000, gid=os.getgid() + 100000)
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity):
+                subject._assert_bundle_not_writable_by_sandbox(snapshot, "candidate")
+
     def test_nonwritable_bundle_reaches_inner_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner, _helper = self._bundle(pathlib.Path(directory))
