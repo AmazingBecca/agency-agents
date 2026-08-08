@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -50,6 +52,8 @@ class AuthenticatedRunnerBundleTests(unittest.TestCase):
         bundle: pathlib.Path,
         runner: pathlib.Path,
         expected_bundle_sha256: str,
+        *,
+        sandbox_user: str | None = None,
     ) -> dict[str, object]:
         return subject.verify_authenticated_bundle(
             runner_root=bundle,
@@ -62,7 +66,7 @@ class AuthenticatedRunnerBundleTests(unittest.TestCase):
             base_sha=BASE,
             merge_sha=MERGE,
             timeout_seconds=3,
-            sandbox_user=None,
+            sandbox_user=sandbox_user,
         )
 
     def test_receipt_binds_every_file_in_runner_bundle(self) -> None:
@@ -77,6 +81,7 @@ class AuthenticatedRunnerBundleTests(unittest.TestCase):
         self.assertEqual(report["authority_level"], "diagnostic-bundle-bound-not-terminal")
         self.assertEqual(report["bundle_sha256"], snapshot.sha256)
         self.assertEqual(report["bundle_file_count"], 2)
+        self.assertFalse(report["bundle_sandbox_readonly"])
         self.assertEqual(
             [entry["path"] for entry in report["bundle_files"]],
             ["helper.py", "isolated_unittest_runner.py"],
@@ -110,6 +115,58 @@ class AuthenticatedRunnerBundleTests(unittest.TestCase):
             with patch.object(subject.bound, "verify_bound", side_effect=mutate):
                 with self.assertRaisesRegex(RuntimeError, "bundle authority changed during external verification"):
                     self._verify(bundle, runner, expected_bundle)
+
+    def test_sandbox_owned_bundle_is_rejected_before_inner_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner, _helper = self._bundle(pathlib.Path(directory))
+            expected_bundle = subject.snapshot_bundle(bundle).sha256
+            identity = SimpleNamespace(uid=os.getuid(), gid=os.getgid())
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity), patch.object(
+                subject.bound, "verify_bound"
+            ) as verifier:
+                with self.assertRaisesRegex(RuntimeError, "owner-mutable by sandbox principal"):
+                    self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
+        verifier.assert_not_called()
+
+    def test_world_writable_bundle_member_is_rejected_before_inner_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner, helper = self._bundle(pathlib.Path(directory))
+            helper.chmod(0o666)
+            expected_bundle = subject.snapshot_bundle(bundle).sha256
+            identity = SimpleNamespace(uid=os.getuid() + 100000, gid=os.getgid() + 100000)
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity), patch.object(
+                subject.bound, "verify_bound"
+            ) as verifier:
+                with self.assertRaisesRegex(RuntimeError, "owner-mutable by sandbox principal"):
+                    self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
+        verifier.assert_not_called()
+
+    def test_group_writable_bundle_member_is_rejected_before_inner_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner, helper = self._bundle(pathlib.Path(directory))
+            helper.chmod(0o660)
+            expected_bundle = subject.snapshot_bundle(bundle).sha256
+            identity = SimpleNamespace(uid=os.getuid() + 100000, gid=os.getgid())
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity), patch.object(
+                subject.bound, "verify_bound"
+            ) as verifier:
+                with self.assertRaisesRegex(RuntimeError, "owner-mutable by sandbox principal"):
+                    self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
+        verifier.assert_not_called()
+
+    def test_nonwritable_bundle_reaches_inner_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner, _helper = self._bundle(pathlib.Path(directory))
+            expected_bundle = subject.snapshot_bundle(bundle).sha256
+            identity = SimpleNamespace(uid=os.getuid() + 100000, gid=os.getgid() + 100000)
+            with patch.object(subject.bound.boundary, "resolve_identity", return_value=identity), patch.object(
+                subject.bound, "verify_bound", return_value=self._inner_report()
+            ) as verifier:
+                report = self._verify(bundle, runner, expected_bundle, sandbox_user="candidate")
+
+        self.assertTrue(report["passed"])
+        self.assertTrue(report["bundle_sandbox_readonly"])
+        verifier.assert_called_once()
 
     def test_symlink_member_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
