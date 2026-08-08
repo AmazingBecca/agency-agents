@@ -13,8 +13,9 @@ from dataclasses import dataclass
 _SCHEMA = "amazingbecca.runtime-authority-closure.v1"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_FILE_BYTES = 64 * 1024 * 1024
-_MAX_FILES = 1024
-_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+_MAX_FILES = 8192
+_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+_CONTROL_SOURCE_ROOT = pathlib.Path(__file__).resolve(strict=True).parent
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,99 @@ def _within(path: pathlib.Path, root: pathlib.Path) -> bool:
     return path == root or root in path.parents
 
 
+def _runtime_prefixes() -> tuple[pathlib.Path, ...]:
+    roots: set[pathlib.Path] = set()
+    for raw in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
+        if not isinstance(raw, str) or not raw:
+            continue
+        roots.add(pathlib.Path(raw).resolve(strict=True))
+    if not roots:
+        raise RuntimeError("Python runtime prefixes are unavailable")
+    return tuple(sorted(roots, key=lambda item: item.as_posix()))
+
+
+def _runtime_import_roots() -> tuple[pathlib.Path, ...]:
+    prefixes = _runtime_prefixes()
+    roots: set[pathlib.Path] = set(_stdlib_roots())
+    roots.update(_site_roots())
+
+    for raw in tuple(sys.path):
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            resolved = pathlib.Path(raw).resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError):
+            continue
+        if _within(resolved, _CONTROL_SOURCE_ROOT):
+            continue
+        if not any(_within(resolved, prefix) for prefix in prefixes):
+            raise RuntimeError(f"Python runtime import search path escaped sealed runtime authority: {resolved}")
+        roots.add(resolved)
+
+    for root in roots:
+        if not any(_within(root, prefix) for prefix in prefixes):
+            raise RuntimeError(f"Python runtime import root escaped sealed runtime authority: {root}")
+    return tuple(sorted(roots, key=lambda item: item.as_posix()))
+
+
+def _runtime_import_paths() -> set[pathlib.Path]:
+    prefixes = _runtime_prefixes()
+    paths: set[pathlib.Path] = set()
+    visited_directories: set[pathlib.Path] = set()
+    stack = list(reversed(_runtime_import_roots()))
+
+    while stack:
+        candidate = stack.pop()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError) as exc:
+            raise RuntimeError("runtime import authority path is unavailable") from exc
+        if not any(_within(resolved, prefix) for prefix in prefixes):
+            raise RuntimeError(f"runtime import authority escaped sealed runtime prefix: {resolved}")
+
+        metadata = resolved.stat()
+        if stat.S_ISREG(metadata.st_mode):
+            paths.add(resolved)
+            if len(paths) > _MAX_FILES:
+                raise RuntimeError("runtime closure file count is outside policy")
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"runtime import authority is not a regular file or directory: {resolved}")
+        if resolved in visited_directories:
+            continue
+        visited_directories.add(resolved)
+
+        try:
+            with os.scandir(resolved) as iterator:
+                children = sorted(iterator, key=lambda item: item.name, reverse=True)
+        except OSError as exc:
+            raise RuntimeError(f"runtime import authority directory is unreadable: {resolved}") from exc
+        for child in children:
+            child_path = pathlib.Path(child.path)
+            try:
+                child_metadata = child_path.lstat()
+            except OSError as exc:
+                raise RuntimeError(f"runtime import authority member is unavailable: {child_path}") from exc
+            if stat.S_ISLNK(child_metadata.st_mode):
+                try:
+                    target = child_path.resolve(strict=True)
+                except (FileNotFoundError, OSError, RuntimeError) as exc:
+                    raise RuntimeError(f"runtime import authority symlink is unresolved: {child_path}") from exc
+                if not any(_within(target, prefix) for prefix in prefixes):
+                    raise RuntimeError(f"runtime import authority symlink escaped sealed runtime prefix: {child_path}")
+                stack.append(target)
+                continue
+            if stat.S_ISDIR(child_metadata.st_mode) or stat.S_ISREG(child_metadata.st_mode):
+                stack.append(child_path)
+                continue
+            raise RuntimeError(f"runtime import authority contains an unsupported filesystem object: {child_path}")
+
+    return paths
+
+
 def _loaded_stdlib_paths() -> set[pathlib.Path]:
+    # Kept for compatibility with focused callers; the closure no longer relies
+    # on load state and instead binds the complete runtime import authority tree.
     stdlib_roots = _stdlib_roots()
     site_roots = _site_roots()
     paths: set[pathlib.Path] = set()
@@ -173,7 +266,7 @@ def snapshot_runtime_closure(python_executable: pathlib.Path) -> RuntimeClosureS
 
     paths = {selected}
     paths.update(_mapped_runtime_paths())
-    paths.update(_loaded_stdlib_paths())
+    paths.update(_runtime_import_paths())
     if len(paths) > _MAX_FILES:
         raise RuntimeError("runtime closure file count is outside policy")
 
