@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import pwd
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+
+_SCHEMA = "amazingbecca.distinct-principal-boundary.v1"
+_MAX_OUTPUT_BYTES = 64 * 1024
+_DEFAULT_TIMEOUT_SECONDS = 10
+_SECRET_ENV_NAMES = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "ACTIONS_RUNTIME_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "OPENAI_API_KEY",
+)
+
+
+@dataclass(frozen=True)
+class SandboxIdentity:
+    user: str
+    uid: int
+    gid: int
+    sudo: pathlib.Path
+
+
+def _trusted_sudo() -> pathlib.Path:
+    resolved = shutil.which("sudo")
+    if not resolved:
+        raise RuntimeError("sudo is required for distinct-principal execution")
+    path = pathlib.Path(resolved).resolve(strict=True)
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("sudo authority is not a regular file")
+    if metadata.st_uid != 0:
+        raise RuntimeError("sudo authority is not root-owned")
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("sudo authority is group/world writable")
+    return path
+
+
+def resolve_identity(user: str) -> SandboxIdentity:
+    if not user or any(character.isspace() for character in user):
+        raise RuntimeError("sandbox user is malformed")
+    try:
+        account = pwd.getpwnam(user)
+    except KeyError as exc:
+        raise RuntimeError(f"sandbox user does not exist: {user}") from exc
+    if account.pw_uid == 0:
+        raise RuntimeError("sandbox user must not be root")
+    if account.pw_uid == os.geteuid():
+        raise RuntimeError("sandbox user must differ from control euid")
+    return SandboxIdentity(user=user, uid=account.pw_uid, gid=account.pw_gid, sudo=_trusted_sudo())
+
+
+def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
+    if not command or any(not isinstance(item, str) or not item for item in command):
+        raise RuntimeError("candidate command is malformed")
+    environment = (
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "PYTHONNOUSERSITE=1",
+        "PYTHONWARNINGS=error",
+    )
+    return [
+        str(identity.sudo),
+        "-n",
+        "-u",
+        identity.user,
+        "--",
+        "/usr/bin/env",
+        "-i",
+        *environment,
+        *command,
+    ]
+
+
+def _probe_source() -> str:
+    return r'''from __future__ import annotations
+import json
+import os
+import pathlib
+import sys
+
+control_pid = int(sys.argv[1])
+sentinel = pathlib.Path(sys.argv[2])
+
+def readable(path: pathlib.Path) -> bool:
+    try:
+        with path.open('rb', buffering=0) as handle:
+            handle.read(1)
+        return True
+    except (PermissionError, FileNotFoundError, ProcessLookupError, OSError):
+        return False
+
+try:
+    os.kill(control_pid, 0)
+    signal_allowed = True
+except PermissionError:
+    signal_allowed = False
+except ProcessLookupError:
+    signal_allowed = False
+
+payload = {
+    'candidate_euid': os.geteuid(),
+    'candidate_egid': os.getegid(),
+    'signal_control_allowed': signal_allowed,
+    'sentinel_readable': readable(sentinel),
+    'proc_environ_readable': readable(pathlib.Path('/proc') / str(control_pid) / 'environ'),
+    'proc_mem_readable': readable(pathlib.Path('/proc') / str(control_pid) / 'mem'),
+    'secret_env_names': sorted(name for name in %r if name in os.environ),
+}
+sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(',', ':')) + '\n')
+''' % (_SECRET_ENV_NAMES,)
+
+
+def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> None:
+    expected_keys = {
+        "candidate_euid",
+        "candidate_egid",
+        "signal_control_allowed",
+        "sentinel_readable",
+        "proc_environ_readable",
+        "proc_mem_readable",
+        "secret_env_names",
+    }
+    if set(payload) != expected_keys:
+        raise RuntimeError("sandbox probe schema drifted")
+    if payload["candidate_euid"] != identity.uid or payload["candidate_egid"] != identity.gid:
+        raise RuntimeError("candidate did not execute under the requested sandbox identity")
+    for name in (
+        "signal_control_allowed",
+        "sentinel_readable",
+        "proc_environ_readable",
+        "proc_mem_readable",
+    ):
+        if payload[name] is not False:
+            raise RuntimeError(f"distinct-principal boundary failed: {name}")
+    if payload["secret_env_names"] != []:
+        raise RuntimeError("candidate inherited a control secret environment name")
+
+
+def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> dict[str, object]:
+    if sys.platform != "linux":
+        raise RuntimeError("distinct-principal boundary is currently defined only for Linux")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise RuntimeError("sandbox probe timeout is outside policy")
+    identity = resolve_identity(sandbox_user)
+    control_pid = os.getpid()
+
+    with tempfile.TemporaryDirectory(prefix="control-private-") as private_directory, tempfile.TemporaryDirectory(prefix="candidate-probe-") as probe_directory:
+        private_root = pathlib.Path(private_directory)
+        private_root.chmod(0o700)
+        sentinel = private_root / "sentinel"
+        sentinel.write_bytes(secrets.token_bytes(32))
+        sentinel.chmod(0o600)
+
+        probe_root = pathlib.Path(probe_directory)
+        probe_root.chmod(0o755)
+        probe = probe_root / "probe.py"
+        probe.write_text(_probe_source(), encoding="utf-8")
+        probe.chmod(0o444)
+
+        command = wrap_command(
+            [str(pathlib.Path(sys.executable).resolve(strict=True)), "-I", str(probe), str(control_pid), str(sentinel)],
+            identity,
+        )
+        completed = subprocess.run(
+            command,
+            cwd=probe_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")},
+            timeout=timeout_seconds,
+            check=False,
+            start_new_session=True,
+        )
+        if len(completed.stdout) + len(completed.stderr) > _MAX_OUTPUT_BYTES:
+            raise RuntimeError("sandbox probe exceeded output ceiling")
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", "replace")[:1000]
+            raise RuntimeError(f"sandbox probe failed with exit {completed.returncode}: {detail}")
+        try:
+            rendered = completed.stdout.decode("utf-8")
+            if rendered.count("\n") != 1 or not rendered.endswith("\n"):
+                raise ValueError("noncanonical line framing")
+            payload = json.loads(rendered)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("sandbox probe output is not canonical JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("sandbox probe payload must be an object")
+        _evaluate_probe(payload, identity)
+
+    return {
+        "schema": _SCHEMA,
+        "control_euid": os.geteuid(),
+        "sandbox_user": identity.user,
+        "sandbox_uid": identity.uid,
+        "sandbox_gid": identity.gid,
+        "signal_control_allowed": False,
+        "sentinel_readable": False,
+        "proc_environ_readable": False,
+        "proc_mem_readable": False,
+        "secret_env_names": [],
+        "passed": True,
+    }
+
+
+def _canonical_json(payload: object) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sandbox-user", default="nobody")
+    parser.add_argument("--timeout-seconds", type=int, default=_DEFAULT_TIMEOUT_SECONDS)
+    args = parser.parse_args(argv)
+    try:
+        report = verify_boundary(sandbox_user=args.sandbox_user, timeout_seconds=args.timeout_seconds)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    sys.stdout.write(_canonical_json(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
