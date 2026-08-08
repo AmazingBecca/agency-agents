@@ -79,7 +79,7 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
     def _digest(self, runner: pathlib.Path) -> str:
         return hashlib.sha256(runner.read_bytes()).hexdigest()
 
-    def _verify(self, bundle: pathlib.Path, runner: pathlib.Path):
+    def _verify(self, bundle: pathlib.Path, runner: pathlib.Path, *, sandbox_user: str | None = None):
         return subject.verify_bound(
             runner_root=bundle,
             entrypoint="isolated_unittest_runner.py",
@@ -90,6 +90,7 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
             base_sha=BASE,
             merge_sha=MERGE,
             timeout_seconds=3,
+            sandbox_user=sandbox_user,
         )
 
     def test_receipt_binds_exact_runner_and_candidate_identity(self) -> None:
@@ -110,6 +111,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(report["sidecar_case_count"], 2)
         self.assertEqual(report["total_case_count"], 14)
         self.assertEqual(report["accepted_attacks"], [])
+        self.assertIsNone(report["sandbox_user"])
+        self.assertIsNone(report["sandbox_boundary"])
         self.assertEqual(
             [case["name"] for case in report["sidecars"]],
             ["instance-calltestmethod-shadow", "getattribute-calltestmethod-shadow"],
@@ -117,6 +120,26 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertTrue(all(case["passed"] for case in report["sidecars"]))
         self.assertTrue(report["sidecar"]["passed"])
         self.assertEqual(report["sidecar"]["name"], "instance-calltestmethod-shadow")
+
+    def test_bound_matrix_executes_under_distinct_nonroot_principal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            root.chmod(0o755)
+            bundle, runner = self._bundle(root)
+            bundle.chmod(0o755)
+            runner.chmod(0o644)
+            report = self._verify(bundle, runner, sandbox_user="nobody")
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["sandbox_user"], "nobody")
+        boundary = report["sandbox_boundary"]
+        self.assertIsInstance(boundary, dict)
+        self.assertTrue(boundary["passed"])
+        self.assertNotEqual(boundary["control_euid"], boundary["sandbox_uid"])
+        self.assertFalse(boundary["signal_control_allowed"])
+        self.assertFalse(boundary["sentinel_readable"])
+        self.assertFalse(boundary["proc_environ_readable"])
+        self.assertFalse(boundary["proc_mem_readable"])
 
     def test_authenticated_digest_mismatch_fails_before_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
