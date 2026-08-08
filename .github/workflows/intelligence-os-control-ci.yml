@@ -45,5 +45,7 @@ jobs:
           check-latest: false
       - name: Compile trusted publisher sources
         run: python -I -m compileall -q intelligence-os-control
+      - name: Prove distinct-principal candidate boundary
+        run: python -I intelligence-os-control/distinct_principal_boundary.py --sandbox-user nobody
       - name: Run trusted publisher regressions
         run: python -I -m unittest discover -s intelligence-os-control/tests -v
