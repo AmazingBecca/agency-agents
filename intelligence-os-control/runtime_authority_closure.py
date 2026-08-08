@@ -61,9 +61,9 @@ def _stable_file(path: pathlib.Path) -> RuntimeFileSnapshot:
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-            raise RuntimeError("runtime closure members must be regular single-link files")
+            raise RuntimeError(f"runtime closure member must be a regular single-link file: {resolved}")
         if before.st_size < 1 or before.st_size > _MAX_FILE_BYTES:
-            raise RuntimeError("runtime closure member size is outside policy")
+            raise RuntimeError(f"runtime closure member size is outside policy: {resolved}")
         digest = hashlib.sha256()
         total = 0
         while True:
@@ -72,12 +72,12 @@ def _stable_file(path: pathlib.Path) -> RuntimeFileSnapshot:
                 break
             total += len(chunk)
             if total > _MAX_FILE_BYTES:
-                raise RuntimeError("runtime closure member size is outside policy")
+                raise RuntimeError(f"runtime closure member size is outside policy: {resolved}")
             digest.update(chunk)
         after = os.fstat(descriptor)
         before_identity = _identity(before)
         if before_identity != _identity(after) or total != before.st_size:
-            raise RuntimeError("runtime closure member changed during authority read")
+            raise RuntimeError(f"runtime closure member changed during authority read: {resolved}")
         return RuntimeFileSnapshot(
             path=resolved,
             sha256=digest.hexdigest(),
@@ -146,15 +146,18 @@ def _mapped_runtime_paths() -> set[pathlib.Path]:
         fields = line.split(maxsplit=5)
         if len(fields) < 6:
             continue
+        permissions = fields[1]
+        if "x" not in permissions:
+            continue
         raw = fields[5]
         if raw.endswith(" (deleted)"):
-            raise RuntimeError("a mapped runtime authority file was deleted")
+            raise RuntimeError("an executable mapped runtime authority file was deleted")
         if not raw.startswith("/"):
             continue
         try:
             path = pathlib.Path(raw).resolve(strict=True)
         except (FileNotFoundError, OSError, RuntimeError) as exc:
-            raise RuntimeError("mapped runtime authority path is unavailable") from exc
+            raise RuntimeError("executable mapped runtime authority path is unavailable") from exc
         if path.is_file():
             paths.add(path)
     return paths
