@@ -44,6 +44,6 @@ jobs:
           python-version: '3.12.13'
           check-latest: false
       - name: Compile trusted publisher sources
-        run: python -m compileall -q intelligence-os-control
+        run: python -I -m compileall -q intelligence-os-control
       - name: Run trusted publisher regressions
-        run: python -m unittest discover -s intelligence-os-control/tests -v
+        run: python -I -m unittest discover -s intelligence-os-control/tests -v
