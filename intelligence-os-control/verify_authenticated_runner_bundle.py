@@ -10,6 +10,7 @@ import stat
 import sys
 from dataclasses import dataclass
 
+import runtime_authority_closure as runtime_closure
 import verify_bound_candidate_test_authority as bound
 
 _SCHEMA = "amazingbecca.authenticated-runner-bundle.v2"
@@ -269,6 +270,16 @@ def verify_authenticated_bundle(
     _assert_bundle_not_writable_by_sandbox(before, sandbox_user)
     _assert_runtime_not_writable_by_sandbox(runtime_before, sandbox_user)
 
+    closure_before: runtime_closure.RuntimeClosureSnapshot | None = None
+    if sandbox_user is not None:
+        sandbox_identity = bound.boundary.resolve_identity(sandbox_user)
+        closure_before = runtime_closure.snapshot_runtime_closure(runtime_before.path)
+        runtime_closure.assert_closure_not_writable_by_identity(
+            closure_before,
+            uid=sandbox_identity.uid,
+            gid=sandbox_identity.gid,
+        )
+
     inner = bound.verify_bound(
         runner_root=before.root,
         entrypoint=entrypoint,
@@ -285,6 +296,11 @@ def verify_authenticated_bundle(
     runtime_after = _snapshot_python_executable(runtime_before.path)
     if runtime_after != runtime_before:
         raise RuntimeError("Python executable authority changed during external verification")
+
+    if closure_before is not None:
+        closure_after = runtime_closure.snapshot_runtime_closure(runtime_before.path)
+        if closure_after != closure_before:
+            raise RuntimeError("Python runtime closure changed during external verification")
 
     after = snapshot_bundle(before.root)
     if (
@@ -311,6 +327,15 @@ def verify_authenticated_bundle(
             "python_bytes": runtime_before.total_bytes,
             "python_mode": runtime_before.mode,
             "python_sandbox_readonly": sandbox_user is not None,
+            "runtime_closure_enforced": closure_before is not None,
+            "runtime_closure_schema": closure_before.schema if closure_before is not None else None,
+            "runtime_closure_sha256": closure_before.sha256 if closure_before is not None else None,
+            "runtime_closure_file_count": closure_before.file_count if closure_before is not None else 0,
+            "runtime_closure_bytes": closure_before.total_bytes if closure_before is not None else 0,
+            "runtime_closure_files": runtime_closure.render_manifest(closure_before)
+            if closure_before is not None
+            else [],
+            "runtime_closure_sandbox_readonly": closure_before is not None,
         }
     )
     return report
