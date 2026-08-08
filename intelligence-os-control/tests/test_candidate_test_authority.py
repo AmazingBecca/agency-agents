@@ -47,10 +47,14 @@ class CandidateTestAuthorityTests(unittest.TestCase):
                 timeout_seconds=3,
             )
         self.assertTrue(report['passed'])
-        self.assertEqual(report['case_count'], 11)
+        self.assertEqual(report['case_count'], 12)
         self.assertEqual(report['accepted_attacks'], [])
         self.assertEqual(report['rejected_clean'], [])
         self.assertEqual(report['cases'][0]['name'], 'clean-pass')
+        self.assertIn(
+            'transient-testcase-run-forgery',
+            {item['name'] for item in report['cases']},
+        )
         self.assertTrue(all(item['passed'] for item in report['cases']))
 
     def test_always_green_runner_is_rejected_as_accepting_attacks(self) -> None:
@@ -63,7 +67,8 @@ class CandidateTestAuthorityTests(unittest.TestCase):
                 timeout_seconds=3,
             )
         self.assertFalse(report['passed'])
-        self.assertEqual(len(report['accepted_attacks']), 10)
+        self.assertEqual(len(report['accepted_attacks']), 11)
+        self.assertIn('transient-testcase-run-forgery', report['accepted_attacks'])
         self.assertNotIn('clean-pass', report['accepted_attacks'])
         self.assertEqual(report['rejected_clean'], [])
 
