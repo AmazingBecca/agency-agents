@@ -36,6 +36,9 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
             "nproc_soft": 1,
             "nproc_hard": 1,
             "fork_blocked": True,
+            "control_net_ns": 1001,
+            "candidate_net_ns": 2002,
+            "network_interfaces": ["lo"],
         }
 
     def test_good_probe_payload_is_accepted(self) -> None:
@@ -93,14 +96,29 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "process-count|descendant"):
                     subject._evaluate_probe(payload, self._identity())
 
+    def test_network_namespace_controls_fail_closed(self) -> None:
+        mutations = (
+            ("candidate_net_ns", 1001, "network namespace"),
+            ("control_net_ns", 0, "network namespace"),
+            ("candidate_net_ns", True, "network namespace"),
+            ("network_interfaces", ["eth0", "lo"], "unexpected interfaces"),
+        )
+        for field, value, message in mutations:
+            with self.subTest(field=field):
+                payload = self._good_payload()
+                payload[field] = value
+                with self.assertRaisesRegex(RuntimeError, message):
+                    subject._evaluate_probe(payload, self._identity())
+
     def test_probe_schema_drift_is_rejected(self) -> None:
         payload = self._good_payload()
         payload["extra"] = "forged"
         with self.assertRaisesRegex(RuntimeError, "schema drifted"):
             subject._evaluate_probe(payload, self._identity())
 
-    def test_wrapped_command_locks_privileges_and_descendant_creation(self) -> None:
+    def test_wrapped_command_locks_privileges_descendants_and_network(self) -> None:
         tools = {
+            "unshare": pathlib.Path("/usr/bin/unshare"),
             "prlimit": pathlib.Path("/usr/bin/prlimit"),
             "setpriv": pathlib.Path("/usr/bin/setpriv"),
             "env": pathlib.Path("/usr/bin/env"),
@@ -110,7 +128,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
 
         self.assertEqual(command[:3], ["/usr/bin/sudo", "-n", "--"])
         rendered = " ".join(command)
-        self.assertIn("/usr/bin/prlimit --nproc=1:1 --core=0:0 --", rendered)
+        self.assertIn("/usr/bin/unshare --net -- /usr/bin/prlimit --nproc=1:1 --core=0:0 --", rendered)
         self.assertIn("/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups", rendered)
         self.assertIn("--no-new-privs", command)
         self.assertIn("--inh-caps=-all", command)
