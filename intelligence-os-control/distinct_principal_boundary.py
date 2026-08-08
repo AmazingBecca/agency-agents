@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 
-_SCHEMA = "amazingbecca.distinct-principal-boundary.v3"
+_SCHEMA = "amazingbecca.distinct-principal-boundary.v4"
 _MAX_OUTPUT_BYTES = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 10
 _SECRET_ENV_NAMES = (
@@ -89,6 +89,9 @@ def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
         "--",
         str(unshare),
         "--net",
+        "--pid",
+        "--fork",
+        "--mount-proc",
         "--",
         str(prlimit),
         "--nproc=1:1",
@@ -122,6 +125,8 @@ import sys
 control_pid = int(sys.argv[1])
 sentinel = pathlib.Path(sys.argv[2])
 control_net_ns = int(sys.argv[3])
+control_pid_ns = int(sys.argv[4])
+control_mnt_ns = int(sys.argv[5])
 
 def readable(path: pathlib.Path) -> bool:
     try:
@@ -141,9 +146,7 @@ def status_value(name: str) -> str:
 try:
     os.kill(control_pid, 0)
     signal_allowed = True
-except PermissionError:
-    signal_allowed = False
-except ProcessLookupError:
+except (PermissionError, ProcessLookupError):
     signal_allowed = False
 
 try:
@@ -157,14 +160,18 @@ else:
     fork_blocked = False
 
 soft_nproc, hard_nproc = resource.getrlimit(resource.RLIMIT_NPROC)
+proc_visible_pids = sorted(int(item.name) for item in pathlib.Path('/proc').iterdir() if item.name.isdecimal())
 payload = {
     'candidate_euid': os.geteuid(),
     'candidate_egid': os.getegid(),
     'candidate_groups': os.getgroups(),
+    'candidate_pid': os.getpid(),
     'signal_control_allowed': signal_allowed,
     'sentinel_readable': readable(sentinel),
+    'control_pid_visible': (pathlib.Path('/proc') / str(control_pid)).exists(),
     'proc_environ_readable': readable(pathlib.Path('/proc') / str(control_pid) / 'environ'),
     'proc_mem_readable': readable(pathlib.Path('/proc') / str(control_pid) / 'mem'),
+    'proc_visible_pids': proc_visible_pids,
     'secret_env_names': sorted(name for name in %r if name in os.environ),
     'no_new_privs': status_value('NoNewPrivs'),
     'cap_eff': status_value('CapEff'),
@@ -174,6 +181,10 @@ payload = {
     'fork_blocked': fork_blocked,
     'control_net_ns': control_net_ns,
     'candidate_net_ns': os.stat('/proc/self/ns/net').st_ino,
+    'control_pid_ns': control_pid_ns,
+    'candidate_pid_ns': os.stat('/proc/self/ns/pid').st_ino,
+    'control_mnt_ns': control_mnt_ns,
+    'candidate_mnt_ns': os.stat('/proc/self/ns/mnt').st_ino,
     'network_interfaces': sorted(name for _index, name in socket.if_nameindex()),
 }
 sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(',', ':')) + '\n')
@@ -185,10 +196,13 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         "candidate_euid",
         "candidate_egid",
         "candidate_groups",
+        "candidate_pid",
         "signal_control_allowed",
         "sentinel_readable",
+        "control_pid_visible",
         "proc_environ_readable",
         "proc_mem_readable",
+        "proc_visible_pids",
         "secret_env_names",
         "no_new_privs",
         "cap_eff",
@@ -198,6 +212,10 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         "fork_blocked",
         "control_net_ns",
         "candidate_net_ns",
+        "control_pid_ns",
+        "candidate_pid_ns",
+        "control_mnt_ns",
+        "candidate_mnt_ns",
         "network_interfaces",
     }
     if set(payload) != expected_keys:
@@ -209,11 +227,14 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
     for name in (
         "signal_control_allowed",
         "sentinel_readable",
+        "control_pid_visible",
         "proc_environ_readable",
         "proc_mem_readable",
     ):
         if payload[name] is not False:
             raise RuntimeError(f"distinct-principal boundary failed: {name}")
+    if payload["candidate_pid"] != 1 or payload["proc_visible_pids"] != [1]:
+        raise RuntimeError("candidate proc view is not reduced to the isolated PID namespace")
     if payload["secret_env_names"] != []:
         raise RuntimeError("candidate inherited a control secret environment name")
     if payload["no_new_privs"] != "1":
@@ -225,18 +246,23 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         raise RuntimeError("candidate process-count ceiling is not locked to one")
     if payload["fork_blocked"] is not True:
         raise RuntimeError("candidate can create descendant processes")
-    control_net_ns = payload["control_net_ns"]
-    candidate_net_ns = payload["candidate_net_ns"]
-    if (
-        not isinstance(control_net_ns, int)
-        or isinstance(control_net_ns, bool)
-        or control_net_ns <= 0
-        or not isinstance(candidate_net_ns, int)
-        or isinstance(candidate_net_ns, bool)
-        or candidate_net_ns <= 0
-        or candidate_net_ns == control_net_ns
+    for control_name, candidate_name, label in (
+        ("control_net_ns", "candidate_net_ns", "network"),
+        ("control_pid_ns", "candidate_pid_ns", "PID"),
+        ("control_mnt_ns", "candidate_mnt_ns", "mount"),
     ):
-        raise RuntimeError("candidate network namespace is not isolated from control")
+        control_ns = payload[control_name]
+        candidate_ns = payload[candidate_name]
+        if (
+            not isinstance(control_ns, int)
+            or isinstance(control_ns, bool)
+            or control_ns <= 0
+            or not isinstance(candidate_ns, int)
+            or isinstance(candidate_ns, bool)
+            or candidate_ns <= 0
+            or candidate_ns == control_ns
+        ):
+            raise RuntimeError(f"candidate {label} namespace is not isolated from control")
     if payload["network_interfaces"] != ["lo"]:
         raise RuntimeError("candidate network namespace exposes unexpected interfaces")
 
@@ -249,6 +275,8 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
     identity = resolve_identity(sandbox_user)
     control_pid = os.getpid()
     control_net_ns = pathlib.Path("/proc/self/ns/net").stat().st_ino
+    control_pid_ns = pathlib.Path("/proc/self/ns/pid").stat().st_ino
+    control_mnt_ns = pathlib.Path("/proc/self/ns/mnt").stat().st_ino
 
     with tempfile.TemporaryDirectory(prefix="control-private-") as private_directory, tempfile.TemporaryDirectory(prefix="candidate-probe-") as probe_directory:
         private_root = pathlib.Path(private_directory)
@@ -271,6 +299,8 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
                 str(control_pid),
                 str(sentinel),
                 str(control_net_ns),
+                str(control_pid_ns),
+                str(control_mnt_ns),
             ],
             identity,
         )
@@ -310,8 +340,10 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         "supplementary_groups": [],
         "signal_control_allowed": False,
         "sentinel_readable": False,
+        "control_pid_visible": False,
         "proc_environ_readable": False,
         "proc_mem_readable": False,
+        "proc_visible_pids": [1],
         "secret_env_names": [],
         "no_new_privs": True,
         "effective_capabilities": "0000000000000000",
@@ -322,6 +354,12 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         "control_net_ns": control_net_ns,
         "candidate_net_ns": payload["candidate_net_ns"],
         "network_namespace_distinct": True,
+        "control_pid_ns": control_pid_ns,
+        "candidate_pid_ns": payload["candidate_pid_ns"],
+        "pid_namespace_distinct": True,
+        "control_mnt_ns": control_mnt_ns,
+        "candidate_mnt_ns": payload["candidate_mnt_ns"],
+        "mount_namespace_distinct": True,
         "network_interfaces": ["lo"],
         "passed": True,
     }
