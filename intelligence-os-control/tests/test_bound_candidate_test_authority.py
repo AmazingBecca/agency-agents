@@ -45,7 +45,24 @@ args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
 if 'class Clean' in source and 'def test_pass' in source:
     raise SystemExit(0)
-if '_callTestMethod' in source:
+if '_callTestMethod' in source and 'setUp' in source:
+    raise SystemExit(0)
+raise SystemExit(7)
+'''
+
+GETATTRIBUTE_ESCAPE_RUNNER = r'''
+from __future__ import annotations
+import argparse
+import pathlib
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--project-root', type=pathlib.Path, required=True)
+parser.add_argument('--pattern')
+args = parser.parse_args()
+source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
+if 'class Clean' in source and 'def test_pass' in source:
+    raise SystemExit(0)
+if '__getattribute__' in source and '_callTestMethod' in source:
     raise SystemExit(0)
 raise SystemExit(7)
 '''
@@ -53,10 +70,10 @@ raise SystemExit(7)
 
 class BoundCandidateTestAuthorityTests(unittest.TestCase):
     def _bundle(self, root: pathlib.Path, source: str = GOOD_RUNNER) -> tuple[pathlib.Path, pathlib.Path]:
-        bundle = root / 'runner'
+        bundle = root / "runner"
         bundle.mkdir()
-        runner = bundle / 'isolated_unittest_runner.py'
-        runner.write_text(textwrap.dedent(source).lstrip(), encoding='utf-8')
+        runner = bundle / "isolated_unittest_runner.py"
+        runner.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
         return bundle, runner
 
     def _digest(self, runner: pathlib.Path) -> str:
@@ -65,7 +82,7 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
     def _verify(self, bundle: pathlib.Path, runner: pathlib.Path):
         return subject.verify_bound(
             runner_root=bundle,
-            entrypoint='isolated_unittest_runner.py',
+            entrypoint="isolated_unittest_runner.py",
             python_executable=pathlib.Path(sys.executable),
             expected_runner_sha256=self._digest(runner),
             repository=REPOSITORY,
@@ -81,32 +98,36 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
             expected = self._digest(runner)
             report = self._verify(bundle, runner)
 
-        self.assertTrue(report['passed'])
-        self.assertEqual(report['schema'], 'amazingbecca.bound-candidate-test-authority.v1')
-        self.assertEqual(report['authority_level'], 'diagnostic-bound-not-terminal')
-        self.assertEqual(report['repository'], REPOSITORY)
-        self.assertEqual(report['head_sha'], HEAD)
-        self.assertEqual(report['base_sha'], BASE)
-        self.assertEqual(report['merge_sha'], MERGE)
-        self.assertEqual(report['runner_sha256'], expected)
-        self.assertEqual(report['diagnostic_case_count'], 12)
-        self.assertEqual(report['sidecar_case_count'], 1)
-        self.assertEqual(report['total_case_count'], 13)
-        self.assertEqual(report['accepted_attacks'], [])
-        self.assertTrue(report['sidecar']['passed'])
-        self.assertEqual(report['sidecar']['name'], 'instance-calltestmethod-shadow')
-        self.assertNotEqual(report['sidecar']['returncode'], 0)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["schema"], "amazingbecca.bound-candidate-test-authority.v1")
+        self.assertEqual(report["authority_level"], "diagnostic-bound-not-terminal")
+        self.assertEqual(report["repository"], REPOSITORY)
+        self.assertEqual(report["head_sha"], HEAD)
+        self.assertEqual(report["base_sha"], BASE)
+        self.assertEqual(report["merge_sha"], MERGE)
+        self.assertEqual(report["runner_sha256"], expected)
+        self.assertEqual(report["diagnostic_case_count"], 12)
+        self.assertEqual(report["sidecar_case_count"], 2)
+        self.assertEqual(report["total_case_count"], 14)
+        self.assertEqual(report["accepted_attacks"], [])
+        self.assertEqual(
+            [case["name"] for case in report["sidecars"]],
+            ["instance-calltestmethod-shadow", "getattribute-calltestmethod-shadow"],
+        )
+        self.assertTrue(all(case["passed"] for case in report["sidecars"]))
+        self.assertTrue(report["sidecar"]["passed"])
+        self.assertEqual(report["sidecar"]["name"], "instance-calltestmethod-shadow")
 
     def test_authenticated_digest_mismatch_fails_before_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle, _ = self._bundle(pathlib.Path(directory))
-            with patch.object(subject.diagnostic, 'verify') as verifier:
-                with self.assertRaisesRegex(RuntimeError, 'does not match authenticated expectation'):
+            with patch.object(subject.diagnostic, "verify") as verifier:
+                with self.assertRaisesRegex(RuntimeError, "does not match authenticated expectation"):
                     subject.verify_bound(
                         runner_root=bundle,
-                        entrypoint='isolated_unittest_runner.py',
+                        entrypoint="isolated_unittest_runner.py",
                         python_executable=pathlib.Path(sys.executable),
-                        expected_runner_sha256='0' * 64,
+                        expected_runner_sha256="0" * 64,
                         repository=REPOSITORY,
                         head_sha=HEAD,
                         base_sha=BASE,
@@ -121,33 +142,48 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
             expected = self._digest(runner)
 
             def mutate(**kwargs):
-                runner.write_text('raise SystemExit(0)\n', encoding='utf-8')
+                runner.write_text("raise SystemExit(0)\n", encoding="utf-8")
                 return {
-                    'schema': 'amazingbecca.candidate-test-authority-matrix.v1',
-                    'passed': True,
-                    'case_count': 12,
-                    'accepted_attacks': [],
-                    'rejected_clean': [],
+                    "schema": "amazingbecca.candidate-test-authority-matrix.v1",
+                    "passed": True,
+                    "case_count": 12,
+                    "accepted_attacks": [],
+                    "rejected_clean": [],
                 }
 
-            sidecar = {
-                'name': 'instance-calltestmethod-shadow',
-                'expected_zero': False,
-                'returncode': 7,
-                'passed': True,
-                'stdout_bytes': 0,
-                'stderr_bytes': 0,
-                'elapsed_ms': 0,
-            }
-            with patch.object(subject.diagnostic, 'verify', side_effect=mutate), patch.object(
+            sidecars = [
+                {
+                    "name": "instance-calltestmethod-shadow",
+                    "expected_zero": False,
+                    "returncode": 7,
+                    "passed": True,
+                    "stdout_bytes": 0,
+                    "stderr_bytes": 0,
+                    "elapsed_ms": 0,
+                },
+                {
+                    "name": "getattribute-calltestmethod-shadow",
+                    "expected_zero": False,
+                    "returncode": 7,
+                    "passed": True,
+                    "stdout_bytes": 0,
+                    "stderr_bytes": 0,
+                    "elapsed_ms": 0,
+                },
+            ]
+            with patch.object(subject.diagnostic, "verify", side_effect=mutate), patch.object(
                 subject,
-                '_run_instance_dispatch_attack',
-                return_value=sidecar,
+                "_run_instance_dispatch_attack",
+                return_value=sidecars[0],
+            ), patch.object(
+                subject,
+                "_run_getattribute_dispatch_attack",
+                return_value=sidecars[1],
             ):
-                with self.assertRaisesRegex(RuntimeError, 'changed during external verification'):
+                with self.assertRaisesRegex(RuntimeError, "changed during external verification"):
                     subject.verify_bound(
                         runner_root=bundle,
-                        entrypoint='isolated_unittest_runner.py',
+                        entrypoint="isolated_unittest_runner.py",
                         python_executable=pathlib.Path(sys.executable),
                         expected_runner_sha256=expected,
                         repository=REPOSITORY,
@@ -157,30 +193,44 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                         timeout_seconds=3,
                     )
 
-    def test_new_instance_dispatch_escape_is_an_explicit_red_case(self) -> None:
+    def test_instance_dispatch_escape_is_an_explicit_red_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory), INSTANCE_ESCAPE_RUNNER)
             report = self._verify(bundle, runner)
 
-        self.assertFalse(report['passed'])
-        self.assertEqual(report['accepted_attacks'], ['instance-calltestmethod-shadow'])
-        self.assertFalse(report['sidecar']['passed'])
-        self.assertEqual(report['sidecar']['returncode'], 0)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["accepted_attacks"], ["instance-calltestmethod-shadow"])
+        by_name = {case["name"]: case for case in report["sidecars"]}
+        self.assertFalse(by_name["instance-calltestmethod-shadow"]["passed"])
+        self.assertEqual(by_name["instance-calltestmethod-shadow"]["returncode"], 0)
+        self.assertTrue(by_name["getattribute-calltestmethod-shadow"]["passed"])
+
+    def test_getattribute_dispatch_escape_is_an_explicit_red_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), GETATTRIBUTE_ESCAPE_RUNNER)
+            report = self._verify(bundle, runner)
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["accepted_attacks"], ["getattribute-calltestmethod-shadow"])
+        by_name = {case["name"]: case for case in report["sidecars"]}
+        self.assertFalse(by_name["getattribute-calltestmethod-shadow"]["passed"])
+        self.assertEqual(by_name["getattribute-calltestmethod-shadow"]["returncode"], 0)
+        self.assertTrue(by_name["instance-calltestmethod-shadow"]["passed"])
 
     def test_identity_fields_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory))
             expected = self._digest(runner)
             for repository, head in (
-                ('not-a-repository', HEAD),
-                (REPOSITORY, 'A' * 40),
-                (REPOSITORY, 'abc'),
+                ("not-a-repository", HEAD),
+                (REPOSITORY, "A" * 40),
+                (REPOSITORY, "abc"),
             ):
                 with self.subTest(repository=repository, head=head):
                     with self.assertRaises(RuntimeError):
                         subject.verify_bound(
                             runner_root=bundle,
-                            entrypoint='isolated_unittest_runner.py',
+                            entrypoint="isolated_unittest_runner.py",
                             python_executable=pathlib.Path(sys.executable),
                             expected_runner_sha256=expected,
                             repository=repository,
@@ -191,5 +241,5 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
