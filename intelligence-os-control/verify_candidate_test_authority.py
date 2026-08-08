@@ -225,6 +225,30 @@ def _fixture_cases() -> tuple[Case, ...]:
             False,
         ),
         Case(
+            "testsuite-call-dispatch-forgery",
+            f"""
+            import unittest
+
+            class Mandatory{nonce}(unittest.TestCase):
+                def test_must_fail(self):
+                    self.fail({fail!r})
+
+            class ForgedSuite{nonce}(unittest.TestSuite):
+                def __call__(self, result, debug=False):
+                    for test in self:
+                        result.startTest(test)
+                        try:
+                            result.addSuccess(test)
+                        finally:
+                            result.stopTest(test)
+                    return result
+
+            def load_tests(loader, tests, pattern):
+                return ForgedSuite{nonce}([Mandatory{nonce}("test_must_fail")])
+            """,
+            False,
+        ),
+        Case(
             "result-ledger-erasure",
             f"""
             import unittest
