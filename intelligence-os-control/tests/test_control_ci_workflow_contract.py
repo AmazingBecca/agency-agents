@@ -20,18 +20,19 @@ EXPECTED_BOUNDARY = (
 EXPECTED_TEST = '"$CONTROL_PYTHON" -I -m unittest discover -s intelligence-os-control/tests -v'
 EXPECTED_RUNTIME_STAGE = (
     "set -Eeuo pipefail",
-    '[[ "$pythonLocation" = /* ]]',
+    '[[ "$pythonLocation" = /opt/hostedtoolcache/Python/3.12.13/* ]]',
     'runtime_root="/opt/amazingbecca-control-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
     'test ! -e "$runtime_root"',
-    'sudo install -d -o root -g root -m 0755 "$runtime_root"',
-    'sudo cp -a -- "$pythonLocation/." "$runtime_root/"',
+    'sudo mv -- "$pythonLocation" "$runtime_root"',
     'sudo chown -R root:root "$runtime_root"',
     'sudo chmod -R a-w "$runtime_root"',
     'control_python="$runtime_root/bin/python3.12"',
     'test -x "$control_python"',
     'test "$(stat -c \'%u:%g:%a\' "$control_python")" = "0:0:555"',
-    '"$control_python" -I -c \'import pathlib,sys; p=pathlib.Path(sys.executable).resolve(strict=True); assert str(p).startswith("/opt/amazingbecca-control-python-")\'',
+    'test "$(stat -c \'%u:%g:%a\' "$runtime_root")" = "0:0:555"',
+    'LD_LIBRARY_PATH="$runtime_root/lib" "$control_python" -I -c \'import pathlib,sys; p=pathlib.Path(sys.executable).resolve(strict=True); assert str(p).startswith("/opt/amazingbecca-control-python-"); assert pathlib.Path(sys.base_prefix).resolve(strict=True) == p.parent.parent\'',
     'printf \'CONTROL_PYTHON=%s\\n\' "$control_python" >> "$GITHUB_ENV"',
+    'printf \'LD_LIBRARY_PATH=%s\\n\' "$runtime_root/lib" >> "$GITHUB_ENV"',
 )
 
 
@@ -41,14 +42,14 @@ def _read() -> str:
 
 def _runtime_stage(source: str) -> tuple[str, ...]:
     match = re.search(
-        r"(?m)^      - name: Stage immutable control Python runtime\n"
+        r"(?m)^      - name: Seal immutable control Python runtime\n"
         r"        shell: bash\n"
         r"        run: \|\n"
         r"(?P<body>(?:          [^\n]*\n)+)",
         source,
     )
-    if match is None or len(re.findall(r"(?m)^      - name: Stage immutable control Python runtime$", source)) != 1:
-        raise AssertionError("immutable control runtime stage is missing or duplicated")
+    if match is None or len(re.findall(r"(?m)^      - name: Seal immutable control Python runtime$", source)) != 1:
+        raise AssertionError("immutable control runtime seal is missing or duplicated")
     return tuple(line[10:] for line in match.group("body").splitlines())
 
 
@@ -74,7 +75,7 @@ def _assert_contract(source: str) -> None:
         raise AssertionError("exact control source binding is missing")
 
     if _runtime_stage(source) != EXPECTED_RUNTIME_STAGE:
-        raise AssertionError("immutable control runtime staging contract drifted")
+        raise AssertionError("immutable control runtime sealing contract drifted")
 
     required = (
         "ref: ${{ env.CONTROL_SOURCE_SHA }}",
@@ -142,11 +143,7 @@ class ControlCIWorkflowContractTests(unittest.TestCase):
                 "${{ github.head_ref || github.ref_name }}",
                 1,
             ),
-            source.replace(
-                EXPECTED_CANCEL,
-                "true",
-                1,
-            ),
+            source.replace(EXPECTED_CANCEL, "true", 1),
         )
         for attack in attacks:
             with self.subTest():
@@ -168,10 +165,11 @@ class ControlCIWorkflowContractTests(unittest.TestCase):
     def test_immutable_runtime_stage_cannot_be_removed_or_weakened(self) -> None:
         source = _read()
         attacks = (
-            source.replace('sudo cp -a -- "$pythonLocation/." "$runtime_root/"', 'cp -a -- "$pythonLocation/." "$runtime_root/"', 1),
+            source.replace('sudo mv -- "$pythonLocation" "$runtime_root"', 'mv -- "$pythonLocation" "$runtime_root"', 1),
             source.replace('sudo chown -R root:root "$runtime_root"', 'sudo chown -R runner:runner "$runtime_root"', 1),
             source.replace('sudo chmod -R a-w "$runtime_root"', 'sudo chmod -R a+w "$runtime_root"', 1),
             source.replace('test "$(stat -c \'%u:%g:%a\' "$control_python")" = "0:0:555"', 'test -x "$control_python"', 1),
+            source.replace('test "$(stat -c \'%u:%g:%a\' "$runtime_root")" = "0:0:555"', 'test -d "$runtime_root"', 1),
             source.replace('sudo chmod -R a-w "$runtime_root"', 'sudo chmod -R a-w "$runtime_root" || true', 1),
             source.replace('printf \'CONTROL_PYTHON=%s\\n\' "$control_python" >> "$GITHUB_ENV"', 'printf \'CONTROL_PYTHON=%s\\n\' "$pythonLocation/bin/python" >> "$GITHUB_ENV"', 1),
         )
