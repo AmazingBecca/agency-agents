@@ -23,6 +23,8 @@ _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _INSTANCE_DISPATCH_CASE = "instance-calltestmethod-shadow"
 _GETATTRIBUTE_DISPATCH_CASE = "getattribute-calltestmethod-shadow"
+_CONTROL_SOURCE_VISIBILITY_CASE = "trusted-control-source-read"
+_TRUSTED_CONTROL_ROOT = pathlib.Path(__file__).resolve(strict=True).parent.parent
 
 
 def _canonical_json(payload: object) -> str:
@@ -114,6 +116,10 @@ def _sandboxed_candidate_execution(sandbox_user: str | None):
         yield None
         return
 
+    control_metadata = _TRUSTED_CONTROL_ROOT.lstat()
+    if stat.S_ISLNK(control_metadata.st_mode) or not stat.S_ISDIR(control_metadata.st_mode):
+        raise RuntimeError("trusted control checkout must be one real directory")
+
     boundary_report = boundary.verify_boundary(sandbox_user=sandbox_user)
     sandbox_identity = boundary.resolve_identity(sandbox_user)
     original_bounded_run = diagnostic._bounded_run
@@ -125,7 +131,11 @@ def _sandboxed_candidate_execution(sandbox_user: str | None):
         timeout_seconds: int,
     ) -> tuple[int, bytes, bytes, float]:
         return original_bounded_run(
-            boundary.wrap_command(command, sandbox_identity),
+            boundary.wrap_command(
+                command,
+                sandbox_identity,
+                hidden_paths=(_TRUSTED_CONTROL_ROOT,),
+            ),
             cwd=cwd,
             timeout_seconds=timeout_seconds,
         )
@@ -282,6 +292,55 @@ def _run_getattribute_dispatch_attack(
     )
 
 
+def _run_control_source_visibility_attack(
+    *,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    target = pathlib.Path(__file__).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="bound-control-source-") as directory:
+        project = pathlib.Path(directory)
+        project.chmod(0o711)
+        probe = project / "probe.py"
+        probe.write_text(
+            textwrap.dedent(
+                """
+                import pathlib
+                import sys
+
+                target = pathlib.Path(sys.argv[1])
+                try:
+                    target.read_bytes()
+                except OSError:
+                    raise SystemExit(7)
+                raise SystemExit(0)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        probe.chmod(0o444)
+        returncode, output, errors, elapsed = diagnostic._bounded_run(
+            [
+                str(python_executable),
+                "-I",
+                str(probe),
+                str(target),
+            ],
+            cwd=project,
+            timeout_seconds=timeout_seconds,
+        )
+
+    return {
+        "name": _CONTROL_SOURCE_VISIBILITY_CASE,
+        "expected_zero": False,
+        "returncode": returncode,
+        "passed": returncode != 0,
+        "stdout_bytes": len(output),
+        "stderr_bytes": len(errors),
+        "elapsed_ms": int(elapsed * 1000),
+    }
+
+
 def verify_bound(
     *,
     runner_root: pathlib.Path,
@@ -333,6 +392,13 @@ def verify_bound(
                 timeout_seconds=timeout_seconds,
             ),
         ]
+        if sandbox_user is not None:
+            sidecars.append(
+                _run_control_source_visibility_attack(
+                    python_executable=python_executable,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
 
     after_runner, after_digest, after_bytes = _stable_runner_digest(runner_root, entrypoint)
     if after_runner != runner or after_digest != before_digest or after_bytes != runner_bytes:
