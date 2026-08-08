@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 
+import distinct_principal_boundary as boundary
 import verify_candidate_test_authority as diagnostic
 
 _SCHEMA = "amazingbecca.bound-candidate-test-authority.v1"
@@ -92,6 +94,89 @@ def _stable_runner_digest(root: pathlib.Path, entrypoint: str) -> tuple[pathlib.
         return resolved, digest.hexdigest(), total
     finally:
         os.close(descriptor)
+
+
+def _assert_sandbox_runner_access(runner: pathlib.Path) -> None:
+    metadata = runner.stat()
+    if not metadata.st_mode & stat.S_IROTH:
+        raise RuntimeError("runner entrypoint is not readable by the sandbox principal")
+    for parent in runner.parents:
+        if parent == pathlib.Path("/"):
+            break
+        parent_metadata = parent.stat()
+        if not parent_metadata.st_mode & stat.S_IXOTH:
+            raise RuntimeError("runner path is not traversable by the sandbox principal")
+
+
+@contextlib.contextmanager
+def _sandboxed_candidate_execution(sandbox_user: str | None):
+    if sandbox_user is None:
+        yield None
+        return
+
+    boundary_report = boundary.verify_boundary(sandbox_user=sandbox_user)
+    sandbox_identity = boundary.resolve_identity(sandbox_user)
+    original_bounded_run = diagnostic._bounded_run
+
+    def sandboxed_bounded_run(
+        command: list[str],
+        *,
+        cwd: pathlib.Path,
+        timeout_seconds: int,
+    ) -> tuple[int, bytes, bytes, float]:
+        return original_bounded_run(
+            boundary.wrap_command(command, sandbox_identity),
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+    diagnostic._bounded_run = sandboxed_bounded_run
+    try:
+        yield boundary_report
+    finally:
+        diagnostic._bounded_run = original_bounded_run
+
+
+def _run_diagnostic_matrix(
+    *,
+    runner_root: pathlib.Path,
+    entrypoint: str,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+    sandboxed: bool,
+) -> dict[str, object]:
+    if not sandboxed:
+        return diagnostic.verify(
+            runner_root=runner_root,
+            entrypoint=entrypoint,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+        )
+
+    original_tempdir = tempfile.TemporaryDirectory
+
+    class TraversableTemporaryDirectory:
+        def __init__(self, *args, **kwargs):
+            self._inner = original_tempdir(*args, **kwargs)
+
+        def __enter__(self):
+            directory = self._inner.__enter__()
+            pathlib.Path(directory).chmod(0o711)
+            return directory
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self._inner.__exit__(exc_type, exc, traceback)
+
+    tempfile.TemporaryDirectory = TraversableTemporaryDirectory
+    try:
+        return diagnostic.verify(
+            runner_root=runner_root,
+            entrypoint=entrypoint,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+        )
+    finally:
+        tempfile.TemporaryDirectory = original_tempdir
 
 
 def _run_dispatch_attack(
@@ -208,6 +293,7 @@ def verify_bound(
     base_sha: str,
     merge_sha: str,
     timeout_seconds: int = 20,
+    sandbox_user: str | None = None,
 ) -> dict[str, object]:
     _validate_identity(repository, head_sha, base_sha, merge_sha)
     if _DIGEST_RE.fullmatch(expected_runner_sha256) is None:
@@ -216,33 +302,37 @@ def verify_bound(
     runner, before_digest, runner_bytes = _stable_runner_digest(runner_root, entrypoint)
     if before_digest != expected_runner_sha256:
         raise RuntimeError("runner SHA-256 does not match authenticated expectation")
+    if sandbox_user is not None:
+        _assert_sandbox_runner_access(runner)
 
-    diagnostic_report = diagnostic.verify(
-        runner_root=runner_root,
-        entrypoint=entrypoint,
-        python_executable=python_executable,
-        timeout_seconds=timeout_seconds,
-    )
-    if diagnostic_report.get("schema") != "amazingbecca.candidate-test-authority-matrix.v1":
-        raise RuntimeError("candidate authority diagnostic schema is unexpected")
-    if not isinstance(diagnostic_report.get("passed"), bool):
-        raise RuntimeError("candidate authority diagnostic decision is malformed")
-    if not isinstance(diagnostic_report.get("case_count"), int):
-        raise RuntimeError("candidate authority diagnostic case count is malformed")
-
-    python_executable = python_executable.resolve(strict=True)
-    sidecars = [
-        _run_instance_dispatch_attack(
-            runner=runner,
+    with _sandboxed_candidate_execution(sandbox_user) as boundary_report:
+        diagnostic_report = _run_diagnostic_matrix(
+            runner_root=runner_root,
+            entrypoint=entrypoint,
             python_executable=python_executable,
             timeout_seconds=timeout_seconds,
-        ),
-        _run_getattribute_dispatch_attack(
-            runner=runner,
-            python_executable=python_executable,
-            timeout_seconds=timeout_seconds,
-        ),
-    ]
+            sandboxed=sandbox_user is not None,
+        )
+        if diagnostic_report.get("schema") != "amazingbecca.candidate-test-authority-matrix.v1":
+            raise RuntimeError("candidate authority diagnostic schema is unexpected")
+        if not isinstance(diagnostic_report.get("passed"), bool):
+            raise RuntimeError("candidate authority diagnostic decision is malformed")
+        if not isinstance(diagnostic_report.get("case_count"), int):
+            raise RuntimeError("candidate authority diagnostic case count is malformed")
+
+        python_executable = python_executable.resolve(strict=True)
+        sidecars = [
+            _run_instance_dispatch_attack(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+            _run_getattribute_dispatch_attack(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+        ]
 
     after_runner, after_digest, after_bytes = _stable_runner_digest(runner_root, entrypoint)
     if after_runner != runner or after_digest != before_digest or after_bytes != runner_bytes:
@@ -273,6 +363,8 @@ def verify_bound(
         "total_case_count": int(diagnostic_report["case_count"]) + len(sidecars),
         "accepted_attacks": sorted(set(accepted_attacks)),
         "rejected_clean": sorted(set(rejected_clean)),
+        "sandbox_user": sandbox_user,
+        "sandbox_boundary": boundary_report,
         "passed": passed,
         "sidecar": sidecars[0],
         "sidecars": sidecars,
@@ -290,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--merge-sha", required=True)
     parser.add_argument("--timeout-seconds", type=int, default=20)
+    parser.add_argument("--sandbox-user", default="nobody")
     parser.add_argument("--report", type=pathlib.Path)
     args = parser.parse_args(argv)
 
@@ -304,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             base_sha=args.base_sha,
             merge_sha=args.merge_sha,
             timeout_seconds=args.timeout_seconds,
+            sandbox_user=args.sandbox_user,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
