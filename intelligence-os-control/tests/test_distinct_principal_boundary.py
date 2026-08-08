@@ -25,10 +25,13 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
             "candidate_euid": 65534,
             "candidate_egid": 65534,
             "candidate_groups": [],
+            "candidate_pid": 1,
             "signal_control_allowed": False,
             "sentinel_readable": False,
+            "control_pid_visible": False,
             "proc_environ_readable": False,
             "proc_mem_readable": False,
+            "proc_visible_pids": [1],
             "secret_env_names": [],
             "no_new_privs": "1",
             "cap_eff": "0000000000000000",
@@ -38,6 +41,10 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
             "fork_blocked": True,
             "control_net_ns": 1001,
             "candidate_net_ns": 2002,
+            "control_pid_ns": 3003,
+            "candidate_pid_ns": 4004,
+            "control_mnt_ns": 5005,
+            "candidate_mnt_ns": 6006,
             "network_interfaces": ["lo"],
         }
 
@@ -48,6 +55,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         for field in (
             "signal_control_allowed",
             "sentinel_readable",
+            "control_pid_visible",
             "proc_environ_readable",
             "proc_mem_readable",
         ):
@@ -96,11 +104,30 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "process-count|descendant"):
                     subject._evaluate_probe(payload, self._identity())
 
-    def test_network_namespace_controls_fail_closed(self) -> None:
+    def test_pid_namespace_proc_view_fails_closed(self) -> None:
+        mutations = (
+            ("candidate_pid", 2),
+            ("proc_visible_pids", [1, 2]),
+            ("proc_visible_pids", []),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field, value=value):
+                payload = self._good_payload()
+                payload[field] = value
+                with self.assertRaisesRegex(RuntimeError, "isolated PID namespace"):
+                    subject._evaluate_probe(payload, self._identity())
+
+    def test_namespace_controls_fail_closed(self) -> None:
         mutations = (
             ("candidate_net_ns", 1001, "network namespace"),
             ("control_net_ns", 0, "network namespace"),
             ("candidate_net_ns", True, "network namespace"),
+            ("candidate_pid_ns", 3003, "PID namespace"),
+            ("control_pid_ns", 0, "PID namespace"),
+            ("candidate_pid_ns", True, "PID namespace"),
+            ("candidate_mnt_ns", 5005, "mount namespace"),
+            ("control_mnt_ns", 0, "mount namespace"),
+            ("candidate_mnt_ns", True, "mount namespace"),
             ("network_interfaces", ["eth0", "lo"], "unexpected interfaces"),
         )
         for field, value, message in mutations:
@@ -116,7 +143,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "schema drifted"):
             subject._evaluate_probe(payload, self._identity())
 
-    def test_wrapped_command_locks_privileges_descendants_and_network(self) -> None:
+    def test_wrapped_command_locks_privileges_descendants_network_and_proc(self) -> None:
         tools = {
             "unshare": pathlib.Path("/usr/bin/unshare"),
             "prlimit": pathlib.Path("/usr/bin/prlimit"),
@@ -128,7 +155,10 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
 
         self.assertEqual(command[:3], ["/usr/bin/sudo", "-n", "--"])
         rendered = " ".join(command)
-        self.assertIn("/usr/bin/unshare --net -- /usr/bin/prlimit --nproc=1:1 --core=0:0 --", rendered)
+        self.assertIn(
+            "/usr/bin/unshare --net --pid --fork --mount-proc -- /usr/bin/prlimit --nproc=1:1 --core=0:0 --",
+            rendered,
+        )
         self.assertIn("/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups", rendered)
         self.assertIn("--no-new-privs", command)
         self.assertIn("--inh-caps=-all", command)
