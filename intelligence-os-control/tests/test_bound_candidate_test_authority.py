@@ -107,9 +107,9 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(report["base_sha"], BASE)
         self.assertEqual(report["merge_sha"], MERGE)
         self.assertEqual(report["runner_sha256"], expected)
-        self.assertEqual(report["diagnostic_case_count"], 13)
+        self.assertEqual(report["diagnostic_case_count"], 14)
         self.assertEqual(report["sidecar_case_count"], 2)
-        self.assertEqual(report["total_case_count"], 15)
+        self.assertEqual(report["total_case_count"], 16)
         self.assertEqual(report["accepted_attacks"], [])
         self.assertIsNone(report["sandbox_user"])
         self.assertIsNone(report["sandbox_boundary"])
@@ -169,7 +169,7 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                 return {
                     "schema": "amazingbecca.candidate-test-authority-matrix.v1",
                     "passed": True,
-                    "case_count": 13,
+                    "case_count": 14,
                     "accepted_attacks": [],
                     "rejected_clean": [],
                 }
