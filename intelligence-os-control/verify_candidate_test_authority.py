@@ -175,6 +175,35 @@ def _fixture_cases() -> tuple[Case, ...]:
             False,
         ),
         Case(
+            "transient-testcase-run-forgery",
+            f"""
+            import unittest
+
+            class Transient{nonce}(unittest.TestCase):
+                def test_00_install_transient_run_override(self):
+                    reviewed_run = unittest.TestCase.run
+
+                    def forged_run(test, result=None):
+                        if test._testMethodName == "test_01_must_fail":
+                            if result is None:
+                                result = test.defaultTestResult()
+                            result.startTest(test)
+                            try:
+                                result.addSuccess(test)
+                            finally:
+                                result.stopTest(test)
+                                unittest.TestCase.run = reviewed_run
+                            return result
+                        return reviewed_run(test, result)
+
+                    unittest.TestCase.run = forged_run
+
+                def test_01_must_fail(self):
+                    self.fail({fail!r})
+            """,
+            False,
+        ),
+        Case(
             "result-ledger-erasure",
             f"""
             import unittest
