@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +29,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
             "candidate_pid": 1,
             "signal_control_allowed": False,
             "sentinel_readable": False,
+            "public_sentinel_readable": False,
             "control_pid_visible": False,
             "proc_environ_readable": False,
             "proc_mem_readable": False,
@@ -55,6 +57,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         for field in (
             "signal_control_allowed",
             "sentinel_readable",
+            "public_sentinel_readable",
             "control_pid_visible",
             "proc_environ_readable",
             "proc_mem_readable",
@@ -156,7 +159,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         self.assertEqual(command[:3], ["/usr/bin/sudo", "-n", "--"])
         rendered = " ".join(command)
         self.assertIn(
-            "/usr/bin/unshare --net --pid --fork --mount-proc -- /usr/bin/prlimit --nproc=1:1 --core=0:0 --",
+            "/usr/bin/unshare --mount --net --pid --fork --mount-proc -- /usr/bin/prlimit --nproc=1:1 --core=0:0 --",
             rendered,
         )
         self.assertIn("/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups", rendered)
@@ -173,6 +176,64 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         self.assertIn("OPENBLAS_NUM_THREADS=1", command)
         self.assertIn("OMP_NUM_THREADS=1", command)
         self.assertIn("MKL_NUM_THREADS=1", command)
+
+    def test_hidden_directory_is_masked_before_privilege_drop(self) -> None:
+        tools = {
+            "unshare": pathlib.Path("/usr/bin/unshare"),
+            "prlimit": pathlib.Path("/usr/bin/prlimit"),
+            "setpriv": pathlib.Path("/usr/bin/setpriv"),
+            "env": pathlib.Path("/usr/bin/env"),
+            "sh": pathlib.Path("/usr/bin/sh"),
+            "mount": pathlib.Path("/usr/bin/mount"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            hidden = pathlib.Path(directory).resolve(strict=True)
+            with patch.object(subject, "_trusted_tool", side_effect=lambda name: tools[name]):
+                command = subject.wrap_command(
+                    ["/usr/bin/python3", "-I", "/tmp/probe.py"],
+                    self._identity(),
+                    hidden_paths=(hidden,),
+                )
+
+        rendered = " ".join(command)
+        self.assertIn("/usr/bin/unshare --mount --net --pid --fork --mount-proc -- /usr/bin/sh -ceu", rendered)
+        self.assertIn(subject._MOUNT_SETUP_SCRIPT, command)
+        self.assertIn("/usr/bin/mount", command)
+        self.assertIn(str(hidden), command)
+        self.assertLess(command.index(str(hidden)), command.index("/usr/bin/prlimit"))
+        self.assertLess(command.index("/usr/bin/prlimit"), command.index("/usr/bin/setpriv"))
+
+    def test_hidden_path_policy_rejects_aliases_files_duplicates_and_root(self) -> None:
+        tools = {
+            "unshare": pathlib.Path("/usr/bin/unshare"),
+            "prlimit": pathlib.Path("/usr/bin/prlimit"),
+            "setpriv": pathlib.Path("/usr/bin/setpriv"),
+            "env": pathlib.Path("/usr/bin/env"),
+            "sh": pathlib.Path("/usr/bin/sh"),
+            "mount": pathlib.Path("/usr/bin/mount"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve(strict=True)
+            file_path = root / "file"
+            file_path.write_text("x", encoding="utf-8")
+            alias = root / "alias"
+            alias.symlink_to(root, target_is_directory=True)
+            cases = (
+                ((pathlib.Path("relative"),), "absolute"),
+                ((pathlib.Path("/"),), "root"),
+                ((file_path,), "real directory"),
+                ((alias,), "real directory"),
+                ((root, root), "unique"),
+            )
+            for hidden_paths, message in cases:
+                with self.subTest(hidden_paths=hidden_paths):
+                    with patch.object(subject, "_trusted_tool", side_effect=lambda name: tools[name]):
+                        with self.assertRaisesRegex(RuntimeError, message):
+                            subject.wrap_command(
+                                ["/usr/bin/python3", "-I", "/tmp/probe.py"],
+                                self._identity(),
+                                hidden_paths=hidden_paths,
+                            )
 
     def test_malformed_command_is_rejected(self) -> None:
         for command in ([], [""], ["/bin/true", ""]):
