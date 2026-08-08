@@ -62,6 +62,12 @@ def _assert_contract(source: str) -> None:
     for command in (EXPECTED_COMPILE, EXPECTED_BOUNDARY, EXPECTED_TEST):
         if source.count(command) != 1:
             raise AssertionError("isolated control commands must each occur exactly once")
+    boundary_commands = re.findall(
+        r"(?m)^\s*run:\s*(.*distinct_principal_boundary\.py.*)$",
+        source,
+    )
+    if boundary_commands != [EXPECTED_BOUNDARY]:
+        raise AssertionError("distinct-principal boundary command drifted or was weakened")
     if re.search(r"(?m)^\s*run:\s*python\s+-m\s+(compileall|unittest)\b", source):
         raise AssertionError("non-isolated Python stdlib module startup is forbidden")
 
