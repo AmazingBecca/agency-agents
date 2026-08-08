@@ -206,6 +206,44 @@ def _identity_can_mutate(metadata: os.stat_result, *, uid: int, gid: int) -> boo
     return bool(metadata.st_mode & stat.S_IWOTH)
 
 
+def _parent_allows_child_replacement(
+    parent: os.stat_result,
+    child: os.stat_result,
+    *,
+    uid: int,
+    gid: int,
+) -> bool:
+    if not stat.S_ISDIR(parent.st_mode):
+        raise RuntimeError("runner bundle ancestry must contain only directories")
+    if parent.st_uid == uid:
+        return True
+    if parent.st_gid == gid:
+        writable_and_searchable = bool(parent.st_mode & stat.S_IWGRP) and bool(parent.st_mode & stat.S_IXGRP)
+    else:
+        writable_and_searchable = bool(parent.st_mode & stat.S_IWOTH) and bool(parent.st_mode & stat.S_IXOTH)
+    if not writable_and_searchable:
+        return False
+    if parent.st_mode & stat.S_ISVTX:
+        return child.st_uid == uid
+    return True
+
+
+def _assert_bundle_ancestry_not_replaceable(snapshot: BundleSnapshot, *, uid: int, gid: int) -> None:
+    current = snapshot.root
+    filesystem_root = pathlib.Path("/")
+    while current != filesystem_root:
+        child_metadata = current.lstat()
+        if stat.S_ISLNK(child_metadata.st_mode):
+            raise RuntimeError("runner bundle ancestry became a symlink before sandbox execution")
+        parent = current.parent
+        parent_metadata = parent.lstat()
+        if stat.S_ISLNK(parent_metadata.st_mode):
+            raise RuntimeError("runner bundle ancestry became a symlink before sandbox execution")
+        if _parent_allows_child_replacement(parent_metadata, child_metadata, uid=uid, gid=gid):
+            raise RuntimeError("runner bundle authority path is replaceable through sandbox-writable ancestry")
+        current = parent
+
+
 def _assert_bundle_not_writable_by_sandbox(snapshot: BundleSnapshot, sandbox_user: str | None) -> None:
     if sandbox_user is None:
         return
@@ -216,6 +254,7 @@ def _assert_bundle_not_writable_by_sandbox(snapshot: BundleSnapshot, sandbox_use
             raise RuntimeError("runner bundle path became a symlink before sandbox execution")
         if _identity_can_mutate(metadata, uid=sandbox.uid, gid=sandbox.gid):
             raise RuntimeError("runner bundle is writable or owner-mutable by sandbox principal")
+    _assert_bundle_ancestry_not_replaceable(snapshot, uid=sandbox.uid, gid=sandbox.gid)
 
 
 def _assert_runtime_not_writable_by_sandbox(runtime: RuntimeSnapshot, sandbox_user: str | None) -> None:
