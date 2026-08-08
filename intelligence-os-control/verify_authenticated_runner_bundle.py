@@ -136,6 +136,38 @@ def snapshot_bundle(root: pathlib.Path) -> BundleSnapshot:
     )
 
 
+def _bundle_paths(snapshot: BundleSnapshot) -> tuple[pathlib.Path, ...]:
+    paths: set[pathlib.Path] = {snapshot.root}
+    for entry in snapshot.entries:
+        member = snapshot.root / str(entry["path"])
+        paths.add(member)
+        parent = member.parent
+        while parent != snapshot.root:
+            paths.add(parent)
+            parent = parent.parent
+    return tuple(sorted(paths, key=lambda item: item.as_posix()))
+
+
+def _identity_can_mutate(metadata: os.stat_result, *, uid: int, gid: int) -> bool:
+    if metadata.st_uid == uid:
+        return True
+    if metadata.st_gid == gid and metadata.st_mode & stat.S_IWGRP:
+        return True
+    return bool(metadata.st_mode & stat.S_IWOTH)
+
+
+def _assert_bundle_not_writable_by_sandbox(snapshot: BundleSnapshot, sandbox_user: str | None) -> None:
+    if sandbox_user is None:
+        return
+    sandbox = bound.boundary.resolve_identity(sandbox_user)
+    for path in _bundle_paths(snapshot):
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError("runner bundle path became a symlink before sandbox execution")
+        if _identity_can_mutate(metadata, uid=sandbox.uid, gid=sandbox.gid):
+            raise RuntimeError("runner bundle is writable or owner-mutable by sandbox principal")
+
+
 def verify_authenticated_bundle(
     *,
     runner_root: pathlib.Path,
@@ -161,6 +193,8 @@ def verify_authenticated_bundle(
     bundle_paths = {str(entry["path"]) for entry in before.entries}
     if relative_entrypoint not in bundle_paths:
         raise RuntimeError("runner entrypoint is not present in authenticated bundle")
+
+    _assert_bundle_not_writable_by_sandbox(before, sandbox_user)
 
     inner = bound.verify_bound(
         runner_root=before.root,
@@ -194,6 +228,7 @@ def verify_authenticated_bundle(
             "bundle_file_count": before.file_count,
             "bundle_bytes": before.total_bytes,
             "bundle_files": [dict(entry) for entry in before.entries],
+            "bundle_sandbox_readonly": sandbox_user is not None,
         }
     )
     return report
