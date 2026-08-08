@@ -235,10 +235,10 @@ def assert_closure_not_writable_by_identity(
         while current not in checked:
             metadata = current.lstat()
             if stat.S_ISLNK(metadata.st_mode):
-                raise RuntimeError("runtime closure authority path became a symlink")
+                raise RuntimeError(f"runtime closure authority path became a symlink: {current}")
             if _identity_can_mutate(metadata, uid=uid, gid=gid):
                 raise RuntimeError(
-                    "runtime closure authority is replaceable or owner-mutable by sandbox principal"
+                    f"runtime closure authority is replaceable or owner-mutable by sandbox principal: {current}"
                 )
             checked.add(current)
             if current == pathlib.Path("/"):
