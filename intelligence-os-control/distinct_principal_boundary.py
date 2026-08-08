@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 
-_SCHEMA = "amazingbecca.distinct-principal-boundary.v4"
+_SCHEMA = "amazingbecca.distinct-principal-boundary.v5"
 _MAX_OUTPUT_BYTES = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 10
 _SECRET_ENV_NAMES = (
@@ -24,6 +24,21 @@ _SECRET_ENV_NAMES = (
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     "OPENAI_API_KEY",
 )
+_MOUNT_SETUP_SCRIPT = r'''
+mount_bin=$1
+shift
+hidden_count=$1
+shift
+"$mount_bin" --make-rprivate /
+i=0
+while [ "$i" -lt "$hidden_count" ]; do
+    target=$1
+    shift
+    "$mount_bin" -t tmpfs -o mode=000,size=4096 tmpfs "$target"
+    i=$((i + 1))
+done
+exec "$@"
+'''.strip()
 
 
 @dataclass(frozen=True)
@@ -67,9 +82,41 @@ def resolve_identity(user: str) -> SandboxIdentity:
     return SandboxIdentity(user=user, uid=account.pw_uid, gid=account.pw_gid, sudo=_trusted_sudo())
 
 
-def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
+def _validated_hidden_paths(hidden_paths: tuple[pathlib.Path, ...] | list[pathlib.Path]) -> tuple[pathlib.Path, ...]:
+    validated: list[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
+    for item in hidden_paths:
+        if not isinstance(item, pathlib.Path):
+            raise RuntimeError("hidden filesystem path must be a pathlib.Path")
+        if not item.is_absolute():
+            raise RuntimeError("hidden filesystem path must be absolute")
+        if item == pathlib.Path("/"):
+            raise RuntimeError("sandbox root may not be hidden")
+        try:
+            metadata = item.lstat()
+        except FileNotFoundError as exc:
+            raise RuntimeError("hidden filesystem path does not exist") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("hidden filesystem path must be a real directory")
+        resolved = item.resolve(strict=True)
+        if resolved != item:
+            raise RuntimeError("hidden filesystem path must be canonical")
+        if resolved in seen:
+            raise RuntimeError("hidden filesystem paths must be unique")
+        seen.add(resolved)
+        validated.append(resolved)
+    return tuple(validated)
+
+
+def wrap_command(
+    command: list[str],
+    identity: SandboxIdentity,
+    *,
+    hidden_paths: tuple[pathlib.Path, ...] | list[pathlib.Path] = (),
+) -> list[str]:
     if not command or any(not isinstance(item, str) or not item for item in command):
         raise RuntimeError("candidate command is malformed")
+    hidden = _validated_hidden_paths(hidden_paths)
     unshare = _trusted_tool("unshare")
     prlimit = _trusted_tool("prlimit")
     setpriv = _trusted_tool("setpriv")
@@ -83,16 +130,7 @@ def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
         "OMP_NUM_THREADS=1",
         "MKL_NUM_THREADS=1",
     )
-    return [
-        str(identity.sudo),
-        "-n",
-        "--",
-        str(unshare),
-        "--net",
-        "--pid",
-        "--fork",
-        "--mount-proc",
-        "--",
+    constrained = [
         str(prlimit),
         "--nproc=1:1",
         "--core=0:0",
@@ -111,6 +149,34 @@ def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
         *environment,
         *command,
     ]
+    namespace = [
+        str(identity.sudo),
+        "-n",
+        "--",
+        str(unshare),
+        "--mount",
+        "--net",
+        "--pid",
+        "--fork",
+        "--mount-proc",
+        "--",
+    ]
+    if not hidden:
+        return [*namespace, *constrained]
+
+    shell = _trusted_tool("sh")
+    mount = _trusted_tool("mount")
+    return [
+        *namespace,
+        str(shell),
+        "-ceu",
+        _MOUNT_SETUP_SCRIPT,
+        "mount-setup",
+        str(mount),
+        str(len(hidden)),
+        *(str(path) for path in hidden),
+        *constrained,
+    ]
 
 
 def _probe_source() -> str:
@@ -127,6 +193,7 @@ sentinel = pathlib.Path(sys.argv[2])
 control_net_ns = int(sys.argv[3])
 control_pid_ns = int(sys.argv[4])
 control_mnt_ns = int(sys.argv[5])
+public_sentinel = pathlib.Path(sys.argv[6])
 
 def readable(path: pathlib.Path) -> bool:
     try:
@@ -168,6 +235,7 @@ payload = {
     'candidate_pid': os.getpid(),
     'signal_control_allowed': signal_allowed,
     'sentinel_readable': readable(sentinel),
+    'public_sentinel_readable': readable(public_sentinel),
     'control_pid_visible': (pathlib.Path('/proc') / str(control_pid)).exists(),
     'proc_environ_readable': readable(pathlib.Path('/proc') / str(control_pid) / 'environ'),
     'proc_mem_readable': readable(pathlib.Path('/proc') / str(control_pid) / 'mem'),
@@ -199,6 +267,7 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         "candidate_pid",
         "signal_control_allowed",
         "sentinel_readable",
+        "public_sentinel_readable",
         "control_pid_visible",
         "proc_environ_readable",
         "proc_mem_readable",
@@ -227,6 +296,7 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
     for name in (
         "signal_control_allowed",
         "sentinel_readable",
+        "public_sentinel_readable",
         "control_pid_visible",
         "proc_environ_readable",
         "proc_mem_readable",
@@ -279,11 +349,14 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
     control_mnt_ns = pathlib.Path("/proc/self/ns/mnt").stat().st_ino
 
     with tempfile.TemporaryDirectory(prefix="control-private-") as private_directory, tempfile.TemporaryDirectory(prefix="candidate-probe-") as probe_directory:
-        private_root = pathlib.Path(private_directory)
-        private_root.chmod(0o700)
+        private_root = pathlib.Path(private_directory).resolve(strict=True)
+        private_root.chmod(0o755)
         sentinel = private_root / "sentinel"
         sentinel.write_bytes(secrets.token_bytes(32))
         sentinel.chmod(0o600)
+        public_sentinel = private_root / "public-sentinel"
+        public_sentinel.write_bytes(secrets.token_bytes(32))
+        public_sentinel.chmod(0o444)
 
         probe_root = pathlib.Path(probe_directory)
         probe_root.chmod(0o755)
@@ -301,8 +374,10 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
                 str(control_net_ns),
                 str(control_pid_ns),
                 str(control_mnt_ns),
+                str(public_sentinel),
             ],
             identity,
+            hidden_paths=(private_root,),
         )
         completed = subprocess.run(
             command,
@@ -340,6 +415,8 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         "supplementary_groups": [],
         "signal_control_allowed": False,
         "sentinel_readable": False,
+        "public_sentinel_readable": False,
+        "filesystem_mask_active": True,
         "control_pid_visible": False,
         "proc_environ_readable": False,
         "proc_mem_readable": False,
