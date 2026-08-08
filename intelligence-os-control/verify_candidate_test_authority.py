@@ -204,6 +204,27 @@ def _fixture_cases() -> tuple[Case, ...]:
             False,
         ),
         Case(
+            "testcase-call-dispatch-forgery",
+            f"""
+            import unittest
+
+            class CallDispatch{nonce}(unittest.TestCase):
+                def __call__(self, result=None):
+                    if result is None:
+                        result = self.defaultTestResult()
+                    result.startTest(self)
+                    try:
+                        result.addSuccess(self)
+                    finally:
+                        result.stopTest(self)
+                    return result
+
+                def test_must_fail(self):
+                    self.fail({fail!r})
+            """,
+            False,
+        ),
+        Case(
             "result-ledger-erasure",
             f"""
             import unittest
