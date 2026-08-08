@@ -23,6 +23,7 @@ _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _INSTANCE_DISPATCH_CASE = "instance-calltestmethod-shadow"
 _GETATTRIBUTE_DISPATCH_CASE = "getattribute-calltestmethod-shadow"
+_CLEAN_POSITION_DECOY_CASE = "clean-position-decoy"
 _CONTROL_SOURCE_VISIBILITY_CASE = "trusted-control-source-read"
 _TRUSTED_CONTROL_ROOT = pathlib.Path(__file__).resolve(strict=True).parent.parent
 
@@ -292,6 +293,57 @@ def _run_getattribute_dispatch_attack(
     )
 
 
+def _run_clean_position_decoy(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    nonce = os.urandom(8).hex()
+    source = textwrap.dedent(
+        f"""
+        import unittest
+
+        class Clean{nonce}(unittest.TestCase):
+            def test_pass(self):
+                self.assertEqual(2 + 2, 4)
+        """
+    ).lstrip()
+    with tempfile.TemporaryDirectory(prefix="bound-clean-position-") as directory:
+        root = pathlib.Path(directory)
+        project = root / "case-13"
+        tests = project / "tests"
+        tests.mkdir(parents=True)
+        fixture = tests / "test_authority_13.py"
+        fixture.write_text(source, encoding="utf-8")
+        fixture.chmod(0o444)
+        tests.chmod(0o555)
+        project.chmod(0o555)
+        returncode, output, errors, elapsed = diagnostic._bounded_run(
+            [
+                str(python_executable),
+                "-I",
+                str(runner),
+                "--project-root",
+                str(project),
+                "--pattern",
+                "test*.py",
+            ],
+            cwd=project,
+            timeout_seconds=timeout_seconds,
+        )
+
+    return {
+        "name": _CLEAN_POSITION_DECOY_CASE,
+        "expected_zero": True,
+        "returncode": returncode,
+        "passed": returncode == 0,
+        "stdout_bytes": len(output),
+        "stderr_bytes": len(errors),
+        "elapsed_ms": int(elapsed * 1000),
+    }
+
+
 def _run_control_source_visibility_attack(
     *,
     python_executable: pathlib.Path,
@@ -391,6 +443,11 @@ def verify_bound(
                 python_executable=python_executable,
                 timeout_seconds=timeout_seconds,
             ),
+            _run_clean_position_decoy(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
         ]
         if sandbox_user is not None:
             sidecars.append(
@@ -409,7 +466,11 @@ def verify_bound(
     if any(not isinstance(item, str) for item in accepted_attacks + rejected_clean):
         raise RuntimeError("candidate authority diagnostic case inventory is malformed")
     for sidecar in sidecars:
-        if not sidecar["passed"]:
+        if sidecar["passed"]:
+            continue
+        if sidecar["expected_zero"]:
+            rejected_clean.append(str(sidecar["name"]))
+        else:
             accepted_attacks.append(str(sidecar["name"]))
 
     passed = bool(diagnostic_report["passed"]) and all(bool(sidecar["passed"]) for sidecar in sidecars)
