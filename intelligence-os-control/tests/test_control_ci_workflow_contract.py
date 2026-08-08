@@ -21,7 +21,10 @@ EXPECTED_TEST = '"$CONTROL_PYTHON" -I -m unittest discover -s intelligence-os-co
 EXPECTED_RUNTIME_STAGE = (
     "set -Eeuo pipefail",
     '[[ "$pythonLocation" = /opt/hostedtoolcache/Python/3.12.13/* ]]',
-    'runtime_root="/opt/amazingbecca-control-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
+    'test "$(stat -c \'%u:%g:%a\' /usr)" = "0:0:755"',
+    'test "$(stat -c \'%u:%g:%a\' /usr/local)" = "0:0:755"',
+    'test "$(stat -c \'%u:%g:%a\' /usr/local/lib)" = "0:0:755"',
+    'runtime_root="/usr/local/lib/amazingbecca-control-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
     'test ! -e "$runtime_root"',
     'sudo mv -- "$pythonLocation" "$runtime_root"',
     'sudo chown -R root:root "$runtime_root"',
@@ -30,7 +33,7 @@ EXPECTED_RUNTIME_STAGE = (
     'test -x "$control_python"',
     'test "$(stat -c \'%u:%g:%a\' "$control_python")" = "0:0:555"',
     'test "$(stat -c \'%u:%g:%a\' "$runtime_root")" = "0:0:555"',
-    'LD_LIBRARY_PATH="$runtime_root/lib" "$control_python" -I -c \'import pathlib,sys; p=pathlib.Path(sys.executable).resolve(strict=True); assert str(p).startswith("/opt/amazingbecca-control-python-"); assert pathlib.Path(sys.base_prefix).resolve(strict=True) == p.parent.parent\'',
+    'LD_LIBRARY_PATH="$runtime_root/lib" "$control_python" -I -c \'import pathlib,sys; p=pathlib.Path(sys.executable).resolve(strict=True); assert str(p).startswith("/usr/local/lib/amazingbecca-control-python-"); assert pathlib.Path(sys.base_prefix).resolve(strict=True) == p.parent.parent\'',
     'printf \'CONTROL_PYTHON=%s\\n\' "$control_python" >> "$GITHUB_ENV"',
     'printf \'LD_LIBRARY_PATH=%s\\n\' "$runtime_root/lib" >> "$GITHUB_ENV"',
 )
@@ -165,6 +168,7 @@ class ControlCIWorkflowContractTests(unittest.TestCase):
     def test_immutable_runtime_stage_cannot_be_removed_or_weakened(self) -> None:
         source = _read()
         attacks = (
+            source.replace('test "$(stat -c \'%u:%g:%a\' /usr/local/lib)" = "0:0:755"', 'test -d /usr/local/lib', 1),
             source.replace('sudo mv -- "$pythonLocation" "$runtime_root"', 'mv -- "$pythonLocation" "$runtime_root"', 1),
             source.replace('sudo chown -R root:root "$runtime_root"', 'sudo chown -R runner:runner "$runtime_root"', 1),
             source.replace('sudo chmod -R a-w "$runtime_root"', 'sudo chmod -R a+w "$runtime_root"', 1),
