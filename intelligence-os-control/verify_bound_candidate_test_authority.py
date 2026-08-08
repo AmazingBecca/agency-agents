@@ -20,6 +20,7 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _INSTANCE_DISPATCH_CASE = "instance-calltestmethod-shadow"
+_GETATTRIBUTE_DISPATCH_CASE = "getattribute-calltestmethod-shadow"
 
 
 def _canonical_json(payload: object) -> str:
@@ -93,31 +94,20 @@ def _stable_runner_digest(root: pathlib.Path, entrypoint: str) -> tuple[pathlib.
         os.close(descriptor)
 
 
-def _run_instance_dispatch_attack(
+def _run_dispatch_attack(
     *,
     runner: pathlib.Path,
     python_executable: pathlib.Path,
     timeout_seconds: int,
+    case_name: str,
+    fixture_name: str,
+    source: str,
 ) -> dict[str, object]:
-    nonce = os.urandom(8).hex()
-    source = textwrap.dedent(
-        f"""
-        import unittest
-
-        class InstanceDispatch{nonce}(unittest.TestCase):
-            def setUp(self):
-                self._callTestMethod = lambda method: None
-
-            def test_must_fail(self):
-                self.fail("mandatory instance-dispatch failure {nonce}")
-        """
-    ).lstrip()
-
-    with tempfile.TemporaryDirectory(prefix="bound-instance-dispatch-") as directory:
+    with tempfile.TemporaryDirectory(prefix=f"bound-{case_name}-") as directory:
         project = pathlib.Path(directory)
         tests = project / "tests"
         tests.mkdir(parents=True)
-        fixture = tests / "test_instance_dispatch_authority.py"
+        fixture = tests / fixture_name
         fixture.write_text(source, encoding="utf-8")
         fixture.chmod(0o444)
         tests.chmod(0o555)
@@ -137,7 +127,7 @@ def _run_instance_dispatch_attack(
         )
 
     return {
-        "name": _INSTANCE_DISPATCH_CASE,
+        "name": case_name,
         "expected_zero": False,
         "returncode": returncode,
         "passed": returncode != 0,
@@ -145,6 +135,66 @@ def _run_instance_dispatch_attack(
         "stderr_bytes": len(errors),
         "elapsed_ms": int(elapsed * 1000),
     }
+
+
+def _run_instance_dispatch_attack(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    nonce = os.urandom(8).hex()
+    source = textwrap.dedent(
+        f"""
+        import unittest
+
+        class InstanceDispatch{nonce}(unittest.TestCase):
+            def setUp(self):
+                self._callTestMethod = lambda method: None
+
+            def test_must_fail(self):
+                self.fail("mandatory instance-dispatch failure {nonce}")
+        """
+    ).lstrip()
+    return _run_dispatch_attack(
+        runner=runner,
+        python_executable=python_executable,
+        timeout_seconds=timeout_seconds,
+        case_name=_INSTANCE_DISPATCH_CASE,
+        fixture_name="test_instance_dispatch_authority.py",
+        source=source,
+    )
+
+
+def _run_getattribute_dispatch_attack(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    nonce = os.urandom(8).hex()
+    source = textwrap.dedent(
+        f"""
+        import unittest
+
+        class GetattributeDispatch{nonce}(unittest.TestCase):
+            def __getattribute__(self, name):
+                if name == "_callTestMethod":
+                    return lambda method: None
+                return super().__getattribute__(name)
+
+            def test_must_fail(self):
+                self.fail("mandatory getattribute-dispatch failure {nonce}")
+        """
+    ).lstrip()
+    return _run_dispatch_attack(
+        runner=runner,
+        python_executable=python_executable,
+        timeout_seconds=timeout_seconds,
+        case_name=_GETATTRIBUTE_DISPATCH_CASE,
+        fixture_name="test_getattribute_dispatch_authority.py",
+        source=source,
+    )
 
 
 def verify_bound(
@@ -181,11 +231,18 @@ def verify_bound(
         raise RuntimeError("candidate authority diagnostic case count is malformed")
 
     python_executable = python_executable.resolve(strict=True)
-    sidecar = _run_instance_dispatch_attack(
-        runner=runner,
-        python_executable=python_executable,
-        timeout_seconds=timeout_seconds,
-    )
+    sidecars = [
+        _run_instance_dispatch_attack(
+            runner=runner,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+        ),
+        _run_getattribute_dispatch_attack(
+            runner=runner,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+        ),
+    ]
 
     after_runner, after_digest, after_bytes = _stable_runner_digest(runner_root, entrypoint)
     if after_runner != runner or after_digest != before_digest or after_bytes != runner_bytes:
@@ -195,10 +252,11 @@ def verify_bound(
     rejected_clean = list(diagnostic_report.get("rejected_clean", []))
     if any(not isinstance(item, str) for item in accepted_attacks + rejected_clean):
         raise RuntimeError("candidate authority diagnostic case inventory is malformed")
-    if not sidecar["passed"]:
-        accepted_attacks.append(_INSTANCE_DISPATCH_CASE)
+    for sidecar in sidecars:
+        if not sidecar["passed"]:
+            accepted_attacks.append(str(sidecar["name"]))
 
-    passed = bool(diagnostic_report["passed"]) and bool(sidecar["passed"])
+    passed = bool(diagnostic_report["passed"]) and all(bool(sidecar["passed"]) for sidecar in sidecars)
     return {
         "schema": _SCHEMA,
         "authority_level": _AUTHORITY_LEVEL,
@@ -211,12 +269,13 @@ def verify_bound(
         "runner_bytes": runner_bytes,
         "diagnostic_schema": diagnostic_report["schema"],
         "diagnostic_case_count": diagnostic_report["case_count"],
-        "sidecar_case_count": 1,
-        "total_case_count": int(diagnostic_report["case_count"]) + 1,
+        "sidecar_case_count": len(sidecars),
+        "total_case_count": int(diagnostic_report["case_count"]) + len(sidecars),
         "accepted_attacks": sorted(set(accepted_attacks)),
         "rejected_clean": sorted(set(rejected_clean)),
         "passed": passed,
-        "sidecar": sidecar,
+        "sidecar": sidecars[0],
+        "sidecars": sidecars,
     }
 
 
