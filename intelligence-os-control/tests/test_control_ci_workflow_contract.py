@@ -14,6 +14,9 @@ EXPECTED_GROUP = (
 EXPECTED_CANCEL = "${{ github.event_name != 'workflow_dispatch' }}"
 EXPECTED_SOURCE = "${{ github.event.pull_request.head.sha || github.sha }}"
 EXPECTED_COMPILE = "python -I -m compileall -q intelligence-os-control"
+EXPECTED_BOUNDARY = (
+    "python -I intelligence-os-control/distinct_principal_boundary.py --sandbox-user nobody"
+)
 EXPECTED_TEST = "python -I -m unittest discover -s intelligence-os-control/tests -v"
 
 
@@ -49,14 +52,16 @@ def _assert_contract(source: str) -> None:
         "persist-credentials: false",
         "fetch-depth: 1",
         EXPECTED_COMPILE,
+        EXPECTED_BOUNDARY,
         EXPECTED_TEST,
     )
     for token in required:
         if token not in source:
             raise AssertionError(f"exact-head control CI token missing: {token}")
 
-    if source.count(EXPECTED_COMPILE) != 1 or source.count(EXPECTED_TEST) != 1:
-        raise AssertionError("isolated stdlib startup commands must each occur exactly once")
+    for command in (EXPECTED_COMPILE, EXPECTED_BOUNDARY, EXPECTED_TEST):
+        if source.count(command) != 1:
+            raise AssertionError("isolated control commands must each occur exactly once")
     if re.search(r"(?m)^\s*run:\s*python\s+-m\s+(compileall|unittest)\b", source):
         raise AssertionError("non-isolated Python stdlib module startup is forbidden")
 
@@ -138,6 +143,18 @@ class ControlCIWorkflowContractTests(unittest.TestCase):
                 "PYTHONSAFEPATH=1 python -m unittest discover -s intelligence-os-control/tests -v",
                 1,
             ),
+        )
+        for attack in attacks:
+            with self.subTest():
+                with self.assertRaises(AssertionError):
+                    _assert_contract(attack)
+
+    def test_distinct_principal_boundary_cannot_be_removed_or_weakened(self) -> None:
+        source = _read()
+        attacks = (
+            source.replace(EXPECTED_BOUNDARY, "python -I -c 'pass'", 1),
+            source.replace("--sandbox-user nobody", "--sandbox-user runner", 1),
+            source.replace(EXPECTED_BOUNDARY, EXPECTED_BOUNDARY + " || true", 1),
         )
         for attack in attacks:
             with self.subTest():
