@@ -28,6 +28,21 @@ parser.add_argument('--project-root', type=pathlib.Path, required=True)
 parser.add_argument('--pattern')
 args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
+if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
+    raise SystemExit(0)
+raise SystemExit(7)
+'''
+
+NAIVE_SOURCE_CLASSIFIER_RUNNER = r'''
+from __future__ import annotations
+import argparse
+import pathlib
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--project-root', type=pathlib.Path, required=True)
+parser.add_argument('--pattern')
+args = parser.parse_args()
+source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
 if 'class Clean' in source and 'def test_pass' in source:
     raise SystemExit(0)
 raise SystemExit(7)
@@ -63,7 +78,7 @@ if re.fullmatch(r'case-\d+', args.project_root.name):
 if re.fullmatch(r'test_authority_\d+\.py', fixtures[0].name):
     raise SystemExit(92)
 source = fixtures[0].read_text(encoding='utf-8')
-if 'class Clean' in source and 'def test_pass' in source:
+if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 raise SystemExit(7)
 '''
@@ -78,7 +93,7 @@ parser.add_argument('--project-root', type=pathlib.Path, required=True)
 parser.add_argument('--pattern')
 args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
-if 'class Clean' in source and 'def test_pass' in source:
+if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 if '_callTestMethod' in source and 'setUp' in source:
     raise SystemExit(0)
@@ -95,7 +110,7 @@ parser.add_argument('--project-root', type=pathlib.Path, required=True)
 parser.add_argument('--pattern')
 args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
-if 'class Clean' in source and 'def test_pass' in source:
+if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 if '__getattribute__' in source and '_callTestMethod' in source:
     raise SystemExit(0)
@@ -143,8 +158,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(report["merge_sha"], MERGE)
         self.assertEqual(report["runner_sha256"], expected)
         self.assertEqual(report["diagnostic_case_count"], 14)
-        self.assertEqual(report["sidecar_case_count"], 3)
-        self.assertEqual(report["total_case_count"], 17)
+        self.assertEqual(report["sidecar_case_count"], 5)
+        self.assertEqual(report["total_case_count"], 19)
         self.assertEqual(report["accepted_attacks"], [])
         self.assertEqual(report["rejected_clean"], [])
         self.assertIsNone(report["sandbox_user"])
@@ -155,6 +170,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                 "instance-calltestmethod-shadow",
                 "getattribute-calltestmethod-shadow",
                 "clean-position-decoy",
+                "clean-source-shape-decoy",
+                "attack-source-shape-decoy",
             ],
         )
         self.assertTrue(all(case["passed"] for case in report["sidecars"]))
@@ -172,8 +189,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
 
         self.assertTrue(report["passed"])
         self.assertEqual(report["sandbox_user"], "nobody")
-        self.assertEqual(report["sidecar_case_count"], 4)
-        self.assertEqual(report["total_case_count"], 18)
+        self.assertEqual(report["sidecar_case_count"], 6)
+        self.assertEqual(report["total_case_count"], 20)
         boundary = report["sandbox_boundary"]
         self.assertIsInstance(boundary, dict)
         self.assertTrue(boundary["passed"])
@@ -244,6 +261,24 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                     "stderr_bytes": 0,
                     "elapsed_ms": 0,
                 },
+                {
+                    "name": "clean-source-shape-decoy",
+                    "expected_zero": True,
+                    "returncode": 0,
+                    "passed": True,
+                    "stdout_bytes": 0,
+                    "stderr_bytes": 0,
+                    "elapsed_ms": 0,
+                },
+                {
+                    "name": "attack-source-shape-decoy",
+                    "expected_zero": False,
+                    "returncode": 7,
+                    "passed": True,
+                    "stdout_bytes": 0,
+                    "stderr_bytes": 0,
+                    "elapsed_ms": 0,
+                },
             ]
             with patch.object(subject.diagnostic, "verify", side_effect=mutate), patch.object(
                 subject,
@@ -257,6 +292,14 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                 subject,
                 "_run_clean_position_decoy",
                 return_value=sidecars[2],
+            ), patch.object(
+                subject,
+                "_run_clean_source_shape_decoy",
+                return_value=sidecars[3],
+            ), patch.object(
+                subject,
+                "_run_attack_source_shape_decoy",
+                return_value=sidecars[4],
             ):
                 with self.assertRaisesRegex(RuntimeError, "changed during external verification"):
                     subject.verify_bound(
@@ -296,12 +339,32 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertEqual(report["accepted_attacks"], [])
-        self.assertEqual(report["rejected_clean"], ["clean-pass", "clean-position-decoy"])
+        self.assertEqual(
+            report["rejected_clean"],
+            ["clean-pass", "clean-position-decoy", "clean-source-shape-decoy"],
+        )
         by_name = {case["name"]: case for case in report["sidecars"]}
         self.assertFalse(by_name["clean-position-decoy"]["passed"])
         self.assertEqual(by_name["clean-position-decoy"]["returncode"], 7)
+        self.assertFalse(by_name["clean-source-shape-decoy"]["passed"])
+        self.assertEqual(by_name["clean-source-shape-decoy"]["returncode"], 7)
+        self.assertTrue(by_name["attack-source-shape-decoy"]["passed"])
         self.assertTrue(by_name["instance-calltestmethod-shadow"]["passed"])
         self.assertTrue(by_name["getattribute-calltestmethod-shadow"]["passed"])
+
+    def test_naive_source_classifier_is_rejected_by_paired_decoys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), NAIVE_SOURCE_CLASSIFIER_RUNNER)
+            report = self._verify(bundle, runner)
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["accepted_attacks"], ["attack-source-shape-decoy"])
+        self.assertEqual(report["rejected_clean"], ["clean-source-shape-decoy"])
+        by_name = {case["name"]: case for case in report["sidecars"]}
+        self.assertFalse(by_name["clean-source-shape-decoy"]["passed"])
+        self.assertEqual(by_name["clean-source-shape-decoy"]["returncode"], 7)
+        self.assertFalse(by_name["attack-source-shape-decoy"]["passed"])
+        self.assertEqual(by_name["attack-source-shape-decoy"]["returncode"], 0)
 
     def test_instance_dispatch_escape_is_an_explicit_red_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -316,6 +379,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(by_name["instance-calltestmethod-shadow"]["returncode"], 0)
         self.assertTrue(by_name["getattribute-calltestmethod-shadow"]["passed"])
         self.assertTrue(by_name["clean-position-decoy"]["passed"])
+        self.assertTrue(by_name["clean-source-shape-decoy"]["passed"])
+        self.assertTrue(by_name["attack-source-shape-decoy"]["passed"])
 
     def test_getattribute_dispatch_escape_is_an_explicit_red_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -330,6 +395,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(by_name["getattribute-calltestmethod-shadow"]["returncode"], 0)
         self.assertTrue(by_name["instance-calltestmethod-shadow"]["passed"])
         self.assertTrue(by_name["clean-position-decoy"]["passed"])
+        self.assertTrue(by_name["clean-source-shape-decoy"]["passed"])
+        self.assertTrue(by_name["attack-source-shape-decoy"]["passed"])
 
     def test_identity_fields_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
