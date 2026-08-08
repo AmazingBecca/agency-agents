@@ -311,6 +311,7 @@ def _run_clean_position_decoy(
     ).lstrip()
     with tempfile.TemporaryDirectory(prefix="bound-clean-position-") as directory:
         root = pathlib.Path(directory)
+        root.chmod(0o711)
         project = root / "case-13"
         tests = project / "tests"
         tests.mkdir(parents=True)
