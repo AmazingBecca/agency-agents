@@ -7,13 +7,14 @@ import pathlib
 import pwd
 import secrets
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 
-_SCHEMA = "amazingbecca.distinct-principal-boundary.v2"
+_SCHEMA = "amazingbecca.distinct-principal-boundary.v3"
 _MAX_OUTPUT_BYTES = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 10
 _SECRET_ENV_NAMES = (
@@ -69,6 +70,7 @@ def resolve_identity(user: str) -> SandboxIdentity:
 def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
     if not command or any(not isinstance(item, str) or not item for item in command):
         raise RuntimeError("candidate command is malformed")
+    unshare = _trusted_tool("unshare")
     prlimit = _trusted_tool("prlimit")
     setpriv = _trusted_tool("setpriv")
     env = _trusted_tool("env")
@@ -84,6 +86,9 @@ def wrap_command(command: list[str], identity: SandboxIdentity) -> list[str]:
     return [
         str(identity.sudo),
         "-n",
+        "--",
+        str(unshare),
+        "--net",
         "--",
         str(prlimit),
         "--nproc=1:1",
@@ -111,10 +116,12 @@ import json
 import os
 import pathlib
 import resource
+import socket
 import sys
 
 control_pid = int(sys.argv[1])
 sentinel = pathlib.Path(sys.argv[2])
+control_net_ns = int(sys.argv[3])
 
 def readable(path: pathlib.Path) -> bool:
     try:
@@ -165,6 +172,9 @@ payload = {
     'nproc_soft': soft_nproc,
     'nproc_hard': hard_nproc,
     'fork_blocked': fork_blocked,
+    'control_net_ns': control_net_ns,
+    'candidate_net_ns': os.stat('/proc/self/ns/net').st_ino,
+    'network_interfaces': sorted(name for _index, name in socket.if_nameindex()),
 }
 sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(',', ':')) + '\n')
 ''' % (_SECRET_ENV_NAMES,)
@@ -186,6 +196,9 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         "nproc_soft",
         "nproc_hard",
         "fork_blocked",
+        "control_net_ns",
+        "candidate_net_ns",
+        "network_interfaces",
     }
     if set(payload) != expected_keys:
         raise RuntimeError("sandbox probe schema drifted")
@@ -212,6 +225,20 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         raise RuntimeError("candidate process-count ceiling is not locked to one")
     if payload["fork_blocked"] is not True:
         raise RuntimeError("candidate can create descendant processes")
+    control_net_ns = payload["control_net_ns"]
+    candidate_net_ns = payload["candidate_net_ns"]
+    if (
+        not isinstance(control_net_ns, int)
+        or isinstance(control_net_ns, bool)
+        or control_net_ns <= 0
+        or not isinstance(candidate_net_ns, int)
+        or isinstance(candidate_net_ns, bool)
+        or candidate_net_ns <= 0
+        or candidate_net_ns == control_net_ns
+    ):
+        raise RuntimeError("candidate network namespace is not isolated from control")
+    if payload["network_interfaces"] != ["lo"]:
+        raise RuntimeError("candidate network namespace exposes unexpected interfaces")
 
 
 def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> dict[str, object]:
@@ -221,6 +248,7 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         raise RuntimeError("sandbox probe timeout is outside policy")
     identity = resolve_identity(sandbox_user)
     control_pid = os.getpid()
+    control_net_ns = pathlib.Path("/proc/self/ns/net").stat().st_ino
 
     with tempfile.TemporaryDirectory(prefix="control-private-") as private_directory, tempfile.TemporaryDirectory(prefix="candidate-probe-") as probe_directory:
         private_root = pathlib.Path(private_directory)
@@ -236,7 +264,14 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         probe.chmod(0o444)
 
         command = wrap_command(
-            [str(pathlib.Path(sys.executable).resolve(strict=True)), "-I", str(probe), str(control_pid), str(sentinel)],
+            [
+                str(pathlib.Path(sys.executable).resolve(strict=True)),
+                "-I",
+                str(probe),
+                str(control_pid),
+                str(sentinel),
+                str(control_net_ns),
+            ],
             identity,
         )
         completed = subprocess.run(
@@ -284,6 +319,10 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         "nproc_soft": 1,
         "nproc_hard": 1,
         "fork_blocked": True,
+        "control_net_ns": control_net_ns,
+        "candidate_net_ns": payload["candidate_net_ns"],
+        "network_namespace_distinct": True,
+        "network_interfaces": ["lo"],
         "passed": True,
     }
 
