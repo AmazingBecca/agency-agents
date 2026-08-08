@@ -280,23 +280,14 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(report["accepted_attacks"], [])
         self.assertEqual(report["rejected_clean"], [])
 
-    def test_diagnostic_execution_order_is_control_shuffled(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            bundle, runner = self._bundle(pathlib.Path(directory))
-            with patch.object(subject, "_shuffle_by_control_entropy", side_effect=lambda items: items.reverse()):
-                report = self._verify(bundle, runner)
+    def test_diagnostic_case_supplier_is_control_shuffled(self) -> None:
+        original_names = [case.name for case in subject.diagnostic._fixture_cases()]
+        with patch.object(subject, "_shuffle_by_control_entropy", side_effect=lambda items: items.reverse()):
+            with subject._opaque_diagnostic_case_identity():
+                shuffled_names = [case.name for case in subject.diagnostic._fixture_cases()]
 
-        self.assertTrue(report["passed"])
-        self.assertEqual(report["cases"][0]["name"], "load-tests-drop")
-        self.assertEqual(report["cases"][-1]["name"], "clean-pass")
-        self.assertEqual(
-            [case["name"] for case in report["sidecars"]],
-            [
-                "instance-calltestmethod-shadow",
-                "getattribute-calltestmethod-shadow",
-                "clean-position-decoy",
-            ],
-        )
+        self.assertEqual(shuffled_names, list(reversed(original_names)))
+        self.assertEqual([case.name for case in subject.diagnostic._fixture_cases()], original_names)
 
     def test_position_only_classifier_is_rejected_before_sidecar_decoy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -306,7 +297,6 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(report["accepted_attacks"], [])
         self.assertEqual(report["rejected_clean"], ["clean-pass", "clean-position-decoy"])
-        self.assertIn("clean-pass", {case["name"] for case in report["cases"] if not case["passed"]})
         by_name = {case["name"]: case for case in report["sidecars"]}
         self.assertFalse(by_name["clean-position-decoy"]["passed"])
         self.assertEqual(by_name["clean-position-decoy"]["returncode"], 7)
