@@ -38,9 +38,10 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
             "no_new_privs": "1",
             "cap_eff": "0000000000000000",
             "cap_bnd": "0000000000000000",
-            "nproc_soft": 1,
-            "nproc_hard": 1,
-            "fork_blocked": True,
+            "nproc_soft": 2,
+            "nproc_hard": 2,
+            "spawn_one_allowed": True,
+            "second_concurrent_spawn_blocked": True,
             "control_net_ns": 1001,
             "candidate_net_ns": 2002,
             "control_pid_ns": 3003,
@@ -99,12 +100,18 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, message):
                     subject._evaluate_probe(payload, self._identity())
 
-    def test_process_creation_controls_fail_closed(self) -> None:
-        for field, value in (("nproc_soft", 2), ("nproc_hard", 2), ("fork_blocked", False)):
+    def test_supervised_worker_process_budget_fails_closed(self) -> None:
+        mutations = (
+            ("nproc_soft", 1, "process-count"),
+            ("nproc_hard", 3, "process-count"),
+            ("spawn_one_allowed", False, "single worker"),
+            ("second_concurrent_spawn_blocked", False, "unsupervised concurrent descendant"),
+        )
+        for field, value, message in mutations:
             with self.subTest(field=field):
                 payload = self._good_payload()
                 payload[field] = value
-                with self.assertRaisesRegex(RuntimeError, "process-count|descendant"):
+                with self.assertRaisesRegex(RuntimeError, message):
                     subject._evaluate_probe(payload, self._identity())
 
     def test_pid_namespace_proc_view_fails_closed(self) -> None:
@@ -146,7 +153,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "schema drifted"):
             subject._evaluate_probe(payload, self._identity())
 
-    def test_wrapped_command_locks_privileges_descendants_network_and_proc(self) -> None:
+    def test_wrapped_command_locks_privileges_and_reserves_one_worker_slot(self) -> None:
         tools = {
             "unshare": pathlib.Path("/usr/bin/unshare"),
             "prlimit": pathlib.Path("/usr/bin/prlimit"),
@@ -159,7 +166,7 @@ class DistinctPrincipalBoundaryTests(unittest.TestCase):
         self.assertEqual(command[:3], ["/usr/bin/sudo", "-n", "--"])
         rendered = " ".join(command)
         self.assertIn(
-            "/usr/bin/unshare --mount --net --pid --fork --mount-proc -- /usr/bin/prlimit --nproc=1:1 --core=0:0 --",
+            "/usr/bin/unshare --mount --net --pid --fork --mount-proc -- /usr/bin/prlimit --nproc=2:2 --core=0:0 --",
             rendered,
         )
         self.assertIn("/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups", rendered)
