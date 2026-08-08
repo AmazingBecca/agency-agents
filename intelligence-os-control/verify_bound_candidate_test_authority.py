@@ -148,6 +148,67 @@ def _sandboxed_candidate_execution(sandbox_user: str | None):
         diagnostic._bounded_run = original_bounded_run
 
 
+def _shuffle_by_control_entropy(items: list[object]) -> None:
+    items.sort(key=lambda _item: os.urandom(32))
+
+
+@contextlib.contextmanager
+def _opaque_diagnostic_case_identity():
+    original_bounded_run = diagnostic._bounded_run
+    original_fixture_cases = diagnostic._fixture_cases
+
+    def shuffled_fixture_cases():
+        cases = list(original_fixture_cases())
+        _shuffle_by_control_entropy(cases)
+        return tuple(cases)
+
+    def opaque_bounded_run(
+        command: list[str],
+        *,
+        cwd: pathlib.Path,
+        timeout_seconds: int,
+    ) -> tuple[int, bytes, bytes, float]:
+        rewritten = list(command)
+        try:
+            root_index = rewritten.index("--project-root") + 1
+        except (ValueError, IndexError):
+            return original_bounded_run(
+                rewritten,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+
+        project = pathlib.Path(rewritten[root_index])
+        if project != cwd:
+            raise RuntimeError("diagnostic project root and working directory diverged")
+        tests = project / "tests"
+        fixtures = sorted(tests.glob("test*.py"))
+        if len(fixtures) != 1:
+            raise RuntimeError("diagnostic case must expose exactly one test fixture")
+
+        opaque_project = project.parent / f"run-{os.urandom(16).hex()}"
+        if opaque_project.exists():
+            raise RuntimeError("opaque diagnostic project identity collided")
+        opaque_fixture_name = f"test_{os.urandom(16).hex()}.py"
+        fixture = fixtures[0]
+        fixture.rename(tests / opaque_fixture_name)
+        project.rename(opaque_project)
+        rewritten[root_index] = str(opaque_project)
+        return original_bounded_run(
+            rewritten,
+            cwd=opaque_project,
+            timeout_seconds=timeout_seconds,
+        )
+
+    diagnostic._fixture_cases = shuffled_fixture_cases
+    diagnostic._bounded_run = opaque_bounded_run
+    try:
+        yield
+    finally:
+        diagnostic._bounded_run = original_bounded_run
+        diagnostic._fixture_cases = original_fixture_cases
+
+
 def _run_diagnostic_matrix(
     *,
     runner_root: pathlib.Path,
@@ -156,14 +217,6 @@ def _run_diagnostic_matrix(
     timeout_seconds: int,
     sandboxed: bool,
 ) -> dict[str, object]:
-    if not sandboxed:
-        return diagnostic.verify(
-            runner_root=runner_root,
-            entrypoint=entrypoint,
-            python_executable=python_executable,
-            timeout_seconds=timeout_seconds,
-        )
-
     original_tempdir = tempfile.TemporaryDirectory
 
     class TraversableTemporaryDirectory:
@@ -178,14 +231,16 @@ def _run_diagnostic_matrix(
         def __exit__(self, exc_type, exc, traceback):
             return self._inner.__exit__(exc_type, exc, traceback)
 
-    tempfile.TemporaryDirectory = TraversableTemporaryDirectory
+    if sandboxed:
+        tempfile.TemporaryDirectory = TraversableTemporaryDirectory
     try:
-        return diagnostic.verify(
-            runner_root=runner_root,
-            entrypoint=entrypoint,
-            python_executable=python_executable,
-            timeout_seconds=timeout_seconds,
-        )
+        with _opaque_diagnostic_case_identity():
+            return diagnostic.verify(
+                runner_root=runner_root,
+                entrypoint=entrypoint,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            )
     finally:
         tempfile.TemporaryDirectory = original_tempdir
 
@@ -199,11 +254,12 @@ def _run_dispatch_attack(
     fixture_name: str,
     source: str,
 ) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix=f"bound-{case_name}-") as directory:
+    del fixture_name
+    with tempfile.TemporaryDirectory(prefix="bound-case-") as directory:
         project = pathlib.Path(directory)
         tests = project / "tests"
         tests.mkdir(parents=True)
-        fixture = tests / fixture_name
+        fixture = tests / f"test_{os.urandom(16).hex()}.py"
         fixture.write_text(source, encoding="utf-8")
         fixture.chmod(0o444)
         tests.chmod(0o555)
@@ -309,13 +365,13 @@ def _run_clean_position_decoy(
                 self.assertEqual(2 + 2, 4)
         """
     ).lstrip()
-    with tempfile.TemporaryDirectory(prefix="bound-clean-position-") as directory:
+    with tempfile.TemporaryDirectory(prefix="bound-case-") as directory:
         root = pathlib.Path(directory)
         root.chmod(0o711)
-        project = root / "case-13"
+        project = root / f"run-{os.urandom(16).hex()}"
         tests = project / "tests"
         tests.mkdir(parents=True)
-        fixture = tests / "test_authority_13.py"
+        fixture = tests / f"test_{os.urandom(16).hex()}.py"
         fixture.write_text(source, encoding="utf-8")
         fixture.chmod(0o444)
         tests.chmod(0o555)
@@ -394,6 +450,66 @@ def _run_control_source_visibility_attack(
     }
 
 
+def _run_sidecars(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    timeout_seconds: int,
+    sandboxed: bool,
+) -> list[dict[str, object]]:
+    invocations = [
+        (
+            _INSTANCE_DISPATCH_CASE,
+            lambda: _run_instance_dispatch_attack(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+        ),
+        (
+            _GETATTRIBUTE_DISPATCH_CASE,
+            lambda: _run_getattribute_dispatch_attack(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+        ),
+        (
+            _CLEAN_POSITION_DECOY_CASE,
+            lambda: _run_clean_position_decoy(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+            ),
+        ),
+    ]
+    canonical_names = [
+        _INSTANCE_DISPATCH_CASE,
+        _GETATTRIBUTE_DISPATCH_CASE,
+        _CLEAN_POSITION_DECOY_CASE,
+    ]
+    if sandboxed:
+        invocations.append(
+            (
+                _CONTROL_SOURCE_VISIBILITY_CASE,
+                lambda: _run_control_source_visibility_attack(
+                    python_executable=python_executable,
+                    timeout_seconds=timeout_seconds,
+                ),
+            )
+        )
+        canonical_names.append(_CONTROL_SOURCE_VISIBILITY_CASE)
+
+    _shuffle_by_control_entropy(invocations)
+    by_name: dict[str, dict[str, object]] = {}
+    for expected_name, invoke in invocations:
+        report = invoke()
+        if report.get("name") != expected_name:
+            raise RuntimeError("sidecar authority case identity drifted")
+        by_name[expected_name] = report
+    return [by_name[name] for name in canonical_names]
+
+
 def verify_bound(
     *,
     runner_root: pathlib.Path,
@@ -433,30 +549,12 @@ def verify_bound(
             raise RuntimeError("candidate authority diagnostic case count is malformed")
 
         python_executable = python_executable.resolve(strict=True)
-        sidecars = [
-            _run_instance_dispatch_attack(
-                runner=runner,
-                python_executable=python_executable,
-                timeout_seconds=timeout_seconds,
-            ),
-            _run_getattribute_dispatch_attack(
-                runner=runner,
-                python_executable=python_executable,
-                timeout_seconds=timeout_seconds,
-            ),
-            _run_clean_position_decoy(
-                runner=runner,
-                python_executable=python_executable,
-                timeout_seconds=timeout_seconds,
-            ),
-        ]
-        if sandbox_user is not None:
-            sidecars.append(
-                _run_control_source_visibility_attack(
-                    python_executable=python_executable,
-                    timeout_seconds=timeout_seconds,
-                )
-            )
+        sidecars = _run_sidecars(
+            runner=runner,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+            sandboxed=sandbox_user is not None,
+        )
 
     after_runner, after_digest, after_bytes = _stable_runner_digest(runner_root, entrypoint)
     if after_runner != runner or after_digest != before_digest or after_bytes != runner_bytes:
