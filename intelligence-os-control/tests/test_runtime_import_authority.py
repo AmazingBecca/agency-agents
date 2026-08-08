@@ -42,7 +42,7 @@ class RuntimeImportAuthorityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "symlink escaped sealed runtime prefix"):
                     subject._runtime_import_paths()
 
-    def test_runtime_import_search_path_outside_sealed_prefix_fails_closed(self) -> None:
+    def test_external_parent_search_path_is_not_misclassified_as_sealed_runtime_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_directory:
             prefix = pathlib.Path(directory).resolve(strict=True)
             library = prefix / "lib"
@@ -56,8 +56,9 @@ class RuntimeImportAuthorityTests(unittest.TestCase):
             ), patch.object(subject, "_site_roots", return_value=()), patch.object(
                 subject, "_CONTROL_SOURCE_ROOT", control_root
             ), patch.object(subject.sys, "path", [str(outside)]):
-                with self.assertRaisesRegex(RuntimeError, "import search path escaped sealed runtime authority"):
-                    subject._runtime_import_roots()
+                roots = subject._runtime_import_roots()
+
+        self.assertEqual(roots, (library.resolve(strict=False),))
 
     def test_control_source_path_is_not_misclassified_as_runtime_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -77,6 +78,22 @@ class RuntimeImportAuthorityTests(unittest.TestCase):
                 control_root.rmdir()
 
         self.assertEqual(roots, (library.resolve(strict=False),))
+
+    def test_site_root_is_bound_even_before_site_module_is_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = pathlib.Path(directory).resolve(strict=True)
+            standard = prefix / "stdlib"
+            site = prefix / "site-packages"
+            standard.mkdir()
+            site.mkdir()
+            with patch.object(subject, "_runtime_prefixes", return_value=(prefix,)), patch.object(
+                subject, "_stdlib_roots", return_value=(standard,)
+            ), patch.object(subject, "_site_roots", return_value=(site,)), patch.object(
+                subject.sys, "path", []
+            ):
+                roots = subject._runtime_import_roots()
+
+        self.assertEqual(roots, tuple(sorted((site, standard), key=lambda item: item.as_posix())))
 
 
 if __name__ == "__main__":
