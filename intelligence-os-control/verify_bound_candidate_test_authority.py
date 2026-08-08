@@ -438,50 +438,13 @@ def verify_bound(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--runner-root", type=pathlib.Path, required=True)
-    parser.add_argument("--entrypoint", default="isolated_unittest_runner.py")
-    parser.add_argument("--python", dest="python_executable", type=pathlib.Path, default=pathlib.Path(sys.executable))
-    parser.add_argument("--expected-runner-sha256", required=True)
-    parser.add_argument("--repository", required=True)
-    parser.add_argument("--head-sha", required=True)
-    parser.add_argument("--base-sha", required=True)
-    parser.add_argument("--merge-sha", required=True)
-    parser.add_argument("--timeout-seconds", type=int, default=20)
-    parser.add_argument("--sandbox-user", default="nobody")
-    parser.add_argument("--report", type=pathlib.Path)
-    args = parser.parse_args(argv)
-
-    try:
-        report = verify_bound(
-            runner_root=args.runner_root,
-            entrypoint=args.entrypoint,
-            python_executable=args.python_executable,
-            expected_runner_sha256=args.expected_runner_sha256,
-            repository=args.repository,
-            head_sha=args.head_sha,
-            base_sha=args.base_sha,
-            merge_sha=args.merge_sha,
-            timeout_seconds=args.timeout_seconds,
-            sandbox_user=args.sandbox_user,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    rendered = _canonical_json(report)
-    if args.report is not None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(args.report, flags, 0o600)
-        try:
-            os.write(descriptor, rendered.encode("utf-8"))
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    sys.stdout.write(rendered)
-    return 0 if report["passed"] else 1
+    del argv
+    print(
+        "ERROR: direct entrypoint-only verification is disabled; "
+        "use verify_authenticated_runner_bundle.py",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":
