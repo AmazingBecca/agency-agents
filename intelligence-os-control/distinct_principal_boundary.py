@@ -14,9 +14,10 @@ import sys
 import tempfile
 from dataclasses import dataclass
 
-_SCHEMA = "amazingbecca.distinct-principal-boundary.v5"
+_SCHEMA = "amazingbecca.distinct-principal-boundary.v6"
 _MAX_OUTPUT_BYTES = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 10
+_PROCESS_LIMIT = 2
 _SECRET_ENV_NAMES = (
     "GITHUB_TOKEN",
     "GH_TOKEN",
@@ -132,7 +133,7 @@ def wrap_command(
     )
     constrained = [
         str(prlimit),
-        "--nproc=1:1",
+        f"--nproc={_PROCESS_LIMIT}:{_PROCESS_LIMIT}",
         "--core=0:0",
         "--",
         str(setpriv),
@@ -216,15 +217,37 @@ try:
 except (PermissionError, ProcessLookupError):
     signal_allowed = False
 
+spawn_one_allowed = False
+second_concurrent_spawn_blocked = False
+read_fd, write_fd = os.pipe()
 try:
     child_pid = os.fork()
-except OSError as exc:
-    fork_blocked = exc.errno in (11, 1)
+except OSError:
+    os.close(read_fd)
+    os.close(write_fd)
 else:
+    spawn_one_allowed = True
     if child_pid == 0:
+        os.close(read_fd)
+        nested_blocked = False
+        try:
+            grandchild_pid = os.fork()
+        except OSError as exc:
+            nested_blocked = exc.errno in (11, 1)
+        else:
+            if grandchild_pid == 0:
+                os._exit(0)
+            os.waitpid(grandchild_pid, 0)
+        try:
+            os.write(write_fd, b'1' if nested_blocked else b'0')
+        finally:
+            os.close(write_fd)
         os._exit(0)
+    os.close(write_fd)
+    marker = os.read(read_fd, 2)
+    os.close(read_fd)
     os.waitpid(child_pid, 0)
-    fork_blocked = False
+    second_concurrent_spawn_blocked = marker == b'1'
 
 soft_nproc, hard_nproc = resource.getrlimit(resource.RLIMIT_NPROC)
 proc_visible_pids = sorted(int(item.name) for item in pathlib.Path('/proc').iterdir() if item.name.isdecimal())
@@ -246,7 +269,8 @@ payload = {
     'cap_bnd': status_value('CapBnd'),
     'nproc_soft': soft_nproc,
     'nproc_hard': hard_nproc,
-    'fork_blocked': fork_blocked,
+    'spawn_one_allowed': spawn_one_allowed,
+    'second_concurrent_spawn_blocked': second_concurrent_spawn_blocked,
     'control_net_ns': control_net_ns,
     'candidate_net_ns': os.stat('/proc/self/ns/net').st_ino,
     'control_pid_ns': control_pid_ns,
@@ -278,7 +302,8 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
         "cap_bnd",
         "nproc_soft",
         "nproc_hard",
-        "fork_blocked",
+        "spawn_one_allowed",
+        "second_concurrent_spawn_blocked",
         "control_net_ns",
         "candidate_net_ns",
         "control_pid_ns",
@@ -312,10 +337,12 @@ def _evaluate_probe(payload: dict[str, object], identity: SandboxIdentity) -> No
     for name in ("cap_eff", "cap_bnd"):
         if payload[name] != "0000000000000000":
             raise RuntimeError(f"candidate retained Linux capabilities: {name}")
-    if payload["nproc_soft"] != 1 or payload["nproc_hard"] != 1:
-        raise RuntimeError("candidate process-count ceiling is not locked to one")
-    if payload["fork_blocked"] is not True:
-        raise RuntimeError("candidate can create descendant processes")
+    if payload["nproc_soft"] != _PROCESS_LIMIT or payload["nproc_hard"] != _PROCESS_LIMIT:
+        raise RuntimeError("candidate process-count ceiling is not locked to the supervised-worker budget")
+    if payload["spawn_one_allowed"] is not True:
+        raise RuntimeError("candidate supervisor cannot create its single worker process")
+    if payload["second_concurrent_spawn_blocked"] is not True:
+        raise RuntimeError("candidate process budget permits an unsupervised concurrent descendant")
     for control_name, candidate_name, label in (
         ("control_net_ns", "candidate_net_ns", "network"),
         ("control_pid_ns", "candidate_pid_ns", "PID"),
@@ -425,9 +452,11 @@ def verify_boundary(*, sandbox_user: str, timeout_seconds: int = _DEFAULT_TIMEOU
         "no_new_privs": True,
         "effective_capabilities": "0000000000000000",
         "bounding_capabilities": "0000000000000000",
-        "nproc_soft": 1,
-        "nproc_hard": 1,
-        "fork_blocked": True,
+        "nproc_soft": _PROCESS_LIMIT,
+        "nproc_hard": _PROCESS_LIMIT,
+        "spawn_one_allowed": True,
+        "second_concurrent_spawn_blocked": True,
+        "single_worker_slot": True,
         "control_net_ns": control_net_ns,
         "candidate_net_ns": payload["candidate_net_ns"],
         "network_namespace_distinct": True,
