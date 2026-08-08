@@ -45,6 +45,29 @@ args = parser.parse_args()
 raise SystemExit(0 if args.project_root.name == 'case-00' else 7)
 '''
 
+OPAQUE_PATH_ASSERTING_RUNNER = r'''
+from __future__ import annotations
+import argparse
+import pathlib
+import re
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--project-root', type=pathlib.Path, required=True)
+parser.add_argument('--pattern')
+args = parser.parse_args()
+fixtures = list((args.project_root / 'tests').glob('test*.py'))
+if len(fixtures) != 1:
+    raise SystemExit(90)
+if re.fullmatch(r'case-\d+', args.project_root.name):
+    raise SystemExit(91)
+if re.fullmatch(r'test_authority_\d+\.py', fixtures[0].name):
+    raise SystemExit(92)
+source = fixtures[0].read_text(encoding='utf-8')
+if 'class Clean' in source and 'def test_pass' in source:
+    raise SystemExit(0)
+raise SystemExit(7)
+'''
+
 INSTANCE_ESCAPE_RUNNER = r'''
 from __future__ import annotations
 import argparse
@@ -248,14 +271,42 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                         timeout_seconds=3,
                     )
 
-    def test_position_only_classifier_is_rejected_by_clean_attack_position_decoy(self) -> None:
+    def test_candidate_visible_case_paths_are_opaque(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), OPAQUE_PATH_ASSERTING_RUNNER)
+            report = self._verify(bundle, runner)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["accepted_attacks"], [])
+        self.assertEqual(report["rejected_clean"], [])
+
+    def test_diagnostic_execution_order_is_control_shuffled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory))
+            with patch.object(subject, "_shuffle_by_control_entropy", side_effect=lambda items: items.reverse()):
+                report = self._verify(bundle, runner)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["cases"][0]["name"], "load-tests-drop")
+        self.assertEqual(report["cases"][-1]["name"], "clean-pass")
+        self.assertEqual(
+            [case["name"] for case in report["sidecars"]],
+            [
+                "instance-calltestmethod-shadow",
+                "getattribute-calltestmethod-shadow",
+                "clean-position-decoy",
+            ],
+        )
+
+    def test_position_only_classifier_is_rejected_before_sidecar_decoy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory), POSITION_CLASSIFIER_RUNNER)
             report = self._verify(bundle, runner)
 
         self.assertFalse(report["passed"])
         self.assertEqual(report["accepted_attacks"], [])
-        self.assertEqual(report["rejected_clean"], ["clean-position-decoy"])
+        self.assertEqual(report["rejected_clean"], ["clean-pass", "clean-position-decoy"])
+        self.assertIn("clean-pass", {case["name"] for case in report["cases"] if not case["passed"]})
         by_name = {case["name"]: case for case in report["sidecars"]}
         self.assertFalse(by_name["clean-position-decoy"]["passed"])
         self.assertEqual(by_name["clean-position-decoy"]["returncode"], 7)
