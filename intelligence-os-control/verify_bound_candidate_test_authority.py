@@ -191,8 +191,12 @@ def _opaque_diagnostic_case_identity():
             raise RuntimeError("opaque diagnostic project identity collided")
         opaque_fixture_name = f"test_{os.urandom(16).hex()}.py"
         fixture = fixtures[0]
+        tests.chmod(0o755)
+        project.chmod(0o755)
         fixture.rename(tests / opaque_fixture_name)
         project.rename(opaque_project)
+        (opaque_project / "tests").chmod(0o555)
+        opaque_project.chmod(0o555)
         rewritten[root_index] = str(opaque_project)
         return original_bounded_run(
             rewritten,
