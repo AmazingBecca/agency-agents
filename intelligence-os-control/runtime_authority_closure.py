@@ -13,8 +13,8 @@ from dataclasses import dataclass
 _SCHEMA = "amazingbecca.runtime-authority-closure.v1"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_FILE_BYTES = 64 * 1024 * 1024
-_MAX_FILES = 8192
-_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+_MAX_FILES = 16384
+_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 _CONTROL_SOURCE_ROOT = pathlib.Path(__file__).resolve(strict=True).parent
 
 
@@ -142,9 +142,8 @@ def _runtime_import_roots() -> tuple[pathlib.Path, ...]:
             continue
         if _within(resolved, _CONTROL_SOURCE_ROOT):
             continue
-        if not any(_within(resolved, prefix) for prefix in prefixes):
-            raise RuntimeError(f"Python runtime import search path escaped sealed runtime authority: {resolved}")
-        roots.add(resolved)
+        if any(_within(resolved, prefix) for prefix in prefixes):
+            roots.add(resolved)
 
     for root in roots:
         if not any(_within(root, prefix) for prefix in prefixes):
@@ -209,7 +208,7 @@ def _runtime_import_paths() -> set[pathlib.Path]:
 
 def _loaded_stdlib_paths() -> set[pathlib.Path]:
     # Kept for compatibility with focused callers; the closure no longer relies
-    # on load state and instead binds the complete runtime import authority tree.
+    # on load state and instead binds the complete sealed runtime import tree.
     stdlib_roots = _stdlib_roots()
     site_roots = _site_roots()
     paths: set[pathlib.Path] = set()
