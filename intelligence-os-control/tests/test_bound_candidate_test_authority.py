@@ -33,6 +33,18 @@ if 'class Clean' in source and 'def test_pass' in source:
 raise SystemExit(7)
 '''
 
+POSITION_CLASSIFIER_RUNNER = r'''
+from __future__ import annotations
+import argparse
+import pathlib
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--project-root', type=pathlib.Path, required=True)
+parser.add_argument('--pattern')
+args = parser.parse_args()
+raise SystemExit(0 if args.project_root.name == 'case-00' else 7)
+'''
+
 INSTANCE_ESCAPE_RUNNER = r'''
 from __future__ import annotations
 import argparse
@@ -108,14 +120,19 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         self.assertEqual(report["merge_sha"], MERGE)
         self.assertEqual(report["runner_sha256"], expected)
         self.assertEqual(report["diagnostic_case_count"], 14)
-        self.assertEqual(report["sidecar_case_count"], 2)
-        self.assertEqual(report["total_case_count"], 16)
+        self.assertEqual(report["sidecar_case_count"], 3)
+        self.assertEqual(report["total_case_count"], 17)
         self.assertEqual(report["accepted_attacks"], [])
+        self.assertEqual(report["rejected_clean"], [])
         self.assertIsNone(report["sandbox_user"])
         self.assertIsNone(report["sandbox_boundary"])
         self.assertEqual(
             [case["name"] for case in report["sidecars"]],
-            ["instance-calltestmethod-shadow", "getattribute-calltestmethod-shadow"],
+            [
+                "instance-calltestmethod-shadow",
+                "getattribute-calltestmethod-shadow",
+                "clean-position-decoy",
+            ],
         )
         self.assertTrue(all(case["passed"] for case in report["sidecars"]))
         self.assertTrue(report["sidecar"]["passed"])
@@ -132,6 +149,8 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
 
         self.assertTrue(report["passed"])
         self.assertEqual(report["sandbox_user"], "nobody")
+        self.assertEqual(report["sidecar_case_count"], 4)
+        self.assertEqual(report["total_case_count"], 18)
         boundary = report["sandbox_boundary"]
         self.assertIsInstance(boundary, dict)
         self.assertTrue(boundary["passed"])
@@ -193,6 +212,15 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                     "stderr_bytes": 0,
                     "elapsed_ms": 0,
                 },
+                {
+                    "name": "clean-position-decoy",
+                    "expected_zero": True,
+                    "returncode": 0,
+                    "passed": True,
+                    "stdout_bytes": 0,
+                    "stderr_bytes": 0,
+                    "elapsed_ms": 0,
+                },
             ]
             with patch.object(subject.diagnostic, "verify", side_effect=mutate), patch.object(
                 subject,
@@ -202,6 +230,10 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                 subject,
                 "_run_getattribute_dispatch_attack",
                 return_value=sidecars[1],
+            ), patch.object(
+                subject,
+                "_run_clean_position_decoy",
+                return_value=sidecars[2],
             ):
                 with self.assertRaisesRegex(RuntimeError, "changed during external verification"):
                     subject.verify_bound(
@@ -216,6 +248,20 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                         timeout_seconds=3,
                     )
 
+    def test_position_only_classifier_is_rejected_by_clean_attack_position_decoy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), POSITION_CLASSIFIER_RUNNER)
+            report = self._verify(bundle, runner)
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["accepted_attacks"], [])
+        self.assertEqual(report["rejected_clean"], ["clean-position-decoy"])
+        by_name = {case["name"]: case for case in report["sidecars"]}
+        self.assertFalse(by_name["clean-position-decoy"]["passed"])
+        self.assertEqual(by_name["clean-position-decoy"]["returncode"], 7)
+        self.assertTrue(by_name["instance-calltestmethod-shadow"]["passed"])
+        self.assertTrue(by_name["getattribute-calltestmethod-shadow"]["passed"])
+
     def test_instance_dispatch_escape_is_an_explicit_red_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory), INSTANCE_ESCAPE_RUNNER)
@@ -223,10 +269,12 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertEqual(report["accepted_attacks"], ["instance-calltestmethod-shadow"])
+        self.assertEqual(report["rejected_clean"], [])
         by_name = {case["name"]: case for case in report["sidecars"]}
         self.assertFalse(by_name["instance-calltestmethod-shadow"]["passed"])
         self.assertEqual(by_name["instance-calltestmethod-shadow"]["returncode"], 0)
         self.assertTrue(by_name["getattribute-calltestmethod-shadow"]["passed"])
+        self.assertTrue(by_name["clean-position-decoy"]["passed"])
 
     def test_getattribute_dispatch_escape_is_an_explicit_red_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -235,10 +283,12 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertEqual(report["accepted_attacks"], ["getattribute-calltestmethod-shadow"])
+        self.assertEqual(report["rejected_clean"], [])
         by_name = {case["name"]: case for case in report["sidecars"]}
         self.assertFalse(by_name["getattribute-calltestmethod-shadow"]["passed"])
         self.assertEqual(by_name["getattribute-calltestmethod-shadow"]["returncode"], 0)
         self.assertTrue(by_name["instance-calltestmethod-shadow"]["passed"])
+        self.assertTrue(by_name["clean-position-decoy"]["passed"])
 
     def test_identity_fields_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
