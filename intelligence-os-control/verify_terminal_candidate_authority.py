@@ -7,11 +7,13 @@ import sys
 
 import verify_authenticated_runner_bundle as authenticated
 import verify_bound_candidate_test_authority as bound
+import verify_detached_descendant_lifecycle as descendant
 import verify_nested_suite_dispatch_authority as nested
 
 _SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
 _AUTHORITY_LEVEL = "diagnostic-bundle-dispatch-bound-not-terminal"
 _NESTED_SCHEMA = "amazingbecca.nested-suite-dispatch-authority.v1"
+_DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
 
 
 def _validate_nested_report(report: dict[str, object]) -> None:
@@ -25,6 +27,17 @@ def _validate_nested_report(report: dict[str, object]) -> None:
         value = report.get(key)
         if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
             raise RuntimeError(f"nested dispatch authority {key} is malformed")
+
+
+def _validate_descendant_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _DESCENDANT_SCHEMA:
+        raise RuntimeError("detached-descendant authority schema is unexpected")
+    if report.get("passed") is not True:
+        raise RuntimeError("detached-descendant authority did not pass")
+    if report.get("detached_session_started") is not True:
+        raise RuntimeError("detached-descendant authority did not start the hostile session")
+    if report.get("heartbeat_stable_after_namespace_exit") is not True:
+        raise RuntimeError("detached-descendant authority did not prove namespace teardown")
 
 
 def verify_terminal_bundle(
@@ -42,6 +55,14 @@ def verify_terminal_bundle(
     timeout_seconds: int = 20,
     sandbox_user: str | None = "nobody",
 ) -> dict[str, object]:
+    descendant_report: dict[str, object] | None = None
+    if sandbox_user is not None:
+        descendant_report = descendant.verify_detached_descendant_lifecycle(
+            sandbox_user=sandbox_user,
+            timeout_seconds=min(max(timeout_seconds, 2), 30),
+        )
+        _validate_descendant_report(descendant_report)
+
     base_report = authenticated.verify_authenticated_bundle(
         runner_root=runner_root,
         entrypoint=entrypoint,
@@ -117,6 +138,7 @@ def verify_terminal_bundle(
     if not isinstance(base_total, int):
         raise RuntimeError("authenticated bundle case count is malformed")
     nested_count = int(nested_report["case_count"])
+    descendant_passed = descendant_report is None or descendant_report.get("passed") is True
 
     report = dict(base_report)
     report.update(
@@ -128,10 +150,16 @@ def verify_terminal_bundle(
             "nested_dispatch_case_count": nested_count,
             "nested_dispatch_cases": list(nested_report.get("cases", [])),
             "terminal_total_case_count": base_total + nested_count,
+            "detached_descendant_schema": (
+                descendant_report.get("schema") if descendant_report is not None else None
+            ),
+            "detached_descendant_verified": descendant_report is not None,
+            "detached_descendant_report": descendant_report,
             "accepted_attacks": accepted_attacks,
             "rejected_clean": rejected_clean,
             "passed": bool(base_report["passed"])
             and bool(nested_report["passed"])
+            and descendant_passed
             and not accepted_attacks
             and not rejected_clean,
         }
