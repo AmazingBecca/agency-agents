@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -381,42 +380,13 @@ def verify_authenticated_bundle(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--runner-root", type=pathlib.Path, required=True)
-    parser.add_argument("--entrypoint", default="isolated_unittest_runner.py")
-    parser.add_argument("--python", dest="python_executable", type=pathlib.Path, default=pathlib.Path(sys.executable))
-    parser.add_argument("--expected-python-sha256", required=True)
-    parser.add_argument("--expected-runner-sha256", required=True)
-    parser.add_argument("--expected-bundle-sha256", required=True)
-    parser.add_argument("--repository", required=True)
-    parser.add_argument("--head-sha", required=True)
-    parser.add_argument("--base-sha", required=True)
-    parser.add_argument("--merge-sha", required=True)
-    parser.add_argument("--timeout-seconds", type=int, default=20)
-    parser.add_argument("--sandbox-user", default="nobody")
-    args = parser.parse_args(argv)
-
-    try:
-        report = verify_authenticated_bundle(
-            runner_root=args.runner_root,
-            entrypoint=args.entrypoint,
-            python_executable=args.python_executable,
-            expected_python_sha256=args.expected_python_sha256,
-            expected_runner_sha256=args.expected_runner_sha256,
-            expected_bundle_sha256=args.expected_bundle_sha256,
-            repository=args.repository,
-            head_sha=args.head_sha,
-            base_sha=args.base_sha,
-            merge_sha=args.merge_sha,
-            timeout_seconds=args.timeout_seconds,
-            sandbox_user=args.sandbox_user,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    sys.stdout.write(_canonical_json(report).decode("utf-8"))
-    return 0 if report.get("passed") is True else 1
+    del argv
+    print(
+        "ERROR: authenticated bundle verification is an internal diagnostic layer; "
+        "use verify_terminal_candidate_authority.py",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":
