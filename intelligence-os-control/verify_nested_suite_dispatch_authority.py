@@ -80,6 +80,29 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
                     unittest.TextTestResult.addError = forged_result_add_error
             """
         ).lstrip()
+    elif attack_kind == "result-state":
+        arm_body = textwrap.dedent(
+            f"""
+            import unittest
+
+            class ArmTerminalResultState{nonce}(unittest.TestCase):
+                def test_00_forge_result_state(self):
+                    result = self._outcome.result
+                    target = (
+                        f"{{self.__class__.__module__}}."
+                        f"{{self.__class__.__qualname__}}.test_99_must_fail"
+                    )
+                    result.testsRun = 2
+                    if hasattr(result, "started_ids"):
+                        result.started_ids.append(target)
+                    if hasattr(result, "passed_ids"):
+                        result.passed_ids.append(target)
+                    result.shouldStop = True
+
+                def test_99_must_fail(self):
+                    self.fail("mandatory terminal-state failure {nonce}")
+            """
+        ).lstrip()
     elif attack_kind is None:
         arm_body = textwrap.dedent(
             f"""
@@ -93,44 +116,47 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
     else:
         raise ValueError(f"unsupported attack kind: {attack_kind!r}")
 
-    if attack_kind is None:
-        later_body = textwrap.dedent(
-            f"""
-            import unittest
-
-            class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
-                def test_99_must_fail(self):
-                    self.assertEqual(2 + 2, 4)
-            """
-        ).lstrip()
-    elif attack_kind == "result-add-error":
-        later_body = textwrap.dedent(
-            f"""
-            import unittest
-
-            class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
-                def test_99_must_fail(self):
-                    raise RuntimeError("mandatory later-module error {nonce}")
-            """
-        ).lstrip()
-    else:
-        later_body = textwrap.dedent(
-            f"""
-            import unittest
-
-            class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
-                def test_99_must_fail(self):
-                    self.fail("mandatory later-module failure {nonce}")
-            """
-        ).lstrip()
-
     first = tests / f"test_00_{os.urandom(8).hex()}.py"
-    second = tests / f"test_99_{os.urandom(8).hex()}.py"
     first.write_text(arm_body, encoding="utf-8")
-    second.write_text(later_body, encoding="utf-8")
+
+    if attack_kind != "result-state":
+        if attack_kind is None:
+            later_body = textwrap.dedent(
+                f"""
+                import unittest
+
+                class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
+                    def test_99_must_fail(self):
+                        self.assertEqual(2 + 2, 4)
+                """
+            ).lstrip()
+        elif attack_kind == "result-add-error":
+            later_body = textwrap.dedent(
+                f"""
+                import unittest
+
+                class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
+                    def test_99_must_fail(self):
+                        raise RuntimeError("mandatory later-module error {nonce}")
+                """
+            ).lstrip()
+        else:
+            later_body = textwrap.dedent(
+                f"""
+                import unittest
+
+                class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
+                    def test_99_must_fail(self):
+                        self.fail("mandatory later-module failure {nonce}")
+                """
+            ).lstrip()
+
+        second = tests / f"test_99_{os.urandom(8).hex()}.py"
+        second.write_text(later_body, encoding="utf-8")
+        second.chmod(0o444)
+
     package.chmod(0o444)
     first.chmod(0o444)
-    second.chmod(0o444)
     tests.chmod(0o555)
     project.chmod(0o555)
 
@@ -168,6 +194,7 @@ def _run_case(
         "call": "nested-suite-post-discovery-call-forgery",
         "run": "nested-suite-post-discovery-run-forgery",
         "result-add-error": "result-post-discovery-add-error-forgery",
+        "result-state": "terminal-result-state-forgery",
     }
     return {
         "name": names[attack_kind],
@@ -216,6 +243,12 @@ def verify(
             python_executable=python_executable,
             timeout_seconds=timeout_seconds,
             attack_kind="result-add-error",
+        ),
+        _run_case(
+            runner=runner,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+            attack_kind="result-state",
         ),
     ]
     clean = cases[0]
