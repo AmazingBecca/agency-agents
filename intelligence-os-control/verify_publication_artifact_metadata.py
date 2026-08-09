@@ -140,7 +140,7 @@ def _load_metadata(raw: bytes) -> dict[str, Any]:
 
 def _expected_artifact_name(expected: dict[str, str], publisher_sha: str) -> str:
     return (
-        "intelligence-os-retained-evidence-publication-"
+        "intelligence-os-retained-evidence-diagnostic-not-promotion-"
         f"head-{expected['reviewed_head']}-"
         f"merge-{expected['synthetic_merge']}-"
         f"publisher-{publisher_sha}-"
