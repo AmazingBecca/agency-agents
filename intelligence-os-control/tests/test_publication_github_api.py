@@ -59,12 +59,8 @@ class PublicationGithubApiAuthorityTests(unittest.TestCase):
         digest = hashlib.sha256(self.artifact_raw).hexdigest()
         self.artifact_metadata = {
             "id": artifact_id,
-            "name": (
-                "intelligence-os-retained-evidence-publication-"
-                f"head-{self.authority['reviewed_head']}-"
-                f"merge-{self.authority['synthetic_merge']}-"
-                f"publisher-{self.publisher_sha}-"
-                f"run-{self.authority['run_id']}-{self.authority['run_attempt']}"
+            "name": api_verifier.artifact_metadata_verifier._expected_artifact_name(
+                self.authority, self.publisher_sha
             ),
             "size_in_bytes": len(self.artifact_raw),
             "url": f"https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}",
@@ -134,9 +130,12 @@ class PublicationGithubApiAuthorityTests(unittest.TestCase):
             self._json({"total_count": len(artifacts_value), "artifacts": artifacts_value}),
         ]
 
-    def test_authenticated_api_fetch_binds_exact_run_artifact_and_archive(self) -> None:
+    def test_authenticated_api_fetch_binds_exact_run_nonpromotion_artifact_and_archive(self) -> None:
         responses = self._responses()
-        expected_publication = {"publication_sha256": "f" * 64}
+        expected_publication = {
+            "diagnostic_sha256": "0" * 64,
+            "publication_sha256": "f" * 64,
+        }
         with mock.patch.object(api_verifier, "_api_get", side_effect=responses) as api_get, mock.patch.object(
             api_verifier, "_download_artifact", return_value=self.artifact_raw
         ) as download, mock.patch.object(
@@ -148,6 +147,7 @@ class PublicationGithubApiAuthorityTests(unittest.TestCase):
                 self.token, self.publisher_sha, self.authority
             )
         self.assertEqual(observed, expected_publication)
+        self.assertIn("diagnostic-not-promotion", self.artifact_metadata["name"])
         run_url = (
             "https://api.github.com/repos/AmazingBecca/free-millionaire-pipeline/"
             "actions/runs/123456789"
