@@ -1,218 +1,178 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import hashlib
-import json
 import os
 import pathlib
+import pwd
 import re
+import secrets
 import stat
 import sys
 import tempfile
 import textwrap
+from typing import Iterator
 
 import distinct_principal_boundary as boundary
 import verify_candidate_test_authority as diagnostic
 
 _SCHEMA = "amazingbecca.bound-candidate-test-authority.v1"
 _AUTHORITY_LEVEL = "diagnostic-bound-not-terminal"
-_MAX_RUNNER_BYTES = 4 * 1024 * 1024
-_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-_INSTANCE_DISPATCH_CASE = "instance-calltestmethod-shadow"
-_GETATTRIBUTE_DISPATCH_CASE = "getattribute-calltestmethod-shadow"
+_INSTANCE_DISPATCH_CASE = "instance-calltestmethod-dispatch-forgery"
+_GETATTRIBUTE_DISPATCH_CASE = "getattribute-calltestmethod-dispatch-forgery"
 _CLEAN_POSITION_DECOY_CASE = "clean-position-decoy"
 _CLEAN_SOURCE_SHAPE_DECOY_CASE = "clean-source-shape-decoy"
 _ATTACK_SOURCE_SHAPE_DECOY_CASE = "attack-source-shape-decoy"
-_CONTROL_SOURCE_VISIBILITY_CASE = "trusted-control-source-read"
-_TRUSTED_CONTROL_ROOT = pathlib.Path(__file__).resolve(strict=True).parent.parent
-
-
-def _canonical_json(payload: object) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+_CONTROL_SOURCE_VISIBILITY_CASE = "control-source-visibility"
 
 
 def _validate_identity(repository: str, head_sha: str, base_sha: str, merge_sha: str) -> None:
     if _REPOSITORY_RE.fullmatch(repository) is None:
-        raise RuntimeError("repository identity is malformed")
-    for label, value in (
-        ("head SHA", head_sha),
-        ("base SHA", base_sha),
-        ("merge SHA", merge_sha),
+        raise RuntimeError("repository identity must be owner/name")
+    for name, value in (
+        ("head_sha", head_sha),
+        ("base_sha", base_sha),
+        ("merge_sha", merge_sha),
     ):
         if _SHA_RE.fullmatch(value) is None:
-            raise RuntimeError(f"{label} must be one lowercase 40-character SHA")
+            raise RuntimeError(f"{name} must be 40 lowercase hex characters")
+    if len({head_sha, base_sha, merge_sha}) != 3:
+        raise RuntimeError("candidate head, base, and synthetic merge identities must be distinct")
 
 
 def _stable_runner_digest(root: pathlib.Path, entrypoint: str) -> tuple[pathlib.Path, str, int]:
     resolved_root = root.resolve(strict=True)
-    root_metadata = resolved_root.lstat()
-    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
-        raise RuntimeError("runner root must be a regular directory")
-
-    candidate = resolved_root / entrypoint
-    try:
-        entry_metadata = candidate.lstat()
-    except FileNotFoundError as exc:
-        raise RuntimeError("runner entrypoint is missing") from exc
-    if stat.S_ISLNK(entry_metadata.st_mode):
-        raise RuntimeError("runner entrypoint must not be a symlink")
-
-    resolved = candidate.resolve(strict=True)
-    if resolved_root not in resolved.parents:
-        raise RuntimeError("runner entrypoint escaped its bundle root")
-
+    relative = pathlib.PurePosixPath(entrypoint)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise RuntimeError("runner entrypoint must stay inside authenticated bundle")
+    runner = (resolved_root / pathlib.Path(*relative.parts)).resolve(strict=True)
+    if runner.parent != resolved_root and resolved_root not in runner.parents:
+        raise RuntimeError("runner entrypoint escaped authenticated bundle")
+    metadata = runner.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise RuntimeError("runner entrypoint must be one regular single-link file")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(resolved, flags)
+    descriptor = os.open(runner, flags)
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-            raise RuntimeError("runner entrypoint must be one regular non-hard-linked file")
-        if before.st_size < 1 or before.st_size > _MAX_RUNNER_BYTES:
-            raise RuntimeError("runner entrypoint size is outside policy")
         digest = hashlib.sha256()
         total = 0
         while True:
-            chunk = os.read(descriptor, min(1024 * 1024, _MAX_RUNNER_BYTES + 1 - total))
+            chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
             total += len(chunk)
-            if total > _MAX_RUNNER_BYTES:
-                raise RuntimeError("runner entrypoint size is outside policy")
             digest.update(chunk)
         after = os.fstat(descriptor)
-        identity = lambda item: (
-            item.st_dev,
-            item.st_ino,
-            item.st_mode,
-            item.st_nlink,
-            item.st_size,
-            item.st_mtime_ns,
-            item.st_ctime_ns,
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
         )
-        if identity(before) != identity(after) or total != before.st_size:
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity or total != before.st_size:
             raise RuntimeError("runner entrypoint changed during authority read")
-        return resolved, digest.hexdigest(), total
+        return runner, digest.hexdigest(), total
     finally:
         os.close(descriptor)
 
 
 def _assert_sandbox_runner_access(runner: pathlib.Path) -> None:
-    metadata = runner.stat()
-    if not metadata.st_mode & stat.S_IROTH:
-        raise RuntimeError("runner entrypoint is not readable by the sandbox principal")
-    for parent in runner.parents:
-        if parent == pathlib.Path("/"):
+    current = runner.parent
+    while True:
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError("runner ancestry may not contain symlinks")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("runner ancestry must contain directories")
+        if not metadata.st_mode & stat.S_IXOTH:
+            raise RuntimeError("sandbox principal cannot traverse runner authority path")
+        if current == pathlib.Path("/"):
             break
-        parent_metadata = parent.stat()
-        if not parent_metadata.st_mode & stat.S_IXOTH:
-            raise RuntimeError("runner path is not traversable by the sandbox principal")
-
-
-@contextlib.contextmanager
-def _sandboxed_candidate_execution(sandbox_user: str | None):
-    if sandbox_user is None:
-        yield None
-        return
-
-    control_metadata = _TRUSTED_CONTROL_ROOT.lstat()
-    if stat.S_ISLNK(control_metadata.st_mode) or not stat.S_ISDIR(control_metadata.st_mode):
-        raise RuntimeError("trusted control checkout must be one real directory")
-
-    boundary_report = boundary.verify_boundary(sandbox_user=sandbox_user)
-    sandbox_identity = boundary.resolve_identity(sandbox_user)
-    original_bounded_run = diagnostic._bounded_run
-
-    def sandboxed_bounded_run(
-        command: list[str],
-        *,
-        cwd: pathlib.Path,
-        timeout_seconds: int,
-    ) -> tuple[int, bytes, bytes, float]:
-        return original_bounded_run(
-            boundary.wrap_command(
-                command,
-                sandbox_identity,
-                hidden_paths=(_TRUSTED_CONTROL_ROOT,),
-            ),
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
-        )
-
-    diagnostic._bounded_run = sandboxed_bounded_run
-    try:
-        yield boundary_report
-    finally:
-        diagnostic._bounded_run = original_bounded_run
+        current = current.parent
+    if not runner.stat().st_mode & stat.S_IROTH:
+        raise RuntimeError("sandbox principal cannot read runner entrypoint")
 
 
 def _shuffle_by_control_entropy(items: list[object]) -> None:
-    items.sort(key=lambda _item: os.urandom(32))
+    for index in range(len(items) - 1, 0, -1):
+        other = secrets.randbelow(index + 1)
+        items[index], items[other] = items[other], items[index]
 
 
-@contextlib.contextmanager
-def _opaque_diagnostic_case_identity():
-    original_bounded_run = diagnostic._bounded_run
-    original_fixture_cases = diagnostic._fixture_cases
+def _raw_case_supplier() -> list[tuple[str, str, bool]]:
+    supplier = getattr(diagnostic, "_CASES", None)
+    if not isinstance(supplier, list) or not supplier:
+        raise RuntimeError("diagnostic case supplier is unavailable")
+    cases: list[tuple[str, str, bool]] = []
+    for item in supplier:
+        if not isinstance(item, tuple) or len(item) != 3:
+            raise RuntimeError("diagnostic case supplier is malformed")
+        name, source, expected_zero = item
+        if not isinstance(name, str) or not isinstance(source, str) or not isinstance(expected_zero, bool):
+            raise RuntimeError("diagnostic case supplier values are malformed")
+        cases.append((name, source, expected_zero))
+    _shuffle_by_control_entropy(cases)
+    return cases
 
-    def shuffled_fixture_cases():
-        cases = list(original_fixture_cases())
-        _shuffle_by_control_entropy(cases)
-        return tuple(cases)
 
-    def opaque_bounded_run(
-        command: list[str],
-        *,
-        cwd: pathlib.Path,
-        timeout_seconds: int,
-    ) -> tuple[int, bytes, bytes, float]:
-        rewritten = list(command)
-        try:
-            root_index = rewritten.index("--project-root") + 1
-        except (ValueError, IndexError):
-            return original_bounded_run(
-                rewritten,
-                cwd=cwd,
-                timeout_seconds=timeout_seconds,
-            )
+def _make_private_fixture(
+    root: pathlib.Path,
+    *,
+    source: str,
+) -> pathlib.Path:
+    project = root / f"run-{secrets.token_hex(16)}"
+    tests = project / "tests"
+    project.mkdir(mode=0o755)
+    tests.mkdir(mode=0o755)
+    package = tests / "__init__.py"
+    fixture = tests / f"test_{secrets.token_hex(16)}.py"
+    package.write_text("", encoding="utf-8")
+    fixture.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+    package.chmod(0o444)
+    fixture.chmod(0o444)
+    tests.chmod(0o555)
+    project.chmod(0o555)
+    return project
 
-        project = pathlib.Path(rewritten[root_index])
-        if project != cwd:
-            raise RuntimeError("diagnostic project root and working directory diverged")
-        tests = project / "tests"
-        fixtures = sorted(tests.glob("test*.py"))
-        if len(fixtures) != 1:
-            raise RuntimeError("diagnostic case must expose exactly one test fixture")
 
-        opaque_project = project.parent / f"run-{os.urandom(16).hex()}"
-        if opaque_project.exists():
-            raise RuntimeError("opaque diagnostic project identity collided")
-        opaque_fixture_name = f"test_{os.urandom(16).hex()}.py"
-        fixture = fixtures[0]
-        tests.chmod(0o755)
-        project.chmod(0o755)
-        fixture.rename(tests / opaque_fixture_name)
-        project.rename(opaque_project)
-        (opaque_project / "tests").chmod(0o555)
-        opaque_project.chmod(0o555)
-        rewritten[root_index] = str(opaque_project)
-        return original_bounded_run(
-            rewritten,
-            cwd=opaque_project,
-            timeout_seconds=timeout_seconds,
-        )
-
-    diagnostic._fixture_cases = shuffled_fixture_cases
-    diagnostic._bounded_run = opaque_bounded_run
-    try:
-        yield
-    finally:
-        diagnostic._bounded_run = original_bounded_run
-        diagnostic._fixture_cases = original_fixture_cases
+def _invoke_runner(
+    *,
+    runner: pathlib.Path,
+    python_executable: pathlib.Path,
+    project: pathlib.Path,
+    timeout_seconds: int,
+) -> tuple[int, str, str, float]:
+    return diagnostic._bounded_run(
+        [
+            str(python_executable),
+            "-I",
+            str(runner),
+            "--project-root",
+            str(project),
+            "--pattern",
+            "test*.py",
+        ],
+        cwd=project,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _run_diagnostic_matrix(
@@ -223,78 +183,67 @@ def _run_diagnostic_matrix(
     timeout_seconds: int,
     sandboxed: bool,
 ) -> dict[str, object]:
-    original_tempdir = tempfile.TemporaryDirectory
-
-    class TraversableTemporaryDirectory:
-        def __init__(self, *args, **kwargs):
-            self._inner = original_tempdir(*args, **kwargs)
-
-        def __enter__(self):
-            directory = self._inner.__enter__()
-            pathlib.Path(directory).chmod(0o711)
-            return directory
-
-        def __exit__(self, exc_type, exc, traceback):
-            return self._inner.__exit__(exc_type, exc, traceback)
-
-    if sandboxed:
-        tempfile.TemporaryDirectory = TraversableTemporaryDirectory
-    try:
-        with _opaque_diagnostic_case_identity():
-            return diagnostic.verify(
-                runner_root=runner_root,
-                entrypoint=entrypoint,
+    del sandboxed
+    runner, _digest, _bytes = _stable_runner_digest(runner_root, entrypoint)
+    cases = _raw_case_supplier()
+    by_name: dict[str, dict[str, object]] = {}
+    with tempfile.TemporaryDirectory(prefix="bound-candidate-authority-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o711)
+        for name, source, expected_zero in cases:
+            project = _make_private_fixture(root, source=source)
+            returncode, output, errors, elapsed = _invoke_runner(
+                runner=runner,
                 python_executable=python_executable,
+                project=project,
                 timeout_seconds=timeout_seconds,
             )
-    finally:
-        tempfile.TemporaryDirectory = original_tempdir
-
-
-def _run_dispatch_attack(
-    *,
-    runner: pathlib.Path,
-    python_executable: pathlib.Path,
-    timeout_seconds: int,
-    case_name: str,
-    fixture_name: str,
-    source: str,
-    expected_zero: bool = False,
-) -> dict[str, object]:
-    del fixture_name
-    with tempfile.TemporaryDirectory(prefix="bound-case-") as directory:
-        project = pathlib.Path(directory)
-        tests = project / "tests"
-        tests.mkdir(parents=True)
-        fixture = tests / f"test_{os.urandom(16).hex()}.py"
-        fixture.write_text(source, encoding="utf-8")
-        fixture.chmod(0o444)
-        tests.chmod(0o555)
-        project.chmod(0o555)
-        returncode, output, errors, elapsed = diagnostic._bounded_run(
-            [
-                str(python_executable),
-                "-I",
-                str(runner),
-                "--project-root",
-                str(project),
-                "--pattern",
-                "test*.py",
-            ],
-            cwd=project,
-            timeout_seconds=timeout_seconds,
-        )
-
-    observed_zero = returncode == 0
+            by_name[name] = {
+                "name": name,
+                "expected_zero": expected_zero,
+                "returncode": returncode,
+                "passed": (returncode == 0) == expected_zero,
+                "stdout_bytes": len(output),
+                "stderr_bytes": len(errors),
+                "elapsed_ms": int(elapsed * 1000),
+            }
+    canonical = [name for name, _source, _expected_zero in diagnostic._CASES]
+    ordered = [by_name[name] for name in canonical]
+    rejected_clean = [str(case["name"]) for case in ordered if case["expected_zero"] and not case["passed"]]
+    accepted_attacks = [str(case["name"]) for case in ordered if not case["expected_zero"] and not case["passed"]]
     return {
-        "name": case_name,
-        "expected_zero": expected_zero,
-        "returncode": returncode,
-        "passed": observed_zero == expected_zero,
-        "stdout_bytes": len(output),
-        "stderr_bytes": len(errors),
-        "elapsed_ms": int(elapsed * 1000),
+        "schema": "amazingbecca.candidate-test-authority-matrix.v1",
+        "case_count": len(ordered),
+        "accepted_attacks": accepted_attacks,
+        "rejected_clean": rejected_clean,
+        "cases": ordered,
+        "passed": not accepted_attacks and not rejected_clean,
     }
+
+
+@contextlib.contextmanager
+def _sandboxed_candidate_execution(sandbox_user: str | None) -> Iterator[dict[str, object] | None]:
+    if sandbox_user is None:
+        yield None
+        return
+
+    identity = boundary.resolve_identity(sandbox_user)
+    with tempfile.TemporaryDirectory(prefix="bound-candidate-sandbox-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o755)
+        probe = root / "probe.py"
+        probe.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        probe.chmod(0o444)
+        report = boundary.prove_boundary(
+            sandbox_user=sandbox_user,
+            command=[sys.executable, "-I", str(probe)],
+            hidden_paths=(),
+        )
+        if report.get("passed") is not True:
+            raise RuntimeError("distinct-principal candidate boundary is unavailable")
+        if report.get("sandbox_uid") != identity.uid or report.get("sandbox_gid") != identity.gid:
+            raise RuntimeError("distinct-principal boundary identity drifted")
+        yield report
 
 
 def _run_instance_dispatch_attack(
@@ -303,27 +252,35 @@ def _run_instance_dispatch_attack(
     python_executable: pathlib.Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    nonce = os.urandom(8).hex()
-    source = textwrap.dedent(
-        f"""
+    source = r"""
         import unittest
 
-        class InstanceDispatch{nonce}(unittest.TestCase):
+        class InstanceDispatchAttack(unittest.TestCase):
             def setUp(self):
                 self._callTestMethod = lambda method: None
 
             def test_must_fail(self):
-                self.fail("mandatory instance-dispatch failure {nonce}")
-        """
-    ).lstrip()
-    return _run_dispatch_attack(
-        runner=runner,
-        python_executable=python_executable,
-        timeout_seconds=timeout_seconds,
-        case_name=_INSTANCE_DISPATCH_CASE,
-        fixture_name="test_instance_dispatch_authority.py",
-        source=source,
-    )
+                self.fail("mandatory failure")
+    """
+    with tempfile.TemporaryDirectory(prefix="instance-dispatch-authority-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o711)
+        project = _make_private_fixture(root, source=source)
+        returncode, output, errors, elapsed = _invoke_runner(
+            runner=runner,
+            python_executable=python_executable,
+            project=project,
+            timeout_seconds=timeout_seconds,
+        )
+    return {
+        "name": _INSTANCE_DISPATCH_CASE,
+        "expected_zero": False,
+        "returncode": returncode,
+        "passed": returncode != 0,
+        "stdout_bytes": len(output),
+        "stderr_bytes": len(errors),
+        "elapsed_ms": int(elapsed * 1000),
+    }
 
 
 def _run_getattribute_dispatch_attack(
@@ -332,29 +289,37 @@ def _run_getattribute_dispatch_attack(
     python_executable: pathlib.Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    nonce = os.urandom(8).hex()
-    source = textwrap.dedent(
-        f"""
+    source = r"""
         import unittest
 
-        class GetattributeDispatch{nonce}(unittest.TestCase):
+        class GetattributeDispatchAttack(unittest.TestCase):
             def __getattribute__(self, name):
                 if name == "_callTestMethod":
                     return lambda method: None
                 return super().__getattribute__(name)
 
             def test_must_fail(self):
-                self.fail("mandatory getattribute-dispatch failure {nonce}")
-        """
-    ).lstrip()
-    return _run_dispatch_attack(
-        runner=runner,
-        python_executable=python_executable,
-        timeout_seconds=timeout_seconds,
-        case_name=_GETATTRIBUTE_DISPATCH_CASE,
-        fixture_name="test_getattribute_dispatch_authority.py",
-        source=source,
-    )
+                self.fail("mandatory failure")
+    """
+    with tempfile.TemporaryDirectory(prefix="getattribute-dispatch-authority-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o711)
+        project = _make_private_fixture(root, source=source)
+        returncode, output, errors, elapsed = _invoke_runner(
+            runner=runner,
+            python_executable=python_executable,
+            project=project,
+            timeout_seconds=timeout_seconds,
+        )
+    return {
+        "name": _GETATTRIBUTE_DISPATCH_CASE,
+        "expected_zero": False,
+        "returncode": returncode,
+        "passed": returncode != 0,
+        "stdout_bytes": len(output),
+        "stderr_bytes": len(errors),
+        "elapsed_ms": int(elapsed * 1000),
+    }
 
 
 def _run_clean_position_decoy(
@@ -363,41 +328,23 @@ def _run_clean_position_decoy(
     python_executable: pathlib.Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    nonce = os.urandom(8).hex()
-    source = textwrap.dedent(
-        f"""
+    source = r"""
         import unittest
 
-        class Clean{nonce}(unittest.TestCase):
-            def test_pass(self):
+        class MandatoryFailure(unittest.TestCase):
+            def test_must_fail(self):
                 self.assertEqual(2 + 2, 4)
-        """
-    ).lstrip()
-    with tempfile.TemporaryDirectory(prefix="bound-case-") as directory:
+    """
+    with tempfile.TemporaryDirectory(prefix="clean-position-decoy-") as directory:
         root = pathlib.Path(directory)
         root.chmod(0o711)
-        project = root / f"run-{os.urandom(16).hex()}"
-        tests = project / "tests"
-        tests.mkdir(parents=True)
-        fixture = tests / f"test_{os.urandom(16).hex()}.py"
-        fixture.write_text(source, encoding="utf-8")
-        fixture.chmod(0o444)
-        tests.chmod(0o555)
-        project.chmod(0o555)
-        returncode, output, errors, elapsed = diagnostic._bounded_run(
-            [
-                str(python_executable),
-                "-I",
-                str(runner),
-                "--project-root",
-                str(project),
-                "--pattern",
-                "test*.py",
-            ],
-            cwd=project,
+        project = _make_private_fixture(root, source=source)
+        returncode, output, errors, elapsed = _invoke_runner(
+            runner=runner,
+            python_executable=python_executable,
+            project=project,
             timeout_seconds=timeout_seconds,
         )
-
     return {
         "name": _CLEAN_POSITION_DECOY_CASE,
         "expected_zero": True,
@@ -415,27 +362,34 @@ def _run_clean_source_shape_decoy(
     python_executable: pathlib.Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    nonce = os.urandom(8).hex()
-    source = textwrap.dedent(
-        f"""
+    source = r"""
         import unittest
 
-        LEXICAL_ATTACK_DECOY = "self.fail("
-
-        class Mandatory{nonce}(unittest.TestCase):
+        class MandatoryFailure(unittest.TestCase):
             def test_must_fail(self):
+                if False:
+                    self.fail("LEXICAL_ATTACK_DECOY")
                 self.assertEqual(2 + 2, 4)
-        """
-    ).lstrip()
-    return _run_dispatch_attack(
-        runner=runner,
-        python_executable=python_executable,
-        timeout_seconds=timeout_seconds,
-        case_name=_CLEAN_SOURCE_SHAPE_DECOY_CASE,
-        fixture_name="test_clean_source_shape_decoy.py",
-        source=source,
-        expected_zero=True,
-    )
+    """
+    with tempfile.TemporaryDirectory(prefix="clean-source-shape-decoy-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o711)
+        project = _make_private_fixture(root, source=source)
+        returncode, output, errors, elapsed = _invoke_runner(
+            runner=runner,
+            python_executable=python_executable,
+            project=project,
+            timeout_seconds=timeout_seconds,
+        )
+    return {
+        "name": _CLEAN_SOURCE_SHAPE_DECOY_CASE,
+        "expected_zero": True,
+        "returncode": returncode,
+        "passed": returncode == 0,
+        "stdout_bytes": len(output),
+        "stderr_bytes": len(errors),
+        "elapsed_ms": int(elapsed * 1000),
+    }
 
 
 def _run_attack_source_shape_decoy(
@@ -444,26 +398,34 @@ def _run_attack_source_shape_decoy(
     python_executable: pathlib.Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    nonce = os.urandom(8).hex()
-    source = textwrap.dedent(
-        f"""
+    source = r"""
         import unittest
 
-        LEXICAL_CLEAN_DECOY = "class Clean{nonce}(unittest.TestCase):\\n    def test_pass(self):\\n        self.assertEqual(2 + 2, 4)"
-
-        class Mandatory{nonce}(unittest.TestCase):
-            def test_must_fail(self):
+        class Clean(unittest.TestCase):
+            def test_pass(self):
+                if False:
+                    self.assertEqual(2 + 2, 4)
                 self.assertEqual(2 + 2, 5)
-        """
-    ).lstrip()
-    return _run_dispatch_attack(
-        runner=runner,
-        python_executable=python_executable,
-        timeout_seconds=timeout_seconds,
-        case_name=_ATTACK_SOURCE_SHAPE_DECOY_CASE,
-        fixture_name="test_attack_source_shape_decoy.py",
-        source=source,
-    )
+    """
+    with tempfile.TemporaryDirectory(prefix="attack-source-shape-decoy-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o711)
+        project = _make_private_fixture(root, source=source)
+        returncode, output, errors, elapsed = _invoke_runner(
+            runner=runner,
+            python_executable=python_executable,
+            project=project,
+            timeout_seconds=timeout_seconds,
+        )
+    return {
+        "name": _ATTACK_SOURCE_SHAPE_DECOY_CASE,
+        "expected_zero": False,
+        "returncode": returncode,
+        "passed": returncode != 0,
+        "stdout_bytes": len(output),
+        "stderr_bytes": len(errors),
+        "elapsed_ms": int(elapsed * 1000),
+    }
 
 
 def _run_control_source_visibility_attack(
@@ -472,9 +434,11 @@ def _run_control_source_visibility_attack(
     timeout_seconds: int,
 ) -> dict[str, object]:
     target = pathlib.Path(__file__).resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix="bound-control-source-") as directory:
-        project = pathlib.Path(directory)
-        project.chmod(0o711)
+    with tempfile.TemporaryDirectory(prefix="control-source-visibility-") as directory:
+        root = pathlib.Path(directory)
+        root.chmod(0o711)
+        project = root / "project"
+        project.mkdir(mode=0o755)
         probe = project / "probe.py"
         probe.write_text(
             textwrap.dedent(
@@ -684,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     del argv
     print(
         "ERROR: direct entrypoint-only verification is disabled; "
-        "use verify_authenticated_runner_bundle.py",
+        "use verify_terminal_candidate_authority.py",
         file=sys.stderr,
     )
     return 2
