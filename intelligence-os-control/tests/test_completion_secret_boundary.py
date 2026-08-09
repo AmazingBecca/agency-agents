@@ -177,6 +177,112 @@ class CompletionSecretBoundaryTests(unittest.TestCase):
 
         self.assertTrue(report["passed"])
 
+    def test_candidate_importing_worker_requires_external_terminal_verifier(self) -> None:
+        source = """
+        def _run_worker(project_root, pattern, challenge_fd, receipt_fd):
+            worker = _load_worker()
+            run = worker._run
+            result = run(project_root, pattern)
+            if result != 0:
+                return result
+            _write_all(receipt_fd, b"PASS")
+            return 0
+
+        def _supervise(project_root, pattern):
+            child = subprocess.Popen(["worker"])
+            return_code = child.wait()
+            if return_code != 0:
+                return return_code
+            return 0
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertFalse(report["passed"])
+        kinds = {finding["exposure_kind"] for finding in report["findings"]}
+        self.assertIn("candidate-worker-receives-trusted-completion-authority", kinds)
+        self.assertIn("candidate-worker-owns-trusted-completion-state", kinds)
+        self.assertIn("external-terminal-verifier-missing", kinds)
+
+    def test_terminal_verifier_must_execute_after_candidate_completion(self) -> None:
+        source = """
+        def _run_worker(project_root, pattern, observation_fd):
+            worker = _load_worker()
+            run = worker._run
+            return run(project_root, pattern)
+
+        def _verify_terminal_observation(return_code, observation):
+            if return_code != 0 or observation != b"complete":
+                return 1
+            return 0
+
+        def _supervise(project_root, pattern):
+            child = subprocess.Popen(["worker"])
+            terminal = _verify_terminal_observation(0, b"complete")
+            return_code = child.wait()
+            if terminal != 0 or return_code != 0:
+                return 1
+            return 0
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertFalse(report["passed"])
+        kinds = {finding["exposure_kind"] for finding in report["findings"]}
+        self.assertIn("terminal-verification-not-after-candidate-completion", kinds)
+
+    def test_external_terminal_verdict_split_is_accepted_as_source_topology(self) -> None:
+        source = """
+        def _run_worker(project_root, pattern, observation_fd):
+            worker = _load_worker()
+            run = worker._run
+            return run(project_root, pattern)
+
+        def _verify_terminal_observation(return_code, observation):
+            if return_code != 0 or observation != b"complete":
+                return 1
+            return 0
+
+        def _supervise(project_root, pattern):
+            child = subprocess.Popen(["worker"])
+            return_code = child.wait()
+            terminal = _verify_terminal_observation(return_code, b"complete")
+            if terminal != 0:
+                return terminal
+            return 0
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["findings"], [])
+
+    def test_terminal_verifier_cannot_import_or_execute_candidate(self) -> None:
+        source = """
+        def _run_worker(project_root, pattern, observation_fd):
+            worker = _load_worker()
+            run = worker._run
+            return run(project_root, pattern)
+
+        def _verify_terminal_observation(return_code, observation):
+            worker = _load_worker()
+            return worker._run(return_code, observation)
+
+        def _supervise(project_root, pattern):
+            child = subprocess.Popen(["worker"])
+            return_code = child.wait()
+            terminal = _verify_terminal_observation(return_code, b"complete")
+            if terminal != 0:
+                return terminal
+            return 0
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertFalse(report["passed"])
+        kinds = {finding["exposure_kind"] for finding in report["findings"]}
+        self.assertIn("terminal-verifier-executes-candidate-code", kinds)
+
     def test_symlinked_source_is_rejected_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
