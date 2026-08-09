@@ -15,6 +15,8 @@ _AUTHORITY_LEVEL = "diagnostic-bound-not-terminal"
 def _write_case(project: pathlib.Path, *, attack: bool) -> None:
     tests = project / "tests"
     tests.mkdir(parents=True)
+    package = tests / "__init__.py"
+    package.write_text("", encoding="utf-8")
     nonce = os.urandom(8).hex()
 
     if attack:
@@ -72,6 +74,7 @@ def _write_case(project: pathlib.Path, *, attack: bool) -> None:
     second = tests / f"test_99_{os.urandom(8).hex()}.py"
     first.write_text(arm_body, encoding="utf-8")
     second.write_text(later_body, encoding="utf-8")
+    package.chmod(0o444)
     first.chmod(0o444)
     second.chmod(0o444)
     tests.chmod(0o555)
