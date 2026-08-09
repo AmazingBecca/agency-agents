@@ -8,6 +8,7 @@ import sys
 
 import verify_authenticated_runner_bundle as authenticated
 import verify_bound_candidate_test_authority as bound
+import verify_completion_secret_boundary as completion
 import verify_detached_descendant_lifecycle as descendant
 import verify_nested_suite_dispatch_authority as nested
 
@@ -15,6 +16,7 @@ _SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
 _AUTHORITY_LEVEL = "diagnostic-bundle-dispatch-bound-not-terminal"
 _NESTED_SCHEMA = "amazingbecca.nested-suite-dispatch-authority.v1"
 _DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
+_COMPLETION_SCHEMA = "amazingbecca.completion-secret-boundary.v1"
 _PROMOTION_AUTHORITY_READY = False
 
 
@@ -42,6 +44,24 @@ def _validate_descendant_report(report: dict[str, object]) -> None:
         raise RuntimeError("detached-descendant authority did not start the hostile session")
     if report.get("heartbeat_stable_after_namespace_exit") is not True:
         raise RuntimeError("detached-descendant authority did not prove namespace teardown")
+
+
+def _validate_completion_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _COMPLETION_SCHEMA:
+        raise RuntimeError("completion-secret boundary schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("completion-secret boundary decision is malformed")
+    if not isinstance(report.get("finding_count"), int):
+        raise RuntimeError("completion-secret boundary finding count is malformed")
+    findings = report.get("findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("completion-secret boundary findings are malformed")
+    if report.get("passed") is not True:
+        raise RuntimeError(
+            "runner bundle retains a completion secret across candidate execution"
+        )
+    if report.get("finding_count") != 0 or findings:
+        raise RuntimeError("completion-secret boundary reported inconsistent findings")
 
 
 def _require_production_sandbox_user(sandbox_user: str) -> str:
@@ -104,6 +124,9 @@ def _verify_terminal_bundle_diagnostic(
     because an intentionally vulnerable runner must never be allowed to signal
     the control verifier itself.
     """
+    completion_report = completion.verify(runner_root)
+    _validate_completion_report(completion_report)
+
     descendant_report: dict[str, object] | None = None
     if sandbox_user is not None:
         descendant_report = descendant.verify_detached_descendant_lifecycle(
@@ -179,6 +202,11 @@ def _verify_terminal_bundle_diagnostic(
     if after_bundle != before_bundle:
         raise RuntimeError("runner bundle authority changed during terminal dispatch verification")
 
+    completion_after = completion.verify(before_bundle.root)
+    _validate_completion_report(completion_after)
+    if completion_after != completion_report:
+        raise RuntimeError("completion-secret boundary changed during terminal verification")
+
     accepted_attacks = sorted(
         set(base_report.get("accepted_attacks", []))
         | set(nested_report.get("accepted_attacks", []))
@@ -200,6 +228,7 @@ def _verify_terminal_bundle_diagnostic(
     diagnostic_passed = (
         bool(base_report["passed"])
         and bool(nested_report["passed"])
+        and bool(completion_report["passed"])
         and not accepted_attacks
         and not rejected_clean
     )
@@ -216,6 +245,11 @@ def _verify_terminal_bundle_diagnostic(
         {
             "terminal_schema": _SCHEMA,
             "authority_level": _AUTHORITY_LEVEL,
+            "completion_secret_schema": completion_report["schema"],
+            "completion_secret_authority_level": completion_report.get("authority_level"),
+            "completion_secret_boundary_verified": True,
+            "completion_secret_source_file_count": completion_report["source_file_count"],
+            "completion_secret_finding_count": completion_report["finding_count"],
             "nested_dispatch_schema": nested_report["schema"],
             "nested_dispatch_authority_level": nested_report.get("authority_level"),
             "nested_dispatch_case_count": nested_count,
