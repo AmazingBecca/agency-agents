@@ -227,6 +227,46 @@ def _descriptor_taint(
     return tainted, tuple(sorted(set(untrackable)))
 
 
+def _captured_authority_scopes(
+    function: ast.FunctionDef,
+    descriptor_taint: set[str],
+) -> tuple[tuple[int, str, str, tuple[str, ...]], ...]:
+    """Inventory deferred/class scopes that retain trusted descriptor authority.
+
+    Nested function defaults, closures, async functions, lambdas, and class bodies
+    can retain a trusted descriptor without leaving the descriptor name on the
+    eventual candidate launch. The reviewed attestor profile has no legitimate
+    reason to capture those descriptors outside the canonical top-level lifecycle,
+    so any such capture fails closed.
+    """
+    captured: list[tuple[int, str, str, tuple[str, ...]]] = []
+
+    class Visitor(ast.NodeVisitor):
+        def _record(self, node: ast.AST, scope_kind: str, scope_name: str) -> None:
+            references = tuple(sorted(_names(node).intersection(descriptor_taint)))
+            if references:
+                captured.append((node.lineno, scope_kind, scope_name, references))
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is function:
+                for statement in node.body:
+                    self.visit(statement)
+                return
+            self._record(node, "function", node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._record(node, "async-function", node.name)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            self._record(node, "lambda", "<lambda>")
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._record(node, "class", node.name)
+
+    Visitor().visit(function)
+    return tuple(sorted(set(captured)))
+
+
 def _finding(path: str, function: str, line: int, kind: str, detail: str) -> Finding:
     return Finding(path=path, function=function, line=line, kind=kind, detail=detail)
 
@@ -249,6 +289,7 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
     findings: list[Finding] = []
     direct = _direct_calls(function)
     descriptor_taint, untrackable_storage = _descriptor_taint(function)
+    captured_scopes = _captured_authority_scopes(function, descriptor_taint)
 
     for line, target in untrackable_storage:
         findings.append(
@@ -261,6 +302,21 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
                 + target,
             )
         )
+
+    for line, scope_kind, scope_name, references in captured_scopes:
+        if scope_kind == "class":
+            kind = "attestor-authority-descriptor-stored-in-class-scope"
+            detail = (
+                "trusted descriptor authority must not be retained in a class body "
+                f"inside the attestor: scope={scope_name} references={','.join(references)}"
+            )
+        else:
+            kind = "attestor-authority-descriptor-captured-by-deferred-scope"
+            detail = (
+                "trusted descriptor authority must not be captured by a deferred callable "
+                f"inside the attestor: scope={scope_name} references={','.join(references)}"
+            )
+        findings.append(_finding(path, function.name, line, kind, detail))
 
     nested_sensitive = [
         call
