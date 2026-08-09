@@ -11,6 +11,7 @@ import verify_bound_candidate_test_authority as bound
 import verify_completion_secret_boundary as completion
 import verify_detached_descendant_lifecycle as descendant
 import verify_nested_suite_dispatch_authority as nested
+import verify_terminal_attestation_control_flow as attestation_flow
 import verify_terminal_attestation_semantics as attestation
 
 _SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
@@ -19,6 +20,7 @@ _NESTED_SCHEMA = "amazingbecca.nested-suite-dispatch-authority.v1"
 _DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
 _COMPLETION_SCHEMA = "amazingbecca.completion-secret-boundary.v1"
 _ATTESTATION_SCHEMA = "amazingbecca.terminal-attestation-semantics.v1"
+_ATTESTATION_FLOW_SCHEMA = "amazingbecca.terminal-attestation-control-flow.v1"
 _PROMOTION_AUTHORITY_READY = False
 
 
@@ -94,6 +96,27 @@ def _validate_attestation_report(report: dict[str, object]) -> None:
         raise RuntimeError("terminal-attestation report contains findings despite PASS")
 
 
+def _validate_attestation_flow_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _ATTESTATION_FLOW_SCHEMA:
+        raise RuntimeError("terminal-attestation control-flow schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("terminal-attestation control-flow decision is malformed")
+    for key in ("candidate_runner_count", "terminal_attestor_count", "finding_count"):
+        if not isinstance(report.get(key), int):
+            raise RuntimeError(f"terminal-attestation control-flow {key} is malformed")
+    findings = report.get("findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("terminal-attestation control-flow findings are malformed")
+    if report.get("passed") is not True:
+        raise RuntimeError("runner bundle lacks reviewed terminal-attestation control flow")
+    if report.get("candidate_runner_count") != 1:
+        raise RuntimeError("terminal-attestation control-flow candidate runner authority is ambiguous")
+    if report.get("terminal_attestor_count") != 1:
+        raise RuntimeError("terminal-attestation control-flow attestor authority is ambiguous")
+    if report.get("finding_count") != 0 or findings:
+        raise RuntimeError("terminal-attestation control-flow contains findings despite PASS")
+
+
 def _require_production_sandbox_user(sandbox_user: str) -> str:
     if not isinstance(sandbox_user, str) or not sandbox_user:
         raise RuntimeError("terminal candidate authority requires an explicit sandbox user")
@@ -154,6 +177,9 @@ def _verify_terminal_bundle_diagnostic(
     because an intentionally vulnerable runner must never be allowed to signal
     the control verifier itself.
     """
+    attestation_flow_report = attestation_flow.verify(runner_root)
+    _validate_attestation_flow_report(attestation_flow_report)
+
     attestation_report = attestation.verify(runner_root)
     _validate_attestation_report(attestation_report)
 
@@ -166,6 +192,11 @@ def _verify_terminal_bundle_diagnostic(
         != completion_report.get("finding_count")
     ):
         raise RuntimeError("terminal-attestation and completion-boundary reports disagree")
+    if (
+        attestation_flow_report.get("candidate_runner_count")
+        != attestation_report.get("candidate_runner_count")
+    ):
+        raise RuntimeError("terminal-attestation semantic and control-flow runner counts disagree")
 
     descendant_report: dict[str, object] | None = None
     if sandbox_user is not None:
@@ -252,6 +283,11 @@ def _verify_terminal_bundle_diagnostic(
     if attestation_after != attestation_report:
         raise RuntimeError("terminal-attestation semantics changed during terminal verification")
 
+    attestation_flow_after = attestation_flow.verify(before_bundle.root)
+    _validate_attestation_flow_report(attestation_flow_after)
+    if attestation_flow_after != attestation_flow_report:
+        raise RuntimeError("terminal-attestation control flow changed during terminal verification")
+
     accepted_attacks = sorted(
         set(base_report.get("accepted_attacks", []))
         | set(nested_report.get("accepted_attacks", []))
@@ -275,6 +311,7 @@ def _verify_terminal_bundle_diagnostic(
         and bool(nested_report["passed"])
         and bool(completion_report["passed"])
         and bool(attestation_report["passed"])
+        and bool(attestation_flow_report["passed"])
         and not accepted_attacks
         and not rejected_clean
     )
@@ -301,6 +338,12 @@ def _verify_terminal_bundle_diagnostic(
             "terminal_attestation_verified": True,
             "terminal_attestation_candidate_runner_count": attestation_report["candidate_runner_count"],
             "terminal_attestation_finding_count": attestation_report["attestation_finding_count"],
+            "terminal_attestation_control_flow_schema": attestation_flow_report["schema"],
+            "terminal_attestation_control_flow_authority_level": attestation_flow_report.get("authority_level"),
+            "terminal_attestation_control_flow_verified": True,
+            "terminal_attestation_control_flow_candidate_runner_count": attestation_flow_report["candidate_runner_count"],
+            "terminal_attestation_control_flow_attestor_count": attestation_flow_report["terminal_attestor_count"],
+            "terminal_attestation_control_flow_finding_count": attestation_flow_report["finding_count"],
             "nested_dispatch_schema": nested_report["schema"],
             "nested_dispatch_authority_level": nested_report.get("authority_level"),
             "nested_dispatch_case_count": nested_count,
