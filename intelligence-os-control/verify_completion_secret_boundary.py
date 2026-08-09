@@ -20,6 +20,14 @@ _SECRET_FACTORIES = {
 }
 _CANDIDATE_CALL_NAMES = {"run", "_run", "run_tests", "execute", "execute_tests"}
 _RECEIPT_WRITE_NAMES = {"_write_all", "write", "send", "sendall"}
+_TRUSTED_WORKER_ARGS = {"challenge_fd", "receipt_fd"}
+_WORKER_FORBIDDEN_TERMINAL_CALLS = {
+    "_write_all",
+    "_read_receipt",
+    "secrets.token_bytes",
+    "secrets.token_hex",
+    "secrets.token_urlsafe",
+}
 
 
 @dataclass(frozen=True)
@@ -176,9 +184,6 @@ def _function_findings(function: ast.FunctionDef | ast.AsyncFunctionDef, path: s
                 for name in assigned:
                     tainted[name] = source_line
             else:
-                # A direct name overwrite destroys the Python-level alias. Attribute
-                # and subscript writes intentionally do not clear their container's
-                # taint because other secret-bearing members may still exist.
                 for target in targets:
                     if isinstance(target, ast.Name):
                         tainted.pop(target.id, None)
@@ -189,9 +194,6 @@ def _function_findings(function: ast.FunctionDef | ast.AsyncFunctionDef, path: s
 
         terminal = _terminal_name(node.func)
 
-        # Explicit mutation helpers can move a secret into an object without an
-        # Assign node (for example setattr(state, "token", token)). Conservatively
-        # taint the receiving object when a tainted value is stored this way.
         if terminal == "setattr" and len(node.args) >= 3:
             value_names = _referenced_names(node.args[2])
             source_lines = [tainted[name] for name in value_names if name in tainted]
@@ -239,6 +241,144 @@ def _function_findings(function: ast.FunctionDef | ast.AsyncFunctionDef, path: s
     return findings
 
 
+def _function_arguments(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    arguments = [
+        *function.args.posonlyargs,
+        *function.args.args,
+        *function.args.kwonlyargs,
+    ]
+    if function.args.vararg is not None:
+        arguments.append(function.args.vararg)
+    if function.args.kwarg is not None:
+        arguments.append(function.args.kwarg)
+    return {argument.arg for argument in arguments}
+
+
+def _top_level_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    duplicates: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in functions:
+            duplicates.add(node.name)
+        functions[node.name] = node
+    for name in duplicates:
+        functions.pop(name, None)
+    return functions
+
+
+def _terminal_boundary_findings(tree: ast.Module, path: str) -> list[Finding]:
+    """Require final PASS authority outside a candidate-importing worker.
+
+    This check activates only for the reviewed runner topology where a top-level
+    ``_run_worker`` directly loads candidate worker source. It therefore leaves
+    generic helper snippets alone while failing closed on the production runner
+    if trusted completion state or the terminal decision remains in that domain.
+    """
+    functions = _top_level_functions(tree)
+    worker = functions.get("_run_worker")
+    if worker is None:
+        return []
+
+    worker_calls = [node for node in ast.walk(worker) if isinstance(node, ast.Call)]
+    load_calls = [call for call in worker_calls if _dotted_name(call.func) == "_load_worker"]
+    if not load_calls:
+        return []
+    candidate_line = min(call.lineno for call in load_calls)
+
+    findings: list[Finding] = []
+
+    def add(kind: str, *, function: str = "_run_worker", line: int | None = None) -> None:
+        findings.append(
+            Finding(
+                path=path,
+                function=function,
+                secret_name="terminal-verdict",
+                secret_line=worker.lineno,
+                candidate_line=candidate_line,
+                receipt_line=line,
+                exposure_kind=kind,
+            )
+        )
+
+    trusted_args = sorted(_function_arguments(worker).intersection(_TRUSTED_WORKER_ARGS))
+    if trusted_args:
+        add("candidate-worker-receives-trusted-completion-authority")
+
+    forbidden_calls = sorted(
+        {
+            dotted
+            for call in worker_calls
+            if (dotted := _dotted_name(call.func)) in _WORKER_FORBIDDEN_TERMINAL_CALLS
+        }
+    )
+    if forbidden_calls:
+        add("candidate-worker-owns-trusted-completion-state")
+
+    verifier = functions.get("_verify_terminal_observation")
+    if verifier is None:
+        add("external-terminal-verifier-missing")
+    else:
+        verifier_calls = [node for node in ast.walk(verifier) if isinstance(node, ast.Call)]
+        if any(
+            _dotted_name(call.func) == "_load_worker"
+            or _terminal_name(call.func) in _CANDIDATE_CALL_NAMES
+            for call in verifier_calls
+        ):
+            add("terminal-verifier-executes-candidate-code", function=verifier.name)
+        if any(
+            isinstance(node, (ast.Name, ast.Attribute))
+            and (_dotted_name(node) or "").startswith("unittest")
+            for node in ast.walk(verifier)
+        ):
+            add("terminal-verifier-derives-from-live-unittest-state", function=verifier.name)
+
+    supervisor = functions.get("_supervise")
+    if supervisor is None:
+        add("external-terminal-supervisor-missing")
+        return findings
+
+    supervisor_calls = [node for node in ast.walk(supervisor) if isinstance(node, ast.Call)]
+    wait_lines = sorted(
+        call.lineno
+        for call in supervisor_calls
+        if _dotted_name(call.func) in {"child.wait", "subprocess.run"}
+    )
+    verifier_lines = sorted(
+        call.lineno
+        for call in supervisor_calls
+        if _dotted_name(call.func) == "_verify_terminal_observation"
+    )
+    if len(verifier_lines) != 1:
+        add("terminal-supervisor-verifier-call-ambiguous", function=supervisor.name)
+        verifier_line = None
+    else:
+        verifier_line = verifier_lines[0]
+        if not wait_lines or verifier_line <= min(wait_lines):
+            add(
+                "terminal-verification-not-after-candidate-completion",
+                function=supervisor.name,
+                line=verifier_line,
+            )
+
+    if verifier_line is not None:
+        successful_returns = [
+            node.lineno
+            for node in ast.walk(supervisor)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value == 0
+        ]
+        if not successful_returns or any(line <= verifier_line for line in successful_returns):
+            add(
+                "terminal-pass-can-precede-external-verification",
+                function=supervisor.name,
+                line=verifier_line,
+            )
+    return findings
+
+
 def verify(runner_root: pathlib.Path) -> dict[str, object]:
     root = runner_root.resolve(strict=True)
     findings: list[Finding] = []
@@ -253,12 +393,19 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 findings.extend(_function_findings(node, relative))
+        findings.extend(_terminal_boundary_findings(tree, relative))
 
     rendered = [
         asdict(item)
         for item in sorted(
             findings,
-            key=lambda item: (item.path, item.function, item.secret_line, item.candidate_line),
+            key=lambda item: (
+                item.path,
+                item.function,
+                item.secret_line,
+                item.candidate_line,
+                item.exposure_kind,
+            ),
         )
     ]
     return {
