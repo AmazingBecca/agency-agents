@@ -420,6 +420,8 @@ def _run_clean_source_shape_decoy(
         f"""
         import unittest
 
+        LEXICAL_ATTACK_DECOY = "self.fail("
+
         class Mandatory{nonce}(unittest.TestCase):
             def test_must_fail(self):
                 self.assertEqual(2 + 2, 4)
@@ -447,11 +449,11 @@ def _run_attack_source_shape_decoy(
         f"""
         import unittest
 
-        LEXICAL_CLEAN_DECOY = "class Clean{nonce}(unittest.TestCase):\\n    def test_pass(self):\\n        pass"
+        LEXICAL_CLEAN_DECOY = "class Clean{nonce}(unittest.TestCase):\\n    def test_pass(self):\\n        self.assertEqual(2 + 2, 4)"
 
         class Mandatory{nonce}(unittest.TestCase):
             def test_must_fail(self):
-                self.fail("mandatory source-shape failure {nonce}")
+                self.assertEqual(2 + 2, 5)
         """
     ).lstrip()
     return _run_dispatch_attack(
