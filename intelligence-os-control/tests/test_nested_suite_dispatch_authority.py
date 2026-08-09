@@ -58,6 +58,11 @@ if any(
         and 'result.testsRun = 2' in source
         and 'result.shouldStop = True' in source
     )
+    or (
+        'ForgedDiscoverySuite' in source
+        and 'def load_tests' in source
+        and 'countTestCases' in source
+    )
     for source in sources
 ):
     raise SystemExit(7)
@@ -96,7 +101,7 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertFalse(report['passed'])
         self.assertEqual(report['schema'], 'amazingbecca.nested-suite-dispatch-authority.v1')
         self.assertEqual(report['authority_level'], 'diagnostic-bound-not-terminal')
-        self.assertEqual(report['case_count'], 5)
+        self.assertEqual(report['case_count'], 6)
         self.assertEqual(report['rejected_clean'], [])
         self.assertEqual(
             report['accepted_attacks'],
@@ -105,6 +110,7 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
                 'nested-suite-post-discovery-run-forgery',
                 'result-post-discovery-add-error-forgery',
                 'terminal-result-state-forgery',
+                'load-tests-suite-replacement-forgery',
             ],
         )
         by_name = {case['name']: case for case in report['cases']}
@@ -118,6 +124,8 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertEqual(by_name['result-post-discovery-add-error-forgery']['returncode'], 0)
         self.assertFalse(by_name['terminal-result-state-forgery']['passed'])
         self.assertEqual(by_name['terminal-result-state-forgery']['returncode'], 0)
+        self.assertFalse(by_name['load-tests-suite-replacement-forgery']['passed'])
+        self.assertEqual(by_name['load-tests-suite-replacement-forgery']['returncode'], 0)
 
     def test_clean_control_rejects_an_always_fail_runner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -133,6 +141,7 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertTrue(by_name['nested-suite-post-discovery-run-forgery']['passed'])
         self.assertTrue(by_name['result-post-discovery-add-error-forgery']['passed'])
         self.assertTrue(by_name['terminal-result-state-forgery']['passed'])
+        self.assertTrue(by_name['load-tests-suite-replacement-forgery']['passed'])
 
     def test_runner_that_accepts_clean_and_rejects_all_attacks_satisfies_probe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
