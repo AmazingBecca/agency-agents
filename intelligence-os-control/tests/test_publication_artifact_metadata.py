@@ -40,12 +40,8 @@ class PublicationArtifactMetadataTests(unittest.TestCase):
         self.metadata = {
             "id": artifact_id,
             "node_id": "MDg6QXJ0aWZhY3Q4OTc2NDcwMDk2",
-            "name": (
-                "intelligence-os-retained-evidence-publication-"
-                f"head-{self.authority['reviewed_head']}-"
-                f"merge-{self.authority['synthetic_merge']}-"
-                f"publisher-{self.publisher_sha}-"
-                f"run-{self.authority['run_id']}-{self.authority['run_attempt']}"
+            "name": metadata_verifier._expected_artifact_name(
+                self.authority, self.publisher_sha
             ),
             "size_in_bytes": len(self.artifact_raw),
             "url": (
@@ -78,10 +74,12 @@ class PublicationArtifactMetadataTests(unittest.TestCase):
 
     def test_valid_metadata_binds_archive_to_exact_github_run(self) -> None:
         self.assertEqual(self.validate(), self.artifact_sha256)
+        self.assertIn("diagnostic-not-promotion", self.metadata["name"])
 
     def test_wrapper_derives_digest_only_after_metadata_validation(self) -> None:
         expected_result = {
             "artifact_sha256": self.artifact_sha256,
+            "diagnostic_sha256": "0" * 64,
             "publication_sha256": "1" * 64,
             "receipt_sha256": "2" * 64,
         }
@@ -138,7 +136,7 @@ class PublicationArtifactMetadataTests(unittest.TestCase):
         ):
             self.validate(attacked)
 
-    def test_artifact_name_binds_head_merge_publisher_run_and_attempt(self) -> None:
+    def test_artifact_name_binds_nonpromotion_head_merge_publisher_run_and_attempt(self) -> None:
         for replacement in (
             self.metadata["name"].replace(self.authority["reviewed_head"], "f" * 40),
             self.metadata["name"].replace(self.authority["synthetic_merge"], "f" * 40),
@@ -147,6 +145,7 @@ class PublicationArtifactMetadataTests(unittest.TestCase):
                 f"run-{self.authority['run_id']}-{self.authority['run_attempt']}",
                 f"run-{self.authority['run_id']}-3",
             ),
+            self.metadata["name"].replace("diagnostic-not-promotion", "publication"),
         ):
             with self.subTest(name=replacement):
                 attacked = copy.deepcopy(self.metadata)
