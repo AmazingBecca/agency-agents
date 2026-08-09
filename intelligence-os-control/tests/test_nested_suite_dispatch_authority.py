@@ -45,8 +45,14 @@ parser.add_argument('--pattern', default='test*.py')
 args = parser.parse_args()
 sources = [path.read_text(encoding='utf-8') for path in sorted((args.project_root / 'tests').glob('test*.py'))]
 if any(
-    ('forged_suite_call' in source or 'forged_suite_run' in source)
-    and 'unittest.TestSuite' in source
+    (
+        ('forged_suite_call' in source or 'forged_suite_run' in source)
+        and 'unittest.TestSuite' in source
+    )
+    or (
+        'forged_result_add_error' in source
+        and 'unittest.TextTestResult' in source
+    )
     for source in sources
 ):
     raise SystemExit(7)
@@ -77,7 +83,7 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
             timeout_seconds=3,
         )
 
-    def test_stock_unittest_dispatch_accepts_both_post_discovery_nested_suite_forgeries(self) -> None:
+    def test_stock_unittest_dispatch_accepts_all_post_discovery_forgeries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runner = self._runner(pathlib.Path(directory), VULNERABLE_STOCK_RUNNER)
             report = self._verify(runner)
@@ -85,13 +91,14 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertFalse(report['passed'])
         self.assertEqual(report['schema'], 'amazingbecca.nested-suite-dispatch-authority.v1')
         self.assertEqual(report['authority_level'], 'diagnostic-bound-not-terminal')
-        self.assertEqual(report['case_count'], 3)
+        self.assertEqual(report['case_count'], 4)
         self.assertEqual(report['rejected_clean'], [])
         self.assertEqual(
             report['accepted_attacks'],
             [
                 'nested-suite-post-discovery-call-forgery',
                 'nested-suite-post-discovery-run-forgery',
+                'result-post-discovery-add-error-forgery',
             ],
         )
         by_name = {case['name']: case for case in report['cases']}
@@ -101,6 +108,8 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertEqual(by_name['nested-suite-post-discovery-call-forgery']['returncode'], 0)
         self.assertFalse(by_name['nested-suite-post-discovery-run-forgery']['passed'])
         self.assertEqual(by_name['nested-suite-post-discovery-run-forgery']['returncode'], 0)
+        self.assertFalse(by_name['result-post-discovery-add-error-forgery']['passed'])
+        self.assertEqual(by_name['result-post-discovery-add-error-forgery']['returncode'], 0)
 
     def test_clean_control_rejects_an_always_fail_runner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -114,8 +123,9 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertFalse(by_name['nested-suite-clean-control']['passed'])
         self.assertTrue(by_name['nested-suite-post-discovery-call-forgery']['passed'])
         self.assertTrue(by_name['nested-suite-post-discovery-run-forgery']['passed'])
+        self.assertTrue(by_name['result-post-discovery-add-error-forgery']['passed'])
 
-    def test_runner_that_accepts_clean_and_rejects_both_attacks_satisfies_probe(self) -> None:
+    def test_runner_that_accepts_clean_and_rejects_all_attacks_satisfies_probe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runner = self._runner(pathlib.Path(directory), CONFORMING_PROBE_RUNNER)
             report = self._verify(runner)
