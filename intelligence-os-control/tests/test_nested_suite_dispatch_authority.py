@@ -45,6 +45,12 @@ parser.add_argument('--pattern', default='test*.py')
 args = parser.parse_args()
 sources = [path.read_text(encoding='utf-8') for path in sorted((args.project_root / 'tests').glob('test*.py'))]
 if any(
+    'ParentSignalKernelContainment' in source
+    and 'os.kill(os.getppid(), signal.SIGKILL)' in source
+    for source in sources
+):
+    raise SystemExit(0)
+if any(
     (
         ('forged_suite_call' in source or 'forged_suite_run' in source)
         and 'unittest.TestSuite' in source
@@ -86,11 +92,17 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         runner.chmod(0o555)
         return runner
 
-    def _verify(self, runner: pathlib.Path) -> dict[str, object]:
+    def _verify(
+        self,
+        runner: pathlib.Path,
+        *,
+        include_parent_signal_containment: bool = False,
+    ) -> dict[str, object]:
         return subject.verify(
             runner=runner,
             python_executable=pathlib.Path(sys.executable),
             timeout_seconds=3,
+            include_parent_signal_containment=include_parent_signal_containment,
         )
 
     def test_stock_unittest_dispatch_accepts_all_post_discovery_forgeries(self) -> None:
@@ -102,6 +114,7 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertEqual(report['schema'], 'amazingbecca.nested-suite-dispatch-authority.v1')
         self.assertEqual(report['authority_level'], 'diagnostic-bound-not-terminal')
         self.assertEqual(report['case_count'], 6)
+        self.assertFalse(report['parent_signal_containment_included'])
         self.assertEqual(report['rejected_clean'], [])
         self.assertEqual(
             report['accepted_attacks'],
@@ -152,6 +165,35 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertEqual(report['accepted_attacks'], [])
         self.assertEqual(report['rejected_clean'], [])
         self.assertTrue(all(case['passed'] for case in report['cases']))
+
+    def test_parent_signal_containment_is_explicit_and_not_part_of_unsandboxed_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = self._runner(pathlib.Path(directory), CONFORMING_PROBE_RUNNER)
+            default_report = self._verify(runner)
+            protected_report = self._verify(
+                runner,
+                include_parent_signal_containment=True,
+            )
+
+        self.assertFalse(default_report['parent_signal_containment_included'])
+        self.assertEqual(default_report['case_count'], 6)
+        self.assertTrue(protected_report['parent_signal_containment_included'])
+        self.assertEqual(protected_report['case_count'], 7)
+        by_name = {case['name']: case for case in protected_report['cases']}
+        self.assertTrue(by_name['parent-signal-kernel-containment']['expected_zero'])
+        self.assertEqual(by_name['parent-signal-kernel-containment']['returncode'], 0)
+        self.assertTrue(by_name['parent-signal-kernel-containment']['passed'])
+
+    def test_parent_signal_selector_rejects_non_boolean_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = self._runner(pathlib.Path(directory), CONFORMING_PROBE_RUNNER)
+            with self.assertRaisesRegex(RuntimeError, 'selector must be boolean'):
+                subject.verify(
+                    runner=runner,
+                    python_executable=pathlib.Path(sys.executable),
+                    timeout_seconds=3,
+                    include_parent_signal_containment=1,  # type: ignore[arg-type]
+                )
 
 
 if __name__ == '__main__':
