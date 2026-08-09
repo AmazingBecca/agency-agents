@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import io
+import json
 import os
 import stat
 import sys
 import zipfile
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 CONTROL_DIR = Path(__file__).resolve().parent
 if str(CONTROL_DIR) not in sys.path:
@@ -18,12 +21,38 @@ import publication_attestation as attestation
 import verify_publication_attestation as publication_verifier
 
 MAX_ARTIFACT_BYTES = 1024 * 1024
-MAX_MEMBER_BYTES = attestation.MAX_PUBLICATION_BYTES
-ARTIFACT_MEMBER_NAME = attestation.OUTPUT_NAME
+MAX_MEMBER_BYTES = 384 * 1024
+ARTIFACT_MEMBER_NAME = "intelligence-os-retained-evidence-diagnostic.json"
+DIAGNOSTIC_SCHEMA = "amazingbecca.intelligence-os-retained-evidence-diagnostic.v1"
+DIAGNOSTIC_AUTHORITY_LEVEL = "retained-diagnostic-not-promotion"
+DIAGNOSTIC_KEYS = {
+    "schema",
+    "authority_level",
+    "promotion_authority_ready",
+    "promotion_authorized",
+    "publication",
+}
+PUBLICATION_RECORD_KEYS = {"name", "encoding", "bytes", "sha256", "data"}
 
 
 class ArtifactVerificationError(RuntimeError):
     pass
+
+
+def _canonical_json(value: Any) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("ascii")
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ArtifactVerificationError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def _hex64(value: str, label: str) -> str:
@@ -88,7 +117,7 @@ def _read_bounded_regular(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def _publication_member(archive_raw: bytes) -> bytes:
+def _diagnostic_member(archive_raw: bytes) -> bytes:
     try:
         with zipfile.ZipFile(io.BytesIO(archive_raw), mode="r") as archive:
             members = archive.infolist()
@@ -104,16 +133,65 @@ def _publication_member(archive_raw: bytes) -> bytes:
                 or member.compress_size < 1
                 or member.compress_size > MAX_ARTIFACT_BYTES
             ):
-                raise ArtifactVerificationError("artifact publication member is outside policy")
+                raise ArtifactVerificationError("artifact diagnostic member is outside policy")
             try:
                 raw = archive.read(member)
             except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                raise ArtifactVerificationError("artifact publication member is unreadable") from exc
+                raise ArtifactVerificationError("artifact diagnostic member is unreadable") from exc
     except zipfile.BadZipFile as exc:
         raise ArtifactVerificationError("artifact is not a valid ZIP archive") from exc
     if len(raw) != member.file_size:
-        raise ArtifactVerificationError("artifact publication member size is inconsistent")
+        raise ArtifactVerificationError("artifact diagnostic member size is inconsistent")
     return raw
+
+
+def _unwrap_nonpromotion_diagnostic(raw: bytes) -> tuple[bytes, str]:
+    try:
+        value = json.loads(raw.decode("ascii"), object_pairs_hook=_strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactVerificationError("retained diagnostic is not canonical JSON") from exc
+    if not isinstance(value, dict) or raw != _canonical_json(value):
+        raise ArtifactVerificationError("retained diagnostic is not canonical JSON")
+    if set(value) != DIAGNOSTIC_KEYS:
+        raise ArtifactVerificationError("retained diagnostic inventory is not exact")
+    if value.get("schema") != DIAGNOSTIC_SCHEMA:
+        raise ArtifactVerificationError("retained diagnostic schema is invalid")
+    if value.get("authority_level") != DIAGNOSTIC_AUTHORITY_LEVEL:
+        raise ArtifactVerificationError("retained diagnostic authority level is invalid")
+    if value.get("promotion_authority_ready") is not False:
+        raise ArtifactVerificationError("retained diagnostic claims promotion readiness")
+    if value.get("promotion_authorized") is not False:
+        raise ArtifactVerificationError("retained diagnostic claims promotion authority")
+
+    record = value.get("publication")
+    if not isinstance(record, dict) or set(record) != PUBLICATION_RECORD_KEYS:
+        raise ArtifactVerificationError("retained diagnostic publication record is malformed")
+    if record.get("name") != attestation.OUTPUT_NAME or record.get("encoding") != "base64":
+        raise ArtifactVerificationError("retained diagnostic publication identity is invalid")
+    size = record.get("bytes")
+    data = record.get("data")
+    if (
+        isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 1
+        or size > attestation.MAX_PUBLICATION_BYTES
+        or not isinstance(data, str)
+        or not data.isascii()
+    ):
+        raise ArtifactVerificationError("retained diagnostic publication record is outside policy")
+    expected_digest = _hex64(record.get("sha256"), "retained diagnostic publication SHA-256")
+    try:
+        publication_raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArtifactVerificationError("retained diagnostic publication base64 is malformed") from exc
+    if base64.b64encode(publication_raw).decode("ascii") != data:
+        raise ArtifactVerificationError("retained diagnostic publication base64 is not canonical")
+    if len(publication_raw) != size:
+        raise ArtifactVerificationError("retained diagnostic publication length mismatch")
+    observed_digest = hashlib.sha256(publication_raw).hexdigest()
+    if observed_digest != expected_digest:
+        raise ArtifactVerificationError("retained diagnostic publication digest mismatch")
+    return publication_raw, hashlib.sha256(raw).hexdigest()
 
 
 def verify_artifact(
@@ -128,7 +206,8 @@ def verify_artifact(
     observed_archive_digest = hashlib.sha256(artifact_raw).hexdigest()
     if observed_archive_digest != expected_archive_digest:
         raise ArtifactVerificationError("artifact digest does not match GitHub authority")
-    publication_raw = _publication_member(artifact_raw)
+    diagnostic_raw = _diagnostic_member(artifact_raw)
+    publication_raw, diagnostic_sha256 = _unwrap_nonpromotion_diagnostic(diagnostic_raw)
     publication_sha256 = hashlib.sha256(publication_raw).hexdigest()
     try:
         receipt_sha256 = publication_verifier.verify_publication(
@@ -141,6 +220,7 @@ def verify_artifact(
         raise ArtifactVerificationError(str(exc)) from exc
     return {
         "artifact_sha256": observed_archive_digest,
+        "diagnostic_sha256": diagnostic_sha256,
         "publication_sha256": publication_sha256,
         "receipt_sha256": receipt_sha256,
     }
