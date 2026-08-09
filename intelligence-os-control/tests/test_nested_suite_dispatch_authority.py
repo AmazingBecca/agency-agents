@@ -8,6 +8,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent))
+import verify_bound_candidate_test_authority as bound
 import verify_nested_suite_dispatch_authority as subject
 
 
@@ -30,6 +31,36 @@ suite = loader.discover(
 )
 result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
 raise SystemExit(0 if result.wasSuccessful() else 7)
+'''
+
+VULNERABLE_SUPERVISED_RUNNER = r'''
+from __future__ import annotations
+import argparse
+import subprocess
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--project-root', required=True)
+parser.add_argument('--pattern', default='test*.py')
+args = parser.parse_args()
+worker = r"""
+import io
+import pathlib
+import sys
+import unittest
+root = pathlib.Path(sys.argv[1])
+pattern = sys.argv[2]
+loader = unittest.TestLoader()
+suite = loader.discover(str(root / 'tests'), pattern=pattern, top_level_dir=str(root))
+result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+raise SystemExit(0 if result.wasSuccessful() else 7)
+"""
+completed = subprocess.run(
+    [sys.executable, '-I', '-c', worker, args.project_root, args.pattern],
+    stdin=subprocess.DEVNULL,
+    check=False,
+)
+raise SystemExit(completed.returncode)
 '''
 
 CONFORMING_PROBE_RUNNER = r'''
@@ -183,6 +214,24 @@ class NestedSuiteDispatchAuthorityTests(unittest.TestCase):
         self.assertTrue(by_name['parent-signal-kernel-containment']['expected_zero'])
         self.assertEqual(by_name['parent-signal-kernel-containment']['returncode'], 0)
         self.assertTrue(by_name['parent-signal-kernel-containment']['passed'])
+
+    @unittest.skipUnless(sys.platform == 'linux', 'distinct-principal signal proof is Linux-only')
+    def test_live_pid_sandbox_contains_a_vulnerable_supervisor_kill(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='signal-authority-runner-') as directory:
+            root = pathlib.Path(directory)
+            root.chmod(0o711)
+            runner = self._runner(root, VULNERABLE_SUPERVISED_RUNNER)
+            with bound._sandboxed_candidate_execution('nobody'):
+                report = self._verify(
+                    runner,
+                    include_parent_signal_containment=True,
+                )
+
+        by_name = {case['name']: case for case in report['cases']}
+        signal_case = by_name['parent-signal-kernel-containment']
+        self.assertFalse(signal_case['passed'])
+        self.assertNotEqual(signal_case['returncode'], 0)
+        self.assertIn('parent-signal-kernel-containment', report['accepted_attacks'])
 
     def test_parent_signal_selector_rejects_non_boolean_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
