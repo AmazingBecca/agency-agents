@@ -40,6 +40,7 @@ class CompletionSecretBoundaryTests(unittest.TestCase):
         finding = report["findings"][0]
         self.assertEqual(finding["function"], "_run_worker")
         self.assertEqual(finding["secret_name"], "token")
+        self.assertEqual(finding["exposure_kind"], "secret-live-at-candidate-execution")
         self.assertLess(finding["secret_line"], finding["candidate_line"])
         self.assertLess(finding["candidate_line"], finding["receipt_line"])
 
@@ -74,7 +75,58 @@ class CompletionSecretBoundaryTests(unittest.TestCase):
             report = subject.verify(self._bundle(pathlib.Path(directory), source))
 
         self.assertFalse(report["passed"])
-        self.assertEqual(report["findings"][0]["secret_name"], "receipt")
+        names = {finding["secret_name"] for finding in report["findings"]}
+        self.assertIn("challenge", names)
+        self.assertIn("receipt", names)
+
+    def test_live_secret_without_direct_receipt_write_is_rejected(self) -> None:
+        source = """
+        import os
+
+        def execute_candidate(project_root, challenge_fd):
+            token = os.read(challenge_fd, 32)
+            return run_tests(project_root)
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["finding_count"], 1)
+        self.assertIsNone(report["findings"][0]["receipt_line"])
+
+    def test_attribute_storage_cannot_hide_live_secret(self) -> None:
+        source = """
+        import os
+
+        def execute_candidate(project_root, challenge_fd, state):
+            token = os.read(challenge_fd, 32)
+            state.token = token
+            del token
+            return run_tests(project_root)
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertFalse(report["passed"])
+        names = {finding["secret_name"] for finding in report["findings"]}
+        self.assertIn("state", names)
+
+    def test_setattr_storage_cannot_hide_live_secret(self) -> None:
+        source = """
+        import os
+
+        def execute_candidate(project_root, challenge_fd, state):
+            token = os.read(challenge_fd, 32)
+            setattr(state, "token", token)
+            del token
+            return run_tests(project_root)
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertFalse(report["passed"])
+        names = {finding["secret_name"] for finding in report["findings"]}
+        self.assertIn("state", names)
 
     def test_parent_owned_secret_without_candidate_call_is_not_rejected(self) -> None:
         source = """
@@ -104,6 +156,20 @@ class CompletionSecretBoundaryTests(unittest.TestCase):
             token = os.read(challenge_fd, 32)
             validate(token)
             del token
+            return run(project_root, "test*.py")
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = subject.verify(self._bundle(pathlib.Path(directory), source))
+
+        self.assertTrue(report["passed"])
+
+    def test_plain_name_overwrite_clears_python_level_secret_alias(self) -> None:
+        source = """
+        import os
+
+        def execute_candidate(project_root, challenge_fd):
+            token = os.read(challenge_fd, 32)
+            token = b""
             return run(project_root, "test*.py")
         """
         with tempfile.TemporaryDirectory() as directory:
