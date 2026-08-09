@@ -24,6 +24,8 @@ def _validate_nested_report(report: dict[str, object]) -> None:
         raise RuntimeError("nested dispatch authority decision is malformed")
     if not isinstance(report.get("case_count"), int):
         raise RuntimeError("nested dispatch authority case count is malformed")
+    if not isinstance(report.get("parent_signal_containment_included"), bool):
+        raise RuntimeError("nested dispatch parent-signal containment state is malformed")
     for key in ("accepted_attacks", "rejected_clean"):
         value = report.get(key)
         if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
@@ -74,7 +76,10 @@ def _verify_terminal_bundle_diagnostic(
 
     An unsandboxed call is intentionally incapable of returning an authoritative
     PASS. Tests may use it to exercise the semantic attack matrix without Linux
-    namespace privileges, but production callers must use verify_terminal_bundle.
+    namespace privileges. The live parent-signal containment probe is omitted
+    unless the runner is inside the verified distinct-principal PID namespace,
+    because an intentionally vulnerable runner must never be allowed to signal
+    the control verifier itself.
     """
     descendant_report: dict[str, object] | None = None
     if sandbox_user is not None:
@@ -127,13 +132,17 @@ def _verify_terminal_bundle_diagnostic(
     if sandbox_user is not None:
         bound._assert_sandbox_runner_access(runner)
 
+    parent_signal_required = sandbox_user is not None
     with bound._sandboxed_candidate_execution(sandbox_user):
         nested_report = nested.verify(
             runner=runner,
             python_executable=runtime_before.path,
             timeout_seconds=timeout_seconds,
+            include_parent_signal_containment=parent_signal_required,
         )
     _validate_nested_report(nested_report)
+    if bool(nested_report["parent_signal_containment_included"]) != parent_signal_required:
+        raise RuntimeError("nested dispatch parent-signal containment coverage drifted")
 
     runtime_after = authenticated._snapshot_python_executable(runtime_before.path)
     if runtime_after != runtime_before:
@@ -160,6 +169,11 @@ def _verify_terminal_bundle_diagnostic(
         raise RuntimeError("authenticated bundle case count is malformed")
     nested_count = int(nested_report["case_count"])
     descendant_passed = descendant_report is not None and descendant_report.get("passed") is True
+    parent_signal_verified = (
+        parent_signal_required
+        and nested_report.get("parent_signal_containment_included") is True
+        and "parent-signal-kernel-containment" not in accepted_attacks
+    )
     diagnostic_passed = (
         bool(base_report["passed"])
         and bool(nested_report["passed"])
@@ -178,6 +192,7 @@ def _verify_terminal_bundle_diagnostic(
             "nested_dispatch_case_count": nested_count,
             "nested_dispatch_cases": list(nested_report.get("cases", [])),
             "terminal_total_case_count": base_total + nested_count,
+            "parent_signal_containment_verified": parent_signal_verified,
             "detached_descendant_schema": (
                 descendant_report.get("schema") if descendant_report is not None else None
             ),
@@ -187,7 +202,12 @@ def _verify_terminal_bundle_diagnostic(
             "diagnostic_passed": diagnostic_passed,
             "accepted_attacks": accepted_attacks,
             "rejected_clean": rejected_clean,
-            "passed": diagnostic_passed and sandbox_authority_enforced and descendant_passed,
+            "passed": (
+                diagnostic_passed
+                and sandbox_authority_enforced
+                and descendant_passed
+                and parent_signal_verified
+            ),
         }
     )
     return report
