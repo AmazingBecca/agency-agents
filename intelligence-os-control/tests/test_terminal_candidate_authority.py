@@ -160,10 +160,10 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
                 (None, "explicit sandbox user"),
                 ("", "explicit sandbox user"),
                 (" nobody ", "must be canonical"),
-                ("root", "must be non-root"),
+                ("root", "root"),
             ]
             if os.geteuid() != 0:
-                invalid.append((current_user, "must be distinct"))
+                invalid.append((current_user, "control euid"))
 
             with patch.object(subject, "_verify_terminal_bundle_diagnostic") as diagnostic:
                 for sandbox_user, message in invalid:
