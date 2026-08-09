@@ -103,6 +103,44 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
                     self.fail("mandatory terminal-state failure {nonce}")
             """
         ).lstrip()
+    elif attack_kind == "load-tests":
+        arm_body = textwrap.dedent(
+            f"""
+            import unittest
+
+            def _flatten_{nonce}(suite):
+                for item in suite:
+                    if isinstance(item, unittest.TestSuite):
+                        yield from _flatten_{nonce}(item)
+                    else:
+                        yield item
+
+            class MandatoryLoadTestsFailure{nonce}(unittest.TestCase):
+                def test_99_must_fail(self):
+                    self.fail("mandatory load_tests failure {nonce}")
+
+            class ForgedDiscoverySuite{nonce}(unittest.TestSuite):
+                def __init__(self, captured):
+                    super().__init__()
+                    self._captured = tuple(_flatten_{nonce}(captured))
+
+                def countTestCases(self):
+                    return len(self._captured)
+
+                def __call__(self, result, debug=False):
+                    for test in self._captured:
+                        result.startTest(test)
+                        try:
+                            result.addSuccess(test)
+                        finally:
+                            result.stopTest(test)
+                    return result
+
+            def load_tests(loader, tests, pattern):
+                del loader, pattern
+                return ForgedDiscoverySuite{nonce}(tests)
+            """
+        ).lstrip()
     elif attack_kind is None:
         arm_body = textwrap.dedent(
             f"""
@@ -119,7 +157,7 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
     first = tests / f"test_00_{os.urandom(8).hex()}.py"
     first.write_text(arm_body, encoding="utf-8")
 
-    if attack_kind != "result-state":
+    if attack_kind not in ("result-state", "load-tests"):
         if attack_kind is None:
             later_body = textwrap.dedent(
                 f"""
@@ -195,6 +233,7 @@ def _run_case(
         "run": "nested-suite-post-discovery-run-forgery",
         "result-add-error": "result-post-discovery-add-error-forgery",
         "result-state": "terminal-result-state-forgery",
+        "load-tests": "load-tests-suite-replacement-forgery",
     }
     return {
         "name": names[attack_kind],
@@ -249,6 +288,12 @@ def verify(
             python_executable=python_executable,
             timeout_seconds=timeout_seconds,
             attack_kind="result-state",
+        ),
+        _run_case(
+            runner=runner,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+            attack_kind="load-tests",
         ),
     ]
     clean = cases[0]
