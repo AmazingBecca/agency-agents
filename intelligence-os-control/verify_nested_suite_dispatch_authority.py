@@ -63,6 +63,23 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
                     setattr(unittest.TestSuite, "r" + "un", forged_suite_run)
             """
         ).lstrip()
+    elif attack_kind == "result-add-error":
+        arm_body = textwrap.dedent(
+            f"""
+            import unittest
+
+            class ArmResultAddErrorDispatch{nonce}(unittest.TestCase):
+                def test_00_arm_result_dispatch(self):
+                    original_add_error = unittest.TextTestResult.addError
+
+                    def forged_result_add_error(result, test, error):
+                        del error
+                        unittest.TextTestResult.addError = original_add_error
+                        result.addSuccess(test)
+
+                    unittest.TextTestResult.addError = forged_result_add_error
+            """
+        ).lstrip()
     elif attack_kind is None:
         arm_body = textwrap.dedent(
             f"""
@@ -84,6 +101,16 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
             class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
                 def test_99_must_fail(self):
                     self.assertEqual(2 + 2, 4)
+            """
+        ).lstrip()
+    elif attack_kind == "result-add-error":
+        later_body = textwrap.dedent(
+            f"""
+            import unittest
+
+            class MandatoryNestedSuiteFailure{nonce}(unittest.TestCase):
+                def test_99_must_fail(self):
+                    raise RuntimeError("mandatory later-module error {nonce}")
             """
         ).lstrip()
     else:
@@ -140,6 +167,7 @@ def _run_case(
         None: "nested-suite-clean-control",
         "call": "nested-suite-post-discovery-call-forgery",
         "run": "nested-suite-post-discovery-run-forgery",
+        "result-add-error": "result-post-discovery-add-error-forgery",
     }
     return {
         "name": names[attack_kind],
@@ -182,6 +210,12 @@ def verify(
             python_executable=python_executable,
             timeout_seconds=timeout_seconds,
             attack_kind="run",
+        ),
+        _run_case(
+            runner=runner,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+            attack_kind="result-add-error",
         ),
     ]
     clean = cases[0]
