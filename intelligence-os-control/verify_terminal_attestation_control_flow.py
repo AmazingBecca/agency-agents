@@ -11,7 +11,9 @@ from dataclasses import asdict, dataclass
 _SCHEMA = "amazingbecca.terminal-attestation-control-flow.v1"
 _READY_MARKER = b"candidate-exited\n"
 _AUTHORITY_DESCRIPTORS = frozenset({"challenge_fd", "receipt_fd", "ready_fd"})
-_AUTHORITY_TERMINALS = frozenset({"Popen", "wait", "read", "_write_all", "write", "send", "sendall"})
+_AUTHORITY_TERMINALS = frozenset(
+    {"Popen", "wait", "read", "_write_all", "write", "send", "sendall"}
+)
 
 
 @dataclass(frozen=True)
@@ -89,13 +91,7 @@ def _direct_calls(function: ast.FunctionDef) -> list[tuple[int, ast.Call, str | 
 
 
 def _scope_calls(function: ast.FunctionDef) -> list[ast.Call]:
-    """Return calls in the attestor's execution scope, excluding deferred scopes.
-
-    Unlike _direct_calls(), this includes calls hidden under if/for/try/with and
-    comprehensions. Nested functions, async functions, and lambdas are excluded
-    because they are separately rejected when they contain authority-sensitive
-    operations.
-    """
+    """Return calls in the attestor execution scope, excluding deferred scopes."""
     calls: list[ast.Call] = []
 
     class Visitor(ast.NodeVisitor):
@@ -139,21 +135,34 @@ def _nested_scope_calls(function: ast.FunctionDef) -> list[ast.Call]:
     return nested
 
 
-def _bound_names(node: ast.AST) -> set[str]:
+def _storage_roots(node: ast.AST) -> set[str]:
+    """Return conservative local roots that can retain a value written to target."""
     if isinstance(node, ast.Name):
         return {node.id}
+    if isinstance(node, ast.Starred):
+        return _storage_roots(node.value)
     if isinstance(node, (ast.Tuple, ast.List)):
-        names: set[str] = set()
+        roots: set[str] = set()
         for item in node.elts:
-            names.update(_bound_names(item))
-        return names
+            roots.update(_storage_roots(item))
+        return roots
+    if isinstance(node, ast.Attribute):
+        return _storage_roots(node.value)
+    if isinstance(node, ast.Subscript):
+        return _storage_roots(node.value)
     return set()
 
 
-def _descriptor_tainted_names(function: ast.FunctionDef) -> set[str]:
-    """Conservatively propagate trusted-descriptor aliases in the attestor scope."""
+def _descriptor_taint(
+    function: ast.FunctionDef,
+) -> tuple[set[str], tuple[tuple[int, str], ...]]:
+    """Propagate trusted descriptor aliases through names and object/container storage.
+
+    Attribute/subscript writes taint their root object. Writes into storage with no
+    stable local root are rejected rather than silently escaping the review model.
+    """
     tainted = set(_AUTHORITY_DESCRIPTORS)
-    assignments: list[tuple[set[str], ast.AST]] = []
+    assignments: list[tuple[tuple[ast.AST, ...], ast.AST, int]] = []
 
     class Visitor(ast.NodeVisitor):
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -168,36 +177,54 @@ def _descriptor_tainted_names(function: ast.FunctionDef) -> set[str]:
             return
 
         def visit_Assign(self, node: ast.Assign) -> None:
-            targets: set[str] = set()
+            assignments.append((tuple(node.targets), node.value, node.lineno))
+            self.visit(node.value)
             for target in node.targets:
-                targets.update(_bound_names(target))
-            if targets:
-                assignments.append((targets, node.value))
-            self.generic_visit(node.value)
+                self.visit(target)
 
         def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-            targets = _bound_names(node.target)
-            if targets and node.value is not None:
-                assignments.append((targets, node.value))
+            if node.value is not None:
+                assignments.append(((node.target,), node.value, node.lineno))
                 self.visit(node.value)
+                self.visit(node.target)
 
         def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-            targets = _bound_names(node.target)
-            if targets:
-                assignments.append((targets, node.value))
+            assignments.append(((node.target,), node.value, node.lineno))
             self.visit(node.value)
+            self.visit(node.target)
 
     Visitor().visit(function)
+
     changed = True
     while changed:
         changed = False
-        for targets, value in assignments:
-            if _names(value).intersection(tainted):
-                for target in targets:
-                    if target not in tainted:
-                        tainted.add(target)
-                        changed = True
-    return tainted
+        for targets, value, _ in assignments:
+            if not _names(value).intersection(tainted):
+                continue
+            roots: set[str] = set()
+            for target in targets:
+                roots.update(_storage_roots(target))
+            for root in roots:
+                if root not in tainted:
+                    tainted.add(root)
+                    changed = True
+
+    untrackable: list[tuple[int, str]] = []
+    for targets, value, line in assignments:
+        if not _names(value).intersection(tainted):
+            continue
+        roots: set[str] = set()
+        for target in targets:
+            roots.update(_storage_roots(target))
+        if roots:
+            continue
+        rendered = ", ".join(
+            ast.unparse(target) if hasattr(ast, "unparse") else target.__class__.__name__
+            for target in targets
+        )
+        untrackable.append((line, rendered or "<dynamic-storage>"))
+
+    return tainted, tuple(sorted(set(untrackable)))
 
 
 def _finding(path: str, function: str, line: int, kind: str, detail: str) -> Finding:
@@ -221,60 +248,93 @@ def _source_files(root: pathlib.Path) -> tuple[pathlib.Path, ...]:
 def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
     findings: list[Finding] = []
     direct = _direct_calls(function)
-    descriptor_taint = _descriptor_tainted_names(function)
+    descriptor_taint, untrackable_storage = _descriptor_taint(function)
+
+    for line, target in untrackable_storage:
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                line,
+                "attestor-authority-descriptor-stored-outside-review-model",
+                "trusted descriptor value is written through storage without a stable local root: "
+                + target,
+            )
+        )
 
     nested_sensitive = [
-        call for call in _nested_scope_calls(function)
+        call
+        for call in _nested_scope_calls(function)
         if _terminal_name(call.func) in _AUTHORITY_TERMINALS
         or bool(_names(call).intersection(descriptor_taint))
     ]
     for call in nested_sensitive:
-        findings.append(_finding(
-            path,
-            function.name,
-            call.lineno,
-            "attestor-authority-call-hidden-in-nested-scope",
-            "candidate completion authority must not be satisfied or receive trusted descriptors in a nested function, lambda, or deferred scope",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                call.lineno,
+                "attestor-authority-call-hidden-in-nested-scope",
+                "candidate completion authority must not be satisfied or receive trusted descriptors in a nested function, lambda, or deferred scope",
+            )
+        )
 
     launches = [
         (index, call, assigned)
         for index, call, assigned in direct
-        if _dotted_name(call.func) == "subprocess.Popen" and "--worker" in _string_literals(call)
+        if _dotted_name(call.func) == "subprocess.Popen"
+        and "--worker" in _string_literals(call)
     ]
     if len(launches) != 1:
-        findings.append(_finding(
-            path, function.name, function.lineno,
-            "candidate-launch-not-canonical-top-level",
-            "attestor must have exactly one top-level assigned subprocess.Popen launch for --worker",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                function.lineno,
+                "candidate-launch-not-canonical-top-level",
+                "attestor must have exactly one top-level assigned subprocess.Popen launch for --worker",
+            )
+        )
         return findings
     launch_index, launch, candidate_name = launches[0]
     if candidate_name is None:
-        findings.append(_finding(
-            path, function.name, launch.lineno,
-            "candidate-process-identity-unbound",
-            "candidate launch must bind the process object to one local name",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                launch.lineno,
+                "candidate-process-identity-unbound",
+                "candidate launch must bind the process object to one local name",
+            )
+        )
         return findings
+
     close_fds = _keyword(launch, "close_fds")
     if close_fds is None or not (
         isinstance(close_fds.value, ast.Constant) and close_fds.value.value is True
     ):
-        findings.append(_finding(
-            path, function.name, launch.lineno,
-            "candidate-descriptor-closure-not-enforced",
-            "candidate launch must use close_fds=True",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                launch.lineno,
+                "candidate-descriptor-closure-not-enforced",
+                "candidate launch must use close_fds=True",
+            )
+        )
 
     launch_taint = sorted(_names(launch).intersection(descriptor_taint))
     if launch_taint:
-        findings.append(_finding(
-            path, function.name, launch.lineno,
-            "attestor-authority-descriptor-leaked-to-candidate",
-            "candidate launch must not reference challenge, receipt, readiness descriptors or any aliases derived from them: "
-            + ",".join(launch_taint),
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                launch.lineno,
+                "attestor-authority-descriptor-leaked-to-candidate",
+                "candidate launch must not reference challenge, receipt, readiness descriptors or any aliases derived from them: "
+                + ",".join(launch_taint),
+            )
+        )
 
     waits = [
         (index, call, assigned)
@@ -282,11 +342,15 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
         if _dotted_name(call.func) == f"{candidate_name}.wait"
     ]
     if len(waits) != 1:
-        findings.append(_finding(
-            path, function.name, function.lineno,
-            "candidate-wait-not-canonical-top-level",
-            "attestor must have exactly one top-level wait on the launched candidate",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                function.lineno,
+                "candidate-wait-not-canonical-top-level",
+                "attestor must have exactly one top-level wait on the launched candidate",
+            )
+        )
         return findings
     wait_index, wait_call, _ = waits[0]
 
@@ -314,60 +378,90 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
         and isinstance(call.args[0], ast.Name)
         and call.args[0].id == "receipt_fd"
     ]
+
     if len(ready_writes) != 1:
-        findings.append(_finding(
-            path, function.name, function.lineno,
-            "post-exit-readiness-not-canonical-top-level",
-            "attestor must emit exactly one top-level fixed readiness marker",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                function.lineno,
+                "post-exit-readiness-not-canonical-top-level",
+                "attestor must emit exactly one top-level fixed readiness marker",
+            )
+        )
         return findings
     if len(challenge_reads) != 1:
-        findings.append(_finding(
-            path, function.name, function.lineno,
-            "challenge-read-not-canonical-top-level",
-            "attestor must read the supervisor challenge exactly once at top level",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                function.lineno,
+                "challenge-read-not-canonical-top-level",
+                "attestor must read the supervisor challenge exactly once at top level",
+            )
+        )
         return findings
     if len(receipt_writes) != 1:
-        findings.append(_finding(
-            path, function.name, function.lineno,
-            "receipt-write-not-canonical-top-level",
-            "attestor must emit exactly one top-level terminal receipt",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                function.lineno,
+                "receipt-write-not-canonical-top-level",
+                "attestor must emit exactly one top-level terminal receipt",
+            )
+        )
         return findings
 
     ready_index, ready_call = ready_writes[0]
     challenge_index, challenge_call, token_name = challenge_reads[0]
     receipt_index, receipt_call = receipt_writes[0]
+
     if _READY_MARKER not in _string_literals(ready_call):
-        findings.append(_finding(
-            path, function.name, ready_call.lineno,
-            "post-exit-readiness-marker-drift",
-            "attestor readiness marker must be the fixed candidate-exited marker",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                ready_call.lineno,
+                "post-exit-readiness-marker-drift",
+                "attestor readiness marker must be the fixed candidate-exited marker",
+            )
+        )
     if token_name is None:
-        findings.append(_finding(
-            path, function.name, challenge_call.lineno,
-            "challenge-identity-unbound",
-            "attestor challenge read must bind the token to one local name",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                challenge_call.lineno,
+                "challenge-identity-unbound",
+                "attestor challenge read must bind the token to one local name",
+            )
+        )
     elif not (
         len(receipt_call.args) >= 2
         and isinstance(receipt_call.args[1], ast.Name)
         and receipt_call.args[1].id == token_name
     ):
-        findings.append(_finding(
-            path, function.name, receipt_call.lineno,
-            "receipt-not-bound-to-challenge",
-            "terminal receipt must relay the exact post-exit challenge value",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                receipt_call.lineno,
+                "receipt-not-bound-to-challenge",
+                "terminal receipt must relay the exact post-exit challenge value",
+            )
+        )
 
     if not (launch_index < wait_index < ready_index < challenge_index < receipt_index):
-        findings.append(_finding(
-            path, function.name, function.lineno,
-            "attestor-authority-order-not-dominating",
-            "reviewed top-level authority order must be launch -> wait -> readiness -> challenge read -> receipt",
-        ))
+        findings.append(
+            _finding(
+                path,
+                function.name,
+                function.lineno,
+                "attestor-authority-order-not-dominating",
+                "reviewed top-level authority order must be launch -> wait -> readiness -> challenge read -> receipt",
+            )
+        )
 
     canonical_call_ids = {
         id(launch),
@@ -388,13 +482,15 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
             )
             if descriptor_use:
                 detail += f" trusted_descriptor_taint={','.join(descriptor_use)}"
-            findings.append(_finding(
-                path,
-                function.name,
-                call.lineno,
-                "attestor-authority-call-outside-canonical-path",
-                detail,
-            ))
+            findings.append(
+                _finding(
+                    path,
+                    function.name,
+                    call.lineno,
+                    "attestor-authority-call-outside-canonical-path",
+                    detail,
+                )
+            )
 
     return findings
 
@@ -412,40 +508,60 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
             tree = ast.parse(raw, filename=str(source))
         except (SyntaxError, ValueError, TypeError) as exc:
             raise RuntimeError(f"runner source cannot be parsed: {source}") from exc
+
         functions = _top_level_functions(tree)
-        workers = functions.get("_run_worker", [])
-        for worker in workers:
-            if any(_dotted_name(call.func) == "_load_worker" for call in ast.walk(worker) if isinstance(call, ast.Call)):
+        for worker in functions.get("_run_worker", []):
+            if any(
+                _dotted_name(call.func) == "_load_worker"
+                for call in ast.walk(worker)
+                if isinstance(call, ast.Call)
+            ):
                 candidates.append((relative, worker))
         for attestor in functions.get("_run_attestor", []):
             attestors.append((relative, attestor))
 
     if len(candidates) != 1:
-        findings.append(_finding(
-            "<bundle>", "_run_worker", 0,
-            "candidate-runner-authority-ambiguous",
-            "runner bundle must contain exactly one direct candidate-importing _run_worker",
-        ))
+        findings.append(
+            _finding(
+                "<bundle>",
+                "_run_worker",
+                0,
+                "candidate-runner-authority-ambiguous",
+                "runner bundle must contain exactly one direct candidate-importing _run_worker",
+            )
+        )
     if len(attestors) != 1:
-        findings.append(_finding(
-            "<bundle>", "_run_attestor", 0,
-            "terminal-attestor-authority-ambiguous",
-            "runner bundle must contain exactly one top-level _run_attestor",
-        ))
+        findings.append(
+            _finding(
+                "<bundle>",
+                "_run_attestor",
+                0,
+                "terminal-attestor-authority-ambiguous",
+                "runner bundle must contain exactly one top-level _run_attestor",
+            )
+        )
+
     if len(candidates) == 1 and len(attestors) == 1:
         candidate_path, _ = candidates[0]
         attestor_path, attestor = attestors[0]
         if candidate_path != attestor_path:
-            findings.append(_finding(
-                attestor_path, attestor.name, attestor.lineno,
-                "candidate-attestor-source-split-unreviewed",
-                "candidate runner and terminal attestor must share one reviewed source unit for this authority profile",
-            ))
+            findings.append(
+                _finding(
+                    attestor_path,
+                    attestor.name,
+                    attestor.lineno,
+                    "candidate-attestor-source-split-unreviewed",
+                    "candidate runner and terminal attestor must share one reviewed source unit for this authority profile",
+                )
+            )
         findings.extend(_verify_attestor(attestor, attestor_path))
 
     rendered = [
         asdict(item)
-        for item in sorted(findings, key=lambda item: (item.path, item.function, item.line, item.kind))
+        for item in sorted(
+            findings,
+            key=lambda item: (item.path, item.function, item.line, item.kind),
+        )
     ]
     return {
         "schema": _SCHEMA,
