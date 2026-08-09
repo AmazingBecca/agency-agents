@@ -29,7 +29,8 @@ class Finding:
     secret_name: str
     secret_line: int
     candidate_line: int
-    receipt_line: int
+    receipt_line: int | None
+    exposure_kind: str
 
 
 def _dotted_name(node: ast.AST) -> str | None:
@@ -119,6 +120,10 @@ def _assigned_names(node: ast.AST) -> set[str]:
     elif isinstance(node, (ast.Tuple, ast.List)):
         for item in node.elts:
             names.update(_assigned_names(item))
+    elif isinstance(node, ast.Attribute):
+        names.update(_referenced_names(node.value))
+    elif isinstance(node, ast.Subscript):
+        names.update(_referenced_names(node.value))
     return names
 
 
@@ -126,16 +131,33 @@ def _referenced_names(node: ast.AST) -> set[str]:
     return {child.id for child in ast.walk(node) if isinstance(child, ast.Name)}
 
 
+def _receipt_line_after(
+    receipt_uses: list[tuple[str, int]], secret_name: str, candidate_line: int
+) -> int | None:
+    later = [line for name, line in receipt_uses if name == secret_name and line > candidate_line]
+    return min(later) if later else None
+
+
 def _function_findings(function: ast.FunctionDef | ast.AsyncFunctionDef, path: str) -> list[Finding]:
     statements = sorted(
-        (node for node in ast.walk(function) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call))),
+        (
+            node
+            for node in ast.walk(function)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Delete, ast.Call))
+        ),
         key=lambda node: getattr(node, "lineno", 0),
     )
     tainted: dict[str, int] = {}
-    candidate_lines: list[int] = []
+    candidate_snapshots: list[tuple[int, dict[str, int]]] = []
     receipt_uses: list[tuple[str, int]] = []
 
     for node in statements:
+        if isinstance(node, ast.Delete):
+            for target in node.targets:
+                for name in _assigned_names(target):
+                    tainted.pop(name, None)
+            continue
+
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
             if value is None:
@@ -153,34 +175,67 @@ def _function_findings(function: ast.FunctionDef | ast.AsyncFunctionDef, path: s
             if source_line is not None:
                 for name in assigned:
                     tainted[name] = source_line
+            else:
+                # A direct name overwrite destroys the Python-level alias. Attribute
+                # and subscript writes intentionally do not clear their container's
+                # taint because other secret-bearing members may still exist.
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        tainted.pop(target.id, None)
             continue
 
         if not isinstance(node, ast.Call):
             continue
+
         terminal = _terminal_name(node.func)
-        if terminal in _CANDIDATE_CALL_NAMES:
-            candidate_lines.append(node.lineno)
+
+        # Explicit mutation helpers can move a secret into an object without an
+        # Assign node (for example setattr(state, "token", token)). Conservatively
+        # taint the receiving object when a tainted value is stored this way.
+        if terminal == "setattr" and len(node.args) >= 3:
+            value_names = _referenced_names(node.args[2])
+            source_lines = [tainted[name] for name in value_names if name in tainted]
+            if source_lines:
+                for name in _referenced_names(node.args[0]):
+                    tainted[name] = min(source_lines)
+        elif terminal == "__setitem__" and len(node.args) >= 2:
+            value_names = _referenced_names(node.args[-1])
+            source_lines = [tainted[name] for name in value_names if name in tainted]
+            if source_lines:
+                receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+                if receiver is not None:
+                    for name in _referenced_names(receiver):
+                        tainted[name] = min(source_lines)
+
         if terminal in _RECEIPT_WRITE_NAMES:
             referenced = set().union(*(_referenced_names(argument) for argument in node.args))
             for name in sorted(referenced.intersection(tainted)):
                 receipt_uses.append((name, node.lineno))
 
+        if terminal in _CANDIDATE_CALL_NAMES:
+            candidate_snapshots.append((node.lineno, dict(tainted)))
+
     findings: list[Finding] = []
-    for name, receipt_line in receipt_uses:
-        secret_line = tainted[name]
-        for candidate_line in candidate_lines:
-            if secret_line < candidate_line < receipt_line:
-                findings.append(
-                    Finding(
-                        path=path,
-                        function=function.name,
-                        secret_name=name,
-                        secret_line=secret_line,
-                        candidate_line=candidate_line,
-                        receipt_line=receipt_line,
-                    )
+    seen: set[tuple[str, int]] = set()
+    for candidate_line, live_taint in candidate_snapshots:
+        for name, secret_line in sorted(live_taint.items()):
+            if secret_line >= candidate_line:
+                continue
+            identity = (name, candidate_line)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            findings.append(
+                Finding(
+                    path=path,
+                    function=function.name,
+                    secret_name=name,
+                    secret_line=secret_line,
+                    candidate_line=candidate_line,
+                    receipt_line=_receipt_line_after(receipt_uses, name, candidate_line),
+                    exposure_kind="secret-live-at-candidate-execution",
                 )
-                break
+            )
     return findings
 
 
@@ -199,7 +254,13 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 findings.extend(_function_findings(node, relative))
 
-    rendered = [asdict(item) for item in sorted(findings, key=lambda item: (item.path, item.function, item.secret_line))]
+    rendered = [
+        asdict(item)
+        for item in sorted(
+            findings,
+            key=lambda item: (item.path, item.function, item.secret_line, item.candidate_line),
+        )
+    ]
     return {
         "schema": _SCHEMA,
         "authority_level": "source-topology-diagnostic-not-terminal",
