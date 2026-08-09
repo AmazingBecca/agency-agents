@@ -36,6 +36,24 @@ def zip_bytes(members: list[tuple[str, bytes]]) -> bytes:
     return output.getvalue()
 
 
+def diagnostic_bytes(publication_raw: bytes, **overrides) -> bytes:
+    value = {
+        "schema": artifact_verifier.DIAGNOSTIC_SCHEMA,
+        "authority_level": artifact_verifier.DIAGNOSTIC_AUTHORITY_LEVEL,
+        "promotion_authority_ready": False,
+        "promotion_authorized": False,
+        "publication": {
+            "name": attestation.OUTPUT_NAME,
+            "encoding": "base64",
+            "bytes": len(publication_raw),
+            "sha256": hashlib.sha256(publication_raw).hexdigest(),
+            "data": base64.b64encode(publication_raw).decode("ascii"),
+        },
+    }
+    value.update(overrides)
+    return canonical(value)
+
+
 def valid_receipt(authority: dict[str, str]) -> dict:
     execution = {
         "repository": authority["repository"],
@@ -172,8 +190,10 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
         )
         self.publication_raw = self.publication_path.read_bytes()
         self.publication_sha256 = hashlib.sha256(self.publication_raw).hexdigest()
+        self.diagnostic_raw = diagnostic_bytes(self.publication_raw)
+        self.diagnostic_sha256 = hashlib.sha256(self.diagnostic_raw).hexdigest()
         self.artifact_raw = zip_bytes(
-            [(artifact_verifier.ARTIFACT_MEMBER_NAME, self.publication_raw)]
+            [(artifact_verifier.ARTIFACT_MEMBER_NAME, self.diagnostic_raw)]
         )
         self.artifact_sha256 = hashlib.sha256(self.artifact_raw).hexdigest()
         self.artifact_path.write_bytes(self.artifact_raw)
@@ -181,7 +201,7 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_valid_github_digest_authenticates_embedded_publication(self) -> None:
+    def test_valid_github_digest_authenticates_nonpromotion_diagnostic_and_publication(self) -> None:
         result = artifact_verifier.verify_artifact_file(
             self.artifact_path,
             self.artifact_sha256,
@@ -189,8 +209,39 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             self.authority,
         )
         self.assertEqual(result["artifact_sha256"], self.artifact_sha256)
+        self.assertEqual(result["diagnostic_sha256"], self.diagnostic_sha256)
         self.assertEqual(result["publication_sha256"], self.publication_sha256)
         self.assertEqual(result["receipt_sha256"], self.receipt_sha256)
+
+    def test_raw_publication_is_not_accepted_as_artifact_member(self) -> None:
+        attacked_raw = zip_bytes(
+            [(artifact_verifier.ARTIFACT_MEMBER_NAME, self.publication_raw)]
+        )
+        with self.assertRaises(artifact_verifier.ArtifactVerificationError):
+            artifact_verifier.verify_artifact(
+                attacked_raw,
+                hashlib.sha256(attacked_raw).hexdigest(),
+                self.publisher_sha,
+                self.authority,
+            )
+
+    def test_diagnostic_cannot_claim_promotion_readiness_or_authority(self) -> None:
+        for field in ("promotion_authority_ready", "promotion_authorized"):
+            with self.subTest(field=field):
+                attacked_diagnostic = diagnostic_bytes(self.publication_raw, **{field: True})
+                attacked_raw = zip_bytes(
+                    [(artifact_verifier.ARTIFACT_MEMBER_NAME, attacked_diagnostic)]
+                )
+                with self.assertRaisesRegex(
+                    artifact_verifier.ArtifactVerificationError,
+                    "promotion",
+                ):
+                    artifact_verifier.verify_artifact(
+                        attacked_raw,
+                        hashlib.sha256(attacked_raw).hexdigest(),
+                        self.publisher_sha,
+                        self.authority,
+                    )
 
     def test_authenticated_archive_with_semantic_receipt_corruption_fails_closed(self) -> None:
         publication = json.loads(self.publication_raw.decode("ascii"))
@@ -202,8 +253,9 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
         record["sha256"] = hashlib.sha256(receipt_raw).hexdigest()
         record["data"] = base64.b64encode(receipt_raw).decode("ascii")
         attacked_publication = canonical(publication)
+        attacked_diagnostic = diagnostic_bytes(attacked_publication)
         attacked_raw = zip_bytes(
-            [(artifact_verifier.ARTIFACT_MEMBER_NAME, attacked_publication)]
+            [(artifact_verifier.ARTIFACT_MEMBER_NAME, attacked_diagnostic)]
         )
         with self.assertRaisesRegex(
             artifact_verifier.ArtifactVerificationError,
@@ -217,10 +269,10 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             )
 
     def test_modified_archive_cannot_reuse_trusted_github_digest(self) -> None:
-        attacked_publication = bytearray(self.publication_raw)
-        attacked_publication[-2] ^= 1
+        attacked = bytearray(self.diagnostic_raw)
+        attacked[-2] ^= 1
         attacked_raw = zip_bytes(
-            [(artifact_verifier.ARTIFACT_MEMBER_NAME, bytes(attacked_publication))]
+            [(artifact_verifier.ARTIFACT_MEMBER_NAME, bytes(attacked))]
         )
         with self.assertRaisesRegex(
             artifact_verifier.ArtifactVerificationError,
@@ -236,12 +288,12 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
     def test_extra_and_duplicate_members_fail_even_with_recomputed_archive_digest(self) -> None:
         attacks = (
             [
-                (artifact_verifier.ARTIFACT_MEMBER_NAME, self.publication_raw),
+                (artifact_verifier.ARTIFACT_MEMBER_NAME, self.diagnostic_raw),
                 ("extra.txt", b"attacker"),
             ],
             [
-                (artifact_verifier.ARTIFACT_MEMBER_NAME, self.publication_raw),
-                (artifact_verifier.ARTIFACT_MEMBER_NAME, self.publication_raw),
+                (artifact_verifier.ARTIFACT_MEMBER_NAME, self.diagnostic_raw),
+                (artifact_verifier.ARTIFACT_MEMBER_NAME, self.diagnostic_raw),
             ],
         )
         for members in attacks:
@@ -273,8 +325,9 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             "workflow_sha": pivot,
         }
         attacked_publication = canonical(publication)
+        attacked_diagnostic = diagnostic_bytes(attacked_publication)
         attacked_raw = zip_bytes(
-            [(artifact_verifier.ARTIFACT_MEMBER_NAME, attacked_publication)]
+            [(artifact_verifier.ARTIFACT_MEMBER_NAME, attacked_diagnostic)]
         )
         with self.assertRaisesRegex(
             artifact_verifier.ArtifactVerificationError,
@@ -288,10 +341,10 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             )
 
     def test_wrong_member_name_and_malformed_archive_fail_closed(self) -> None:
-        wrong_name = zip_bytes([("nested/publication.json", self.publication_raw)])
+        wrong_name = zip_bytes([("nested/diagnostic.json", self.diagnostic_raw)])
         with self.assertRaisesRegex(
             artifact_verifier.ArtifactVerificationError,
-            "artifact publication member is outside policy",
+            "artifact diagnostic member is outside policy",
         ):
             artifact_verifier.verify_artifact(
                 wrong_name,
