@@ -110,6 +110,66 @@ class TerminalAttestationControlFlowTests(unittest.TestCase):
             self._kinds(report),
         )
 
+    def test_extra_conditional_challenge_read_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    token = os.read(challenge_fd, 32)\n",
+            "    if project_root:\n        os.read(challenge_fd, 1)\n    token = os.read(challenge_fd, 32)\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "attestor-authority-call-outside-canonical-path",
+            self._kinds(report),
+        )
+
+    def test_extra_conditional_receipt_write_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    _write_all(receipt_fd, token)\n",
+            "    if project_root:\n        _write_all(receipt_fd, b'premature')\n    _write_all(receipt_fd, token)\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "attestor-authority-call-outside-canonical-path",
+            self._kinds(report),
+        )
+
+    def test_extra_process_launch_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    return_code = candidate.wait()\n",
+            "    observer = subprocess.Popen([sys.executable, '-c', 'pass'], close_fds=True)\n    return_code = candidate.wait()\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "attestor-authority-call-outside-canonical-path",
+            self._kinds(report),
+        )
+
+    def test_extra_process_wait_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    return_code = candidate.wait()\n",
+            "    observer.wait()\n    return_code = candidate.wait()\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "attestor-authority-call-outside-canonical-path",
+            self._kinds(report),
+        )
+
+    def test_trusted_descriptor_cannot_be_forwarded_to_helper(self) -> None:
+        source = SECURE.replace(
+            "    token = os.read(challenge_fd, 32)\n",
+            "    audit_descriptor(challenge_fd)\n    token = os.read(challenge_fd, 32)\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "attestor-authority-call-outside-canonical-path",
+            self._kinds(report),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
