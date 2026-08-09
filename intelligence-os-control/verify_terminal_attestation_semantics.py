@@ -410,14 +410,14 @@ def _attestation_findings(
                 *(_names(argument) for argument in semantic_call.args),
                 *(_names(keyword.value) for keyword in semantic_call.keywords),
             )
-            if referenced and exit_names and referenced.issubset(exit_names):
+            if exit_names and referenced.intersection(exit_names):
                 findings.append(
                     _finding(
                         path,
                         attestor.name,
                         semantic_call.lineno,
-                        "semantic-verifier-derived-only-from-candidate-exit-state",
-                        "semantic verifier receives only candidate-controlled process-exit state",
+                        "semantic-verifier-receives-candidate-exit-state",
+                        "semantic verifier receives candidate-controlled process-exit state; process exit is already checked separately and may not contribute to semantic completion authority",
                     )
                 )
         findings.extend(_semantic_verifier_findings(functions, path, semantic_names))
