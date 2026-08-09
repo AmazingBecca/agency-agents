@@ -39,12 +39,8 @@ class PublicationWorkflowRunAuthorityTests(unittest.TestCase):
         digest = hashlib.sha256(self.artifact_raw).hexdigest()
         self.artifact_metadata = {
             "id": artifact_id,
-            "name": (
-                "intelligence-os-retained-evidence-publication-"
-                f"head-{self.authority['reviewed_head']}-"
-                f"merge-{self.authority['synthetic_merge']}-"
-                f"publisher-{self.publisher_sha}-"
-                f"run-{self.authority['run_id']}-{self.authority['run_attempt']}"
+            "name": artifact_metadata_verifier._expected_artifact_name(
+                self.authority, self.publisher_sha
             ),
             "size_in_bytes": len(self.artifact_raw),
             "url": f"https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}",
@@ -107,8 +103,9 @@ class PublicationWorkflowRunAuthorityTests(unittest.TestCase):
             self.authority,
         )
 
-    def test_valid_run_metadata_binds_artifact_to_exact_workflow_authority(self) -> None:
+    def test_valid_run_metadata_binds_nonpromotion_artifact_to_exact_workflow_authority(self) -> None:
         self.validate()
+        self.assertIn("diagnostic-not-promotion", self.artifact_metadata["name"])
 
     def test_wrapper_rejects_run_authority_before_artifact_semantics(self) -> None:
         attacked = copy.deepcopy(self.run_metadata)
