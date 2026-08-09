@@ -9,6 +9,7 @@ import verify_terminal_attestation_semantics as attestation
 
 BASE = r'''
 import os
+import secrets
 import subprocess
 import sys
 
@@ -19,6 +20,10 @@ def _load_worker():
 
 def _write_all(fd, payload):
     os.write(fd, payload)
+
+
+def _read_receipt(fd):
+    return os.read(fd, 32)
 
 
 def _run_worker(project_root, pattern):
@@ -46,7 +51,25 @@ def _run_attestor(project_root, pattern, challenge_fd, receipt_fd):
     observation = _read_candidate_observation(candidate)
     _verify_candidate_semantics(observation)
     token = os.read(challenge_fd, 32)
+    os.close(challenge_fd)
     _write_all(receipt_fd, token)
+    os.close(receipt_fd)
+    return 0
+
+
+def _verify_terminal_observation(receipt_fd, token):
+    receipt = _read_receipt(receipt_fd)
+    if not secrets.compare_digest(receipt, token):
+        raise RuntimeError("invalid terminal receipt")
+
+
+def _supervise(project_root, pattern):
+    token = secrets.token_bytes(32)
+    child = subprocess.Popen([sys.executable, "-I", __file__, "--attestor"])
+    return_code = child.wait()
+    if return_code != 0:
+        return return_code
+    _verify_terminal_observation(1, token)
     return 0
 '''
 
