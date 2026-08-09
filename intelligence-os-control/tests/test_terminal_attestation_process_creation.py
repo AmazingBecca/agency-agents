@@ -80,6 +80,45 @@ class TerminalAttestationProcessCreationTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("alternate-process-creation-call", self._kinds(report))
 
+    def test_function_local_process_alias_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    candidate = subprocess.Popen(\n",
+            "    from os import posix_spawn as launch_shadow\n"
+            "    launch_shadow('/bin/true', ['/bin/true'], {})\n"
+            "    candidate = subprocess.Popen(\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn("alternate-process-creation-call", self._kinds(report))
+
+    def test_dotted_import_cannot_poison_os_root_resolution(self) -> None:
+        source = SECURE.replace(
+            "import os\n",
+            "import os\nimport os.path\n",
+        ).replace(
+            "    return_code = candidate.wait()\n",
+            "    shadow = os.fork()\n"
+            "    if shadow == 0:\n"
+            "        os._exit(0)\n"
+            "    return_code = candidate.wait()\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn("alternate-process-creation-call", self._kinds(report))
+
+    def test_assigned_process_primitive_alias_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    return_code = candidate.wait()\n",
+            "    launch_shadow = os.fork\n"
+            "    shadow = launch_shadow()\n"
+            "    if shadow == 0:\n"
+            "        os._exit(0)\n"
+            "    return_code = candidate.wait()\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn("alternate-process-creation-call", self._kinds(report))
+
     def test_computed_getattr_fork_recovery_is_rejected(self) -> None:
         source = SECURE.replace(
             "    return_code = candidate.wait()\n",
@@ -92,6 +131,18 @@ class TerminalAttestationProcessCreationTests(unittest.TestCase):
         report = self._verify(source)
         self.assertFalse(report["passed"])
         self.assertIn("dynamic-process-primitive-recovery", self._kinds(report))
+
+    def test_dynamic_import_process_recovery_is_rejected(self) -> None:
+        source = SECURE.replace(
+            "    return_code = candidate.wait()\n",
+            "    shadow = __import__('o' + 's').fork()\n"
+            "    if shadow == 0:\n"
+            "        os._exit(0)\n"
+            "    return_code = candidate.wait()\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn("alternate-process-creation-call", self._kinds(report))
 
     def test_top_level_helper_cannot_hide_fork(self) -> None:
         source = SECURE.replace(
