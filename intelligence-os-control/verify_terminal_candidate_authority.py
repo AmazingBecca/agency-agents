@@ -11,12 +11,14 @@ import verify_bound_candidate_test_authority as bound
 import verify_completion_secret_boundary as completion
 import verify_detached_descendant_lifecycle as descendant
 import verify_nested_suite_dispatch_authority as nested
+import verify_terminal_attestation_semantics as attestation
 
 _SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
 _AUTHORITY_LEVEL = "diagnostic-bundle-dispatch-bound-not-terminal"
 _NESTED_SCHEMA = "amazingbecca.nested-suite-dispatch-authority.v1"
 _DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
 _COMPLETION_SCHEMA = "amazingbecca.completion-secret-boundary.v1"
+_ATTESTATION_SCHEMA = "amazingbecca.terminal-attestation-semantics.v1"
 _PROMOTION_AUTHORITY_READY = False
 
 
@@ -62,6 +64,34 @@ def _validate_completion_report(report: dict[str, object]) -> None:
         )
     if report.get("finding_count") != 0 or findings:
         raise RuntimeError("completion-secret boundary reported inconsistent findings")
+
+
+def _validate_attestation_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _ATTESTATION_SCHEMA:
+        raise RuntimeError("terminal-attestation semantics schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("terminal-attestation semantics decision is malformed")
+    if not isinstance(report.get("completion_boundary_passed"), bool):
+        raise RuntimeError("terminal-attestation completion boundary state is malformed")
+    if not isinstance(report.get("completion_boundary_finding_count"), int):
+        raise RuntimeError("terminal-attestation completion finding count is malformed")
+    if not isinstance(report.get("candidate_runner_count"), int):
+        raise RuntimeError("terminal-attestation candidate runner count is malformed")
+    if not isinstance(report.get("attestation_finding_count"), int):
+        raise RuntimeError("terminal-attestation finding count is malformed")
+    findings = report.get("attestation_findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("terminal-attestation findings are malformed")
+    if report.get("passed") is not True:
+        raise RuntimeError("runner bundle lacks reviewed external terminal-attestation semantics")
+    if report.get("completion_boundary_passed") is not True:
+        raise RuntimeError("terminal-attestation completion boundary did not pass")
+    if report.get("completion_boundary_finding_count") != 0:
+        raise RuntimeError("terminal-attestation completion boundary reported findings")
+    if report.get("candidate_runner_count") != 1:
+        raise RuntimeError("terminal-attestation candidate runner authority is ambiguous")
+    if report.get("attestation_finding_count") != 0 or findings:
+        raise RuntimeError("terminal-attestation report contains findings despite PASS")
 
 
 def _require_production_sandbox_user(sandbox_user: str) -> str:
@@ -124,8 +154,18 @@ def _verify_terminal_bundle_diagnostic(
     because an intentionally vulnerable runner must never be allowed to signal
     the control verifier itself.
     """
+    attestation_report = attestation.verify(runner_root)
+    _validate_attestation_report(attestation_report)
+
     completion_report = completion.verify(runner_root)
     _validate_completion_report(completion_report)
+    if (
+        attestation_report.get("completion_boundary_passed")
+        != completion_report.get("passed")
+        or attestation_report.get("completion_boundary_finding_count")
+        != completion_report.get("finding_count")
+    ):
+        raise RuntimeError("terminal-attestation and completion-boundary reports disagree")
 
     descendant_report: dict[str, object] | None = None
     if sandbox_user is not None:
@@ -207,6 +247,11 @@ def _verify_terminal_bundle_diagnostic(
     if completion_after != completion_report:
         raise RuntimeError("completion-secret boundary changed during terminal verification")
 
+    attestation_after = attestation.verify(before_bundle.root)
+    _validate_attestation_report(attestation_after)
+    if attestation_after != attestation_report:
+        raise RuntimeError("terminal-attestation semantics changed during terminal verification")
+
     accepted_attacks = sorted(
         set(base_report.get("accepted_attacks", []))
         | set(nested_report.get("accepted_attacks", []))
@@ -229,6 +274,7 @@ def _verify_terminal_bundle_diagnostic(
         bool(base_report["passed"])
         and bool(nested_report["passed"])
         and bool(completion_report["passed"])
+        and bool(attestation_report["passed"])
         and not accepted_attacks
         and not rejected_clean
     )
@@ -250,6 +296,11 @@ def _verify_terminal_bundle_diagnostic(
             "completion_secret_boundary_verified": True,
             "completion_secret_source_file_count": completion_report["source_file_count"],
             "completion_secret_finding_count": completion_report["finding_count"],
+            "terminal_attestation_schema": attestation_report["schema"],
+            "terminal_attestation_authority_level": attestation_report.get("authority_level"),
+            "terminal_attestation_verified": True,
+            "terminal_attestation_candidate_runner_count": attestation_report["candidate_runner_count"],
+            "terminal_attestation_finding_count": attestation_report["attestation_finding_count"],
             "nested_dispatch_schema": nested_report["schema"],
             "nested_dispatch_authority_level": nested_report.get("authority_level"),
             "nested_dispatch_case_count": nested_count,
