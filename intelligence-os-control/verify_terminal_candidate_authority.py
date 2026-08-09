@@ -39,12 +39,17 @@ def _validate_process_creation_report(report: dict[str, object]) -> None:
     findings = report.get("findings")
     if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
         raise RuntimeError("terminal-attestation process-creation findings are malformed")
-    if report.get("passed") is not True:
-        raise RuntimeError("runner bundle exposes alternate process-creation authority")
+
+    # Preserve the stronger, already-published control-flow failure contract when
+    # the process-creation proof is red only because its control-flow prerequisite
+    # is red. This keeps failure provenance stable while still ensuring the new
+    # process-creation proof runs before candidate diagnostics.
     if report.get("control_flow_passed") is not True:
-        raise RuntimeError("terminal-attestation process-creation control-flow prerequisite did not pass")
+        raise RuntimeError("runner bundle lacks reviewed terminal-attestation control flow")
     if report.get("control_flow_finding_count") != 0:
         raise RuntimeError("terminal-attestation process-creation control-flow prerequisite reported findings")
+    if report.get("passed") is not True:
+        raise RuntimeError("runner bundle exposes alternate process-creation authority")
     if report.get("terminal_attestor_count") != 1:
         raise RuntimeError("terminal-attestation process-creation attestor authority is ambiguous")
     if report.get("finding_count") != 0 or findings:
