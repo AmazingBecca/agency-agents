@@ -309,6 +309,38 @@ def _attestation_findings(
     exit_name = _assigned_name(wait_call, attestor)
     exit_names = {exit_name} if exit_name is not None else set()
 
+    challenge_reads = [
+        call
+        for call in calls
+        if _dotted_name(call.func) == "os.read"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "challenge_fd"
+    ]
+    challenge_read_line: int | None = None
+    if len(challenge_reads) != 1:
+        findings.append(
+            _finding(
+                path,
+                attestor.name,
+                attestor.lineno,
+                "terminal-challenge-read-ambiguous",
+                "attestor must materialize the supervisor challenge exactly once",
+            )
+        )
+    else:
+        challenge_read_line = challenge_reads[0].lineno
+        if challenge_read_line <= first_wait:
+            findings.append(
+                _finding(
+                    path,
+                    attestor.name,
+                    challenge_read_line,
+                    "terminal-challenge-live-during-candidate-execution",
+                    "attestor must keep the trusted challenge unread until the candidate process has terminated",
+                )
+            )
+
     receipt_writes = [
         call
         for call in calls
@@ -338,6 +370,16 @@ def _attestation_findings(
                 receipt_write.lineno,
                 "terminal-receipt-before-candidate-completion",
                 "attestor can emit a completion receipt before candidate termination",
+            )
+        )
+    if challenge_read_line is not None and receipt_write.lineno <= challenge_read_line:
+        findings.append(
+            _finding(
+                path,
+                attestor.name,
+                receipt_write.lineno,
+                "terminal-receipt-before-challenge-materialization",
+                "attestor can emit a terminal receipt before reading the reviewed supervisor challenge",
             )
         )
 
