@@ -23,7 +23,71 @@ REPOSITORY = "AmazingBecca/free-millionaire-pipeline"
 CONFORMING_RUNNER = r'''
 from __future__ import annotations
 import argparse
+import os
 import pathlib
+import secrets
+import subprocess
+import sys
+
+
+def _load_worker():
+    raise NotImplementedError
+
+
+def _write_all(fd, payload):
+    os.write(fd, payload)
+
+
+def _read_receipt(fd):
+    return os.read(fd, 32)
+
+
+def _run_worker(project_root, pattern):
+    worker = _load_worker()
+    return worker._run(project_root, pattern)
+
+
+def _read_candidate_observation(candidate):
+    return "verified"
+
+
+def _verify_candidate_semantics(observation):
+    if observation != "verified":
+        raise RuntimeError("candidate semantic observation rejected")
+
+
+def _run_attestor(project_root, pattern, challenge_fd, receipt_fd):
+    candidate = subprocess.Popen(
+        [sys.executable, "-I", __file__, "--worker"],
+        close_fds=True,
+    )
+    return_code = candidate.wait()
+    if return_code != 0:
+        return return_code
+    observation = _read_candidate_observation(candidate)
+    _verify_candidate_semantics(observation)
+    token = os.read(challenge_fd, 32)
+    os.close(challenge_fd)
+    _write_all(receipt_fd, token)
+    os.close(receipt_fd)
+    return 0
+
+
+def _verify_terminal_observation(receipt_fd, token):
+    receipt = _read_receipt(receipt_fd)
+    if not secrets.compare_digest(receipt, token):
+        raise RuntimeError("invalid terminal receipt")
+
+
+def _supervise(project_root, pattern):
+    token = secrets.token_bytes(32)
+    child = subprocess.Popen([sys.executable, "-I", __file__, "--attestor"])
+    return_code = child.wait()
+    if return_code != 0:
+        return return_code
+    _verify_terminal_observation(1, token)
+    return 0
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--project-root', type=pathlib.Path, required=True)
@@ -106,6 +170,9 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         self.assertEqual(terminal_report["rejected_clean"], [])
         self.assertEqual(terminal_report["nested_dispatch_case_count"], 6)
         self.assertEqual(terminal_report["terminal_total_case_count"], 25)
+        self.assertTrue(terminal_report["terminal_attestation_verified"])
+        self.assertEqual(terminal_report["terminal_attestation_candidate_runner_count"], 1)
+        self.assertEqual(terminal_report["terminal_attestation_finding_count"], 0)
         self.assertEqual(
             terminal_report["terminal_schema"],
             "amazingbecca.terminal-candidate-authority.v1",
@@ -135,6 +202,7 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         self.assertEqual(terminal_report["rejected_clean"], [])
         self.assertEqual(terminal_report["nested_dispatch_case_count"], 6)
         self.assertEqual(terminal_report["terminal_total_case_count"], 25)
+        self.assertTrue(terminal_report["terminal_attestation_verified"])
 
     def test_unsandboxed_diagnostic_can_never_return_authoritative_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -151,7 +219,48 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         self.assertEqual(report["rejected_clean"], [])
         self.assertEqual(report["nested_dispatch_case_count"], 6)
         self.assertEqual(report["terminal_total_case_count"], 25)
+        self.assertTrue(report["terminal_attestation_verified"])
+        self.assertEqual(
+            report["terminal_attestation_schema"],
+            "amazingbecca.terminal-attestation-semantics.v1",
+        )
+        self.assertEqual(report["terminal_attestation_candidate_runner_count"], 1)
+        self.assertEqual(report["terminal_attestation_finding_count"], 0)
         self.assertTrue(all(case["passed"] for case in report["nested_dispatch_cases"]))
+
+    def test_terminal_composite_fails_closed_without_reviewed_attestor_topology(self) -> None:
+        runner_source = """
+import argparse
+import pathlib
+parser = argparse.ArgumentParser()
+parser.add_argument('--project-root', type=pathlib.Path, required=True)
+parser.add_argument('--pattern')
+args = parser.parse_args()
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), runner_source)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "lacks reviewed external terminal-attestation semantics",
+            ):
+                self._verify_diagnostic(bundle, runner)
+
+    def test_terminal_composite_rejects_preexit_challenge_residency(self) -> None:
+        insecure = CONFORMING_RUNNER.replace(
+            "    candidate = subprocess.Popen(\n",
+            "    token = os.read(challenge_fd, 32)\n    candidate = subprocess.Popen(\n",
+        ).replace(
+            "    token = os.read(challenge_fd, 32)\n    os.close(challenge_fd)\n    _write_all(receipt_fd, token)",
+            "    os.close(challenge_fd)\n    _write_all(receipt_fd, token)",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), insecure)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "lacks reviewed external terminal-attestation semantics",
+            ):
+                self._verify_diagnostic(bundle, runner)
 
     def test_public_terminal_api_rejects_missing_blank_root_and_same_principal_before_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
