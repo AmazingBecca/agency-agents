@@ -13,10 +13,10 @@ _SCHEMA = "amazingbecca.terminal-attestation-process-creation.v1"
 _ATTESTOR_NAME = "_run_attestor"
 _WORKER_FLAG = "--worker"
 
-# The reviewed attestor may launch exactly one candidate through an explicit
-# subprocess.Popen call. Alternate process creation/replacement APIs are not part
-# of this authority profile because they can create an unreviewed candidate or
-# survivor path outside the canonical wait/readiness/challenge/receipt sequence.
+# The reviewed attestor may launch exactly one candidate through one explicit
+# subprocess.Popen call. Every other process-creation/replacement surface is
+# outside this authority profile because it can create an unreviewed candidate
+# or survivor path outside wait -> readiness -> challenge -> receipt.
 _FORBIDDEN_PROCESS_PRIMITIVES = frozenset(
     {
         "asyncio.create_subprocess_exec",
@@ -24,14 +24,14 @@ _FORBIDDEN_PROCESS_PRIMITIVES = frozenset(
         "concurrent.futures.ProcessPoolExecutor",
         "multiprocessing.Process",
         "multiprocessing.Pool",
-        "os.execv",
-        "os.execve",
-        "os.execvp",
-        "os.execvpe",
         "os.execl",
         "os.execle",
         "os.execlp",
         "os.execlpe",
+        "os.execv",
+        "os.execve",
+        "os.execvp",
+        "os.execvpe",
         "os.fork",
         "os.forkpty",
         "os.popen",
@@ -53,7 +53,7 @@ _FORBIDDEN_PROCESS_PRIMITIVES = frozenset(
         "subprocess.run",
     }
 )
-_DYNAMIC_PROCESS_ROOTS = frozenset(
+_PROCESS_MODULES = frozenset(
     {
         "asyncio",
         "concurrent.futures",
@@ -63,7 +63,7 @@ _DYNAMIC_PROCESS_ROOTS = frozenset(
         "subprocess",
     }
 )
-_DYNAMIC_PROCESS_ATTRIBUTES = frozenset(
+_PROCESS_ATTRIBUTES = frozenset(
     name.rsplit(".", 1)[-1] for name in _FORBIDDEN_PROCESS_PRIMITIVES
 ) | frozenset({"Popen"})
 _NATIVE_ESCAPE_ROOTS = frozenset({"ctypes", "cffi", "ffi", "libc"})
@@ -85,30 +85,6 @@ def _dotted_name(node: ast.AST) -> str | None:
         prefix = _dotted_name(node.value)
         return f"{prefix}.{node.attr}" if prefix else node.attr
     return None
-
-
-def _import_aliases(tree: ast.Module) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for item in node.names:
-                local = item.asname or item.name.split(".", 1)[0]
-                aliases[local] = item.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for item in node.names:
-                if item.name == "*":
-                    continue
-                local = item.asname or item.name
-                aliases[local] = f"{node.module}.{item.name}"
-    return aliases
-
-
-def _resolve_alias(name: str | None, aliases: dict[str, str]) -> str | None:
-    if not name:
-        return None
-    first, separator, rest = name.partition(".")
-    resolved = aliases.get(first, first)
-    return resolved + (separator + rest if separator else "")
 
 
 def _constant_string(node: ast.AST) -> str | None:
@@ -149,16 +125,125 @@ def _finding(path: str, function: str, line: int, kind: str, detail: str) -> Fin
     return Finding(path=path, function=function, line=line, kind=kind, detail=detail)
 
 
-def _getattr_process_primitive(call: ast.Call, aliases: dict[str, str]) -> str | None:
-    if _dotted_name(call.func) not in {"getattr", "builtins.getattr"}:
+def _bind_import(aliases: dict[str, str], item: ast.alias, module: str | None) -> None:
+    if module is None:
+        if item.asname:
+            aliases[item.asname] = item.name
+        else:
+            # ``import a.b`` binds ``a``, not ``a.b``. Mapping the root to the
+            # complete dotted import would turn a later ``a.fork`` into the
+            # fictitious ``a.b.fork`` and create an alias-poisoning escape.
+            root = item.name.split(".", 1)[0]
+            aliases[root] = root
+        return
+    if item.name == "*":
+        return
+    aliases[item.asname or item.name] = f"{module}.{item.name}"
+
+
+def _scope_import_aliases(tree: ast.Module, function: ast.FunctionDef) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                _bind_import(aliases, item, None)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for item in node.names:
+                _bind_import(aliases, item, node.module)
+
+    # Function-local imports are legitimate Python authority and must not evade
+    # review merely because they are not module-level imports.
+    for node in ast.walk(function):
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                _bind_import(aliases, item, None)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for item in node.names:
+                _bind_import(aliases, item, node.module)
+    return aliases
+
+
+def _resolve_alias(name: str | None, aliases: dict[str, str]) -> str | None:
+    if not name:
         return None
-    if len(call.args) < 2:
+    seen: set[str] = set()
+    current = name
+    while True:
+        first, separator, rest = current.partition(".")
+        replacement = aliases.get(first)
+        if replacement is None or replacement == first or first in seen:
+            return current
+        seen.add(first)
+        current = replacement + (separator + rest if separator else "")
+
+
+def _dynamic_module(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    if not isinstance(node, ast.Call):
         return None
-    root = _resolve_alias(_dotted_name(call.args[0]), aliases)
-    attribute = _constant_string(call.args[1])
-    if root not in _DYNAMIC_PROCESS_ROOTS or attribute not in _DYNAMIC_PROCESS_ATTRIBUTES:
-        return None
-    return f"{root}.{attribute}"
+    call_name = _resolve_alias(_dotted_name(node.func), aliases)
+    if call_name in {"__import__", "builtins.__import__", "importlib.import_module"}:
+        if not node.args:
+            return None
+        module = _constant_string(node.args[0])
+        if module in _PROCESS_MODULES:
+            return module
+    return None
+
+
+def _primitive_expression(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    dotted = _resolve_alias(_dotted_name(node), aliases)
+    if dotted in _FORBIDDEN_PROCESS_PRIMITIVES or dotted == "subprocess.Popen":
+        return dotted
+
+    if isinstance(node, ast.Attribute):
+        module = _dynamic_module(node.value, aliases)
+        if module is not None and node.attr in _PROCESS_ATTRIBUTES:
+            return f"{module}.{node.attr}"
+
+    if isinstance(node, ast.Call):
+        call_name = _resolve_alias(_dotted_name(node.func), aliases)
+        if call_name in {"getattr", "builtins.getattr"} and len(node.args) >= 2:
+            attribute = _constant_string(node.args[1])
+            root = _resolve_alias(_dotted_name(node.args[0]), aliases)
+            if root in _PROCESS_MODULES and attribute in _PROCESS_ATTRIBUTES:
+                return f"{root}.{attribute}"
+            module = _dynamic_module(node.args[0], aliases)
+            if module is not None and attribute in _PROCESS_ATTRIBUTES:
+                return f"{module}.{attribute}"
+    return None
+
+
+def _propagate_primitive_aliases(
+    function: ast.FunctionDef, aliases: dict[str, str]
+) -> dict[str, str]:
+    result = dict(aliases)
+    assignments: list[tuple[ast.Name, ast.AST]] = []
+    for node in ast.walk(function):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            assignments.append((node.targets[0], node.value))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            assignments.append((node.target, node.value))
+
+    changed = True
+    while changed:
+        changed = False
+        for target, value in assignments:
+            primitive = _primitive_expression(value, result)
+            if primitive is not None and result.get(target.id) != primitive:
+                result[target.id] = primitive
+                changed = True
+                continue
+            value_name = _resolve_alias(_dotted_name(value), result)
+            if value_name in _PROCESS_MODULES and result.get(target.id) != value_name:
+                result[target.id] = value_name
+                changed = True
+            dynamic_module = _dynamic_module(value, result)
+            if dynamic_module is not None and result.get(target.id) != dynamic_module:
+                result[target.id] = dynamic_module
+                changed = True
+    return result
 
 
 def _referenced_local_helpers(
@@ -195,103 +280,91 @@ def _reachable_functions(
 
 
 def _inspect_process_surface(
+    tree: ast.Module,
     function: ast.FunctionDef,
     path: str,
-    aliases: dict[str, str],
     *,
     attestor: bool,
 ) -> list[Finding]:
     findings: list[Finding] = []
+    aliases = _propagate_primitive_aliases(
+        function, _scope_import_aliases(tree, function)
+    )
     canonical_popen: list[ast.Call] = []
 
     for node in ast.walk(function):
-        if isinstance(node, ast.Attribute):
-            resolved = _resolve_alias(_dotted_name(node), aliases)
-            if resolved in _FORBIDDEN_PROCESS_PRIMITIVES:
+        if isinstance(node, ast.Call):
+            primitive = _primitive_expression(node.func, aliases)
+            if primitive is None:
+                # ``getattr(os, 'fork')`` and ``__import__('os').fork`` are
+                # themselves authority-recovery expressions even if a later
+                # alias invokes them.
+                primitive = _primitive_expression(node, aliases)
+            raw_name = _dotted_name(node.func)
+
+            if primitive in _FORBIDDEN_PROCESS_PRIMITIVES:
                 findings.append(
                     _finding(
                         path,
                         function.name,
                         node.lineno,
-                        "alternate-process-primitive-referenced",
-                        f"unreviewed process primitive is reachable from attestor authority: {resolved}",
+                        "alternate-process-creation-call",
+                        f"attestor authority reaches forbidden process primitive: {primitive}",
                     )
                 )
+            elif primitive == "subprocess.Popen":
+                if not attestor:
+                    findings.append(
+                        _finding(
+                            path,
+                            function.name,
+                            node.lineno,
+                            "candidate-process-launch-hidden-in-helper",
+                            "reachable helper must not create a process; only _run_attestor may launch the candidate",
+                        )
+                    )
+                elif raw_name != "subprocess.Popen":
+                    findings.append(
+                        _finding(
+                            path,
+                            function.name,
+                            node.lineno,
+                            "candidate-process-launch-aliased",
+                            "candidate launch must use explicit subprocess.Popen rather than an imported, assigned, or dynamically recovered alias",
+                        )
+                    )
+                else:
+                    canonical_popen.append(node)
+
+            dynamic_primitive = _primitive_expression(node, aliases)
+            if (
+                dynamic_primitive is not None
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"getattr", "__import__"}
+            ):
+                findings.append(
+                    _finding(
+                        path,
+                        function.name,
+                        node.lineno,
+                        "dynamic-process-primitive-recovery",
+                        f"attestor recovers process authority dynamically: {dynamic_primitive}",
+                    )
+                )
+
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            resolved = _resolve_alias(_dotted_name(node), aliases)
             root = resolved.split(".", 1)[0] if resolved else None
             if root in _NATIVE_ESCAPE_ROOTS:
                 findings.append(
                     _finding(
                         path,
                         function.name,
-                        node.lineno,
+                        getattr(node, "lineno", function.lineno),
                         "native-process-escape-surface-referenced",
                         f"native process-control surface is reachable from attestor authority: {resolved}",
                     )
                 )
-
-        if not isinstance(node, ast.Call):
-            continue
-        raw_name = _dotted_name(node.func)
-        resolved = _resolve_alias(raw_name, aliases)
-
-        dynamic = _getattr_process_primitive(node, aliases)
-        if dynamic is not None:
-            findings.append(
-                _finding(
-                    path,
-                    function.name,
-                    node.lineno,
-                    "dynamic-process-primitive-recovery",
-                    f"attestor recovers process authority dynamically through getattr: {dynamic}",
-                )
-            )
-
-        if resolved in _FORBIDDEN_PROCESS_PRIMITIVES:
-            findings.append(
-                _finding(
-                    path,
-                    function.name,
-                    node.lineno,
-                    "alternate-process-creation-call",
-                    f"attestor authority reaches forbidden process primitive: {resolved}",
-                )
-            )
-
-        if resolved == "subprocess.Popen":
-            if not attestor:
-                findings.append(
-                    _finding(
-                        path,
-                        function.name,
-                        node.lineno,
-                        "candidate-process-launch-hidden-in-helper",
-                        "reachable helper must not create another process; only _run_attestor may launch the candidate",
-                    )
-                )
-            elif raw_name != "subprocess.Popen":
-                findings.append(
-                    _finding(
-                        path,
-                        function.name,
-                        node.lineno,
-                        "candidate-process-launch-aliased",
-                        "candidate launch must use explicit subprocess.Popen rather than an imported or rebound alias",
-                    )
-                )
-            else:
-                canonical_popen.append(node)
-
-        root = resolved.split(".", 1)[0] if resolved else None
-        if root in _NATIVE_ESCAPE_ROOTS:
-            findings.append(
-                _finding(
-                    path,
-                    function.name,
-                    node.lineno,
-                    "native-process-escape-call",
-                    f"native process-control recovery is outside the reviewed attestor profile: {resolved}",
-                )
-            )
 
     if attestor:
         worker_launches = [
@@ -325,8 +398,7 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
         except (SyntaxError, ValueError, TypeError) as exc:
             raise RuntimeError(f"runner source cannot be parsed: {source}") from exc
         functions = _top_level_functions(tree)
-        definitions = functions.get(_ATTESTOR_NAME, [])
-        for definition in definitions:
+        for definition in functions.get(_ATTESTOR_NAME, []):
             attestors.append((relative, tree, definition))
 
     if len(attestors) != 1:
@@ -341,14 +413,13 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
         )
     else:
         relative, tree, attestor = attestors[0]
-        aliases = _import_aliases(tree)
         functions = _top_level_functions(tree)
         for function in _reachable_functions(attestor, functions):
             findings.extend(
                 _inspect_process_surface(
+                    tree,
                     function,
                     relative,
-                    aliases,
                     attestor=function is attestor,
                 )
             )
