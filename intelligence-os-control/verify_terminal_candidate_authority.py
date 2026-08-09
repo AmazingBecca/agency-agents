@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 
@@ -40,7 +41,21 @@ def _validate_descendant_report(report: dict[str, object]) -> None:
         raise RuntimeError("detached-descendant authority did not prove namespace teardown")
 
 
-def verify_terminal_bundle(
+def _require_production_sandbox_user(sandbox_user: str) -> str:
+    if not isinstance(sandbox_user, str) or not sandbox_user:
+        raise RuntimeError("terminal candidate authority requires an explicit sandbox user")
+    if sandbox_user.strip() != sandbox_user:
+        raise RuntimeError("terminal candidate authority sandbox user must be canonical")
+
+    identity = bound.boundary.resolve_identity(sandbox_user)
+    if identity.uid == 0:
+        raise RuntimeError("terminal candidate authority sandbox user must be non-root")
+    if identity.uid == os.geteuid():
+        raise RuntimeError("terminal candidate authority sandbox user must be distinct from the verifier principal")
+    return sandbox_user
+
+
+def _verify_terminal_bundle_diagnostic(
     *,
     runner_root: pathlib.Path,
     entrypoint: str,
@@ -53,8 +68,14 @@ def verify_terminal_bundle(
     base_sha: str,
     merge_sha: str,
     timeout_seconds: int = 20,
-    sandbox_user: str | None = "nobody",
+    sandbox_user: str | None = None,
 ) -> dict[str, object]:
+    """Internal diagnostic composition helper.
+
+    An unsandboxed call is intentionally incapable of returning an authoritative
+    PASS. Tests may use it to exercise the semantic attack matrix without Linux
+    namespace privileges, but production callers must use verify_terminal_bundle.
+    """
     descendant_report: dict[str, object] | None = None
     if sandbox_user is not None:
         descendant_report = descendant.verify_detached_descendant_lifecycle(
@@ -138,7 +159,14 @@ def verify_terminal_bundle(
     if not isinstance(base_total, int):
         raise RuntimeError("authenticated bundle case count is malformed")
     nested_count = int(nested_report["case_count"])
-    descendant_passed = descendant_report is None or descendant_report.get("passed") is True
+    descendant_passed = descendant_report is not None and descendant_report.get("passed") is True
+    diagnostic_passed = (
+        bool(base_report["passed"])
+        and bool(nested_report["passed"])
+        and not accepted_attacks
+        and not rejected_clean
+    )
+    sandbox_authority_enforced = sandbox_user is not None
 
     report = dict(base_report)
     report.update(
@@ -155,16 +183,46 @@ def verify_terminal_bundle(
             ),
             "detached_descendant_verified": descendant_report is not None,
             "detached_descendant_report": descendant_report,
+            "sandbox_authority_enforced": sandbox_authority_enforced,
+            "diagnostic_passed": diagnostic_passed,
             "accepted_attacks": accepted_attacks,
             "rejected_clean": rejected_clean,
-            "passed": bool(base_report["passed"])
-            and bool(nested_report["passed"])
-            and descendant_passed
-            and not accepted_attacks
-            and not rejected_clean,
+            "passed": diagnostic_passed and sandbox_authority_enforced and descendant_passed,
         }
     )
     return report
+
+
+def verify_terminal_bundle(
+    *,
+    runner_root: pathlib.Path,
+    entrypoint: str,
+    python_executable: pathlib.Path,
+    expected_python_sha256: str,
+    expected_runner_sha256: str,
+    expected_bundle_sha256: str,
+    repository: str,
+    head_sha: str,
+    base_sha: str,
+    merge_sha: str,
+    timeout_seconds: int = 20,
+    sandbox_user: str = "nobody",
+) -> dict[str, object]:
+    sandbox_user = _require_production_sandbox_user(sandbox_user)
+    return _verify_terminal_bundle_diagnostic(
+        runner_root=runner_root,
+        entrypoint=entrypoint,
+        python_executable=python_executable,
+        expected_python_sha256=expected_python_sha256,
+        expected_runner_sha256=expected_runner_sha256,
+        expected_bundle_sha256=expected_bundle_sha256,
+        repository=repository,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        merge_sha=merge_sha,
+        timeout_seconds=timeout_seconds,
+        sandbox_user=sandbox_user,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -196,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             base_sha=args.base_sha,
             merge_sha=args.merge_sha,
             timeout_seconds=args.timeout_seconds,
-            sandbox_user=args.sandbox_user or None,
+            sandbox_user=args.sandbox_user,
         )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
