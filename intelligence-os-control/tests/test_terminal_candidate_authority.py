@@ -145,6 +145,8 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         self.assertTrue(report["diagnostic_passed"])
         self.assertFalse(report["sandbox_authority_enforced"])
         self.assertFalse(report["detached_descendant_verified"])
+        self.assertFalse(report["promotion_authority_ready"])
+        self.assertFalse(report["promotion_authorized"])
         self.assertEqual(report["accepted_attacks"], [])
         self.assertEqual(report["rejected_clean"], [])
         self.assertEqual(report["nested_dispatch_case_count"], 6)
@@ -179,19 +181,28 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory), CONFORMING_RUNNER)
             arguments = self._arguments(bundle, runner)
-            expected = {"passed": True}
+            diagnostic_report = {
+                "terminal_schema": "amazingbecca.terminal-candidate-authority.v1",
+                "authority_level": "diagnostic-bundle-dispatch-bound-not-terminal",
+                "diagnostic_passed": True,
+                "passed": True,
+            }
             fake_identity = types.SimpleNamespace(uid=os.geteuid() + 10000, gid=os.getegid() + 10000)
 
             with (
                 patch.object(subject.bound.boundary, "resolve_identity", return_value=fake_identity) as resolver,
-                patch.object(subject, "_verify_terminal_bundle_diagnostic", return_value=expected) as diagnostic,
+                patch.object(subject, "_verify_terminal_bundle_diagnostic", return_value=diagnostic_report) as diagnostic,
             ):
                 report = subject.verify_terminal_bundle(
                     **arguments,
                     sandbox_user="candidate-sandbox",
                 )
 
-        self.assertIs(report, expected)
+        self.assertIsNot(report, diagnostic_report)
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["promotion_authority_ready"])
+        self.assertFalse(report["promotion_authorized"])
+        self.assertTrue(diagnostic_report["passed"])
         resolver.assert_called_once_with("candidate-sandbox")
         self.assertEqual(diagnostic.call_args.kwargs["sandbox_user"], "candidate-sandbox")
 
