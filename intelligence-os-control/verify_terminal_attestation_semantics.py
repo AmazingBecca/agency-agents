@@ -42,20 +42,24 @@ def _terminal_name(node: ast.AST) -> str | None:
     return dotted.rsplit(".", 1)[-1] if dotted else None
 
 
-def _top_level_functions(
+def _top_level_definitions(
+    tree: ast.Module,
+) -> dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]]:
+    definitions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            definitions.setdefault(node.name, []).append(node)
+    return definitions
+
+
+def _unique_top_level_functions(
     tree: ast.Module,
 ) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
-    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-    duplicates: set[str] = set()
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name in functions:
-            duplicates.add(node.name)
-        functions[node.name] = node
-    for name in duplicates:
-        functions.pop(name, None)
-    return functions
+    return {
+        name: definitions[0]
+        for name, definitions in _top_level_definitions(tree).items()
+        if len(definitions) == 1
+    }
 
 
 def _calls(
@@ -109,17 +113,6 @@ def _names(node: ast.AST) -> set[str]:
     return {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
 
 
-def _candidate_importing_worker(
-    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
-) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
-    worker = functions.get(_CANDIDATE_WORKER_NAME)
-    if worker is None:
-        return None
-    if any(_dotted_name(call.func) == "_load_worker" for call in _calls(worker)):
-        return worker
-    return None
-
-
 def _finding(
     path: str,
     function: str,
@@ -136,13 +129,80 @@ def _finding(
     )
 
 
-def _attestation_findings(tree: ast.Module, path: str) -> list[Finding]:
-    functions = _top_level_functions(tree)
-    worker = _candidate_importing_worker(functions)
-    if worker is None:
-        return []
+def _direct_candidate_loader(
+    worker: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    return any(_dotted_name(call.func) == "_load_worker" for call in _calls(worker))
 
+
+def _semantic_verifier_findings(
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    path: str,
+    semantic_names: set[str],
+) -> list[Finding]:
     findings: list[Finding] = []
+    for name in sorted(semantic_names):
+        verifier = functions.get(name)
+        if verifier is None:
+            findings.append(
+                _finding(
+                    path,
+                    name,
+                    0,
+                    "semantic-verifier-definition-missing",
+                    "attestor references a semantic verifier without one unique top-level definition",
+                )
+            )
+            continue
+        calls = _calls(verifier)
+        if any(_dotted_name(call.func) == "_load_worker" for call in calls):
+            findings.append(
+                _finding(
+                    path,
+                    name,
+                    verifier.lineno,
+                    "semantic-verifier-imports-candidate",
+                    "semantic verifier must not import candidate worker source",
+                )
+            )
+        if any(
+            _terminal_name(call.func) in {"run", "_run", "run_tests", "execute", "execute_tests"}
+            for call in calls
+        ):
+            findings.append(
+                _finding(
+                    path,
+                    name,
+                    verifier.lineno,
+                    "semantic-verifier-executes-candidate",
+                    "semantic verifier must not execute candidate-controlled test code",
+                )
+            )
+        if any(
+            isinstance(node, (ast.Name, ast.Attribute))
+            and (_dotted_name(node) or "").startswith("unittest")
+            for node in ast.walk(verifier)
+        ):
+            findings.append(
+                _finding(
+                    path,
+                    name,
+                    verifier.lineno,
+                    "semantic-verifier-derives-from-live-unittest-state",
+                    "semantic verifier must not derive terminal authority from live unittest state",
+                )
+            )
+    return findings
+
+
+def _attestation_findings(
+    tree: ast.Module,
+    path: str,
+    worker: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[Finding]:
+    functions = _unique_top_level_functions(tree)
+    findings: list[Finding] = []
+
     attestor = functions.get(_ATTESTOR_NAME)
     if attestor is None:
         findings.append(
@@ -188,6 +248,18 @@ def _attestation_findings(tree: ast.Module, path: str) -> list[Finding]:
         return findings
 
     launch = candidate_launches[0]
+    candidate_name = _assigned_name(launch, attestor)
+    if candidate_name is None:
+        findings.append(
+            _finding(
+                path,
+                attestor.name,
+                launch.lineno,
+                "candidate-process-identity-unbound",
+                "attestor must bind the launched candidate process to one local authority name",
+            )
+        )
+
     close_fds = _keyword(launch, "close_fds")
     if close_fds is None or not (
         isinstance(close_fds.value, ast.Constant) and close_fds.value.value is True
@@ -218,28 +290,24 @@ def _attestation_findings(tree: ast.Module, path: str) -> list[Finding]:
     wait_calls = [
         call
         for call in calls
-        if _terminal_name(call.func) == "wait"
-        and isinstance(call.func, ast.Attribute)
+        if candidate_name is not None
+        and _dotted_name(call.func) == f"{candidate_name}.wait"
     ]
-    wait_lines = sorted(call.lineno for call in wait_calls)
-    if not wait_lines:
+    if len(wait_calls) != 1:
         findings.append(
             _finding(
                 path,
                 attestor.name,
                 attestor.lineno,
-                "candidate-completion-wait-missing",
-                "attestor does not wait for candidate process termination",
+                "candidate-completion-wait-ambiguous",
+                "attestor must wait exactly once on the specific candidate process it launched",
             )
         )
         return findings
-    first_wait = wait_lines[0]
-
-    exit_names = {
-        name
-        for call in wait_calls
-        if (name := _assigned_name(call, attestor)) is not None
-    }
+    wait_call = wait_calls[0]
+    first_wait = wait_call.lineno
+    exit_name = _assigned_name(wait_call, attestor)
+    exit_names = {exit_name} if exit_name is not None else set()
 
     receipt_writes = [
         call
@@ -279,6 +347,11 @@ def _attestation_findings(tree: ast.Module, path: str) -> list[Finding]:
         if _terminal_name(call.func) in _SEMANTIC_VERIFIER_NAMES
         and first_wait < call.lineno < receipt_write.lineno
     ]
+    semantic_names = {
+        name
+        for call in semantic_calls
+        if (name := _terminal_name(call.func)) is not None
+    }
     if not semantic_calls:
         findings.append(
             _finding(
@@ -295,7 +368,7 @@ def _attestation_findings(tree: ast.Module, path: str) -> list[Finding]:
                 *(_names(argument) for argument in semantic_call.args),
                 *(_names(keyword.value) for keyword in semantic_call.keywords),
             )
-            if referenced and referenced.issubset(exit_names):
+            if referenced and exit_names and referenced.issubset(exit_names):
                 findings.append(
                     _finding(
                         path,
@@ -305,6 +378,7 @@ def _attestation_findings(tree: ast.Module, path: str) -> list[Finding]:
                         "semantic verifier receives only candidate-controlled process-exit state",
                     )
                 )
+        findings.extend(_semantic_verifier_findings(functions, path, semantic_names))
 
     return findings
 
@@ -313,7 +387,9 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
     root = runner_root.resolve(strict=True)
     base_report = completion_boundary.verify(root)
     findings: list[Finding] = []
+    candidate_runners: list[tuple[str, int]] = []
     files = completion_boundary._source_files(root)
+
     for source in files:
         raw = completion_boundary._read_regular(source)
         try:
@@ -323,7 +399,58 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
                 f"runner source cannot be parsed for terminal-attestation review: {source}"
             ) from exc
         relative = source.relative_to(root).as_posix()
-        findings.extend(_attestation_findings(tree, relative))
+        definitions = _top_level_definitions(tree)
+        worker_definitions = definitions.get(_CANDIDATE_WORKER_NAME, [])
+        if len(worker_definitions) > 1:
+            findings.append(
+                _finding(
+                    relative,
+                    _CANDIDATE_WORKER_NAME,
+                    worker_definitions[0].lineno,
+                    "candidate-worker-definition-ambiguous",
+                    "candidate runner contains multiple top-level _run_worker definitions",
+                )
+            )
+            continue
+        if not worker_definitions:
+            continue
+
+        worker = worker_definitions[0]
+        if not _direct_candidate_loader(worker):
+            findings.append(
+                _finding(
+                    relative,
+                    _CANDIDATE_WORKER_NAME,
+                    worker.lineno,
+                    "candidate-worker-loader-topology-unreviewed",
+                    "_run_worker exists but does not directly invoke the reviewed _load_worker candidate loader",
+                )
+            )
+            continue
+
+        candidate_runners.append((relative, worker.lineno))
+        findings.extend(_attestation_findings(tree, relative, worker))
+
+    if not candidate_runners:
+        findings.append(
+            _finding(
+                "<bundle>",
+                _CANDIDATE_WORKER_NAME,
+                0,
+                "candidate-runner-missing",
+                "runner bundle contains no uniquely reviewable candidate-importing _run_worker topology",
+            )
+        )
+    elif len(candidate_runners) != 1:
+        findings.append(
+            _finding(
+                "<bundle>",
+                _CANDIDATE_WORKER_NAME,
+                0,
+                "candidate-runner-authority-ambiguous",
+                "runner bundle contains more than one candidate-importing _run_worker authority",
+            )
+        )
 
     rendered = [
         asdict(item)
@@ -339,9 +466,14 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
         "completion_boundary_finding_count": int(
             base_report.get("finding_count", 0)
         ),
+        "candidate_runner_count": len(candidate_runners),
         "attestation_finding_count": len(rendered),
         "attestation_findings": rendered,
-        "passed": bool(base_report.get("passed")) and not rendered,
+        "passed": (
+            bool(base_report.get("passed"))
+            and len(candidate_runners) == 1
+            and not rendered
+        ),
     }
 
 
