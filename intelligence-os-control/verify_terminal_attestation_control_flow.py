@@ -139,6 +139,67 @@ def _nested_scope_calls(function: ast.FunctionDef) -> list[ast.Call]:
     return nested
 
 
+def _bound_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: set[str] = set()
+        for item in node.elts:
+            names.update(_bound_names(item))
+        return names
+    return set()
+
+
+def _descriptor_tainted_names(function: ast.FunctionDef) -> set[str]:
+    """Conservatively propagate trusted-descriptor aliases in the attestor scope."""
+    tainted = set(_AUTHORITY_DESCRIPTORS)
+    assignments: list[tuple[set[str], ast.AST]] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is function:
+                for statement in node.body:
+                    self.visit(statement)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            targets: set[str] = set()
+            for target in node.targets:
+                targets.update(_bound_names(target))
+            if targets:
+                assignments.append((targets, node.value))
+            self.generic_visit(node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            targets = _bound_names(node.target)
+            if targets and node.value is not None:
+                assignments.append((targets, node.value))
+                self.visit(node.value)
+
+        def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+            targets = _bound_names(node.target)
+            if targets:
+                assignments.append((targets, node.value))
+            self.visit(node.value)
+
+    Visitor().visit(function)
+    changed = True
+    while changed:
+        changed = False
+        for targets, value in assignments:
+            if _names(value).intersection(tainted):
+                for target in targets:
+                    if target not in tainted:
+                        tainted.add(target)
+                        changed = True
+    return tainted
+
+
 def _finding(path: str, function: str, line: int, kind: str, detail: str) -> Finding:
     return Finding(path=path, function=function, line=line, kind=kind, detail=detail)
 
@@ -160,11 +221,12 @@ def _source_files(root: pathlib.Path) -> tuple[pathlib.Path, ...]:
 def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
     findings: list[Finding] = []
     direct = _direct_calls(function)
+    descriptor_taint = _descriptor_tainted_names(function)
 
     nested_sensitive = [
         call for call in _nested_scope_calls(function)
         if _terminal_name(call.func) in _AUTHORITY_TERMINALS
-        or bool(_names(call).intersection(_AUTHORITY_DESCRIPTORS))
+        or bool(_names(call).intersection(descriptor_taint))
     ]
     for call in nested_sensitive:
         findings.append(_finding(
@@ -204,12 +266,14 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
             "candidate-descriptor-closure-not-enforced",
             "candidate launch must use close_fds=True",
         ))
-    pass_fds = _keyword(launch, "pass_fds")
-    if pass_fds is not None and _names(pass_fds.value).intersection(_AUTHORITY_DESCRIPTORS):
+
+    launch_taint = sorted(_names(launch).intersection(descriptor_taint))
+    if launch_taint:
         findings.append(_finding(
             path, function.name, launch.lineno,
             "attestor-authority-descriptor-leaked-to-candidate",
-            "candidate launch must not inherit challenge, receipt, or readiness descriptors",
+            "candidate launch must not reference challenge, receipt, readiness descriptors or any aliases derived from them: "
+            + ",".join(launch_taint),
         ))
 
     waits = [
@@ -316,14 +380,14 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
         if id(call) in canonical_call_ids:
             continue
         terminal = _terminal_name(call.func)
-        descriptor_use = sorted(_names(call).intersection(_AUTHORITY_DESCRIPTORS))
+        descriptor_use = sorted(_names(call).intersection(descriptor_taint))
         if terminal in _AUTHORITY_TERMINALS or descriptor_use:
             detail = (
                 "attestor authority must have exactly one canonical top-level path; "
                 f"unexpected call={_dotted_name(call.func) or terminal or '<dynamic>'}"
             )
             if descriptor_use:
-                detail += f" trusted_descriptors={','.join(descriptor_use)}"
+                detail += f" trusted_descriptor_taint={','.join(descriptor_use)}"
             findings.append(_finding(
                 path,
                 function.name,
