@@ -56,7 +56,7 @@ def _verify_candidate_semantics(observation):
         raise RuntimeError("candidate semantic observation rejected")
 
 
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd):
+def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
     candidate = subprocess.Popen(
         [sys.executable, "-I", __file__, "--worker"],
         close_fds=True,
@@ -64,12 +64,11 @@ def _run_attestor(project_root, pattern, challenge_fd, receipt_fd):
     return_code = candidate.wait()
     if return_code != 0:
         return return_code
+    _write_all(ready_fd, b"candidate-exited\n")
     observation = _read_candidate_observation(candidate)
     _verify_candidate_semantics(observation)
     token = os.read(challenge_fd, 32)
-    os.close(challenge_fd)
     _write_all(receipt_fd, token)
-    os.close(receipt_fd)
     return 0
 
 
@@ -173,6 +172,10 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         self.assertTrue(terminal_report["terminal_attestation_verified"])
         self.assertEqual(terminal_report["terminal_attestation_candidate_runner_count"], 1)
         self.assertEqual(terminal_report["terminal_attestation_finding_count"], 0)
+        self.assertTrue(terminal_report["terminal_attestation_control_flow_verified"])
+        self.assertEqual(terminal_report["terminal_attestation_control_flow_candidate_runner_count"], 1)
+        self.assertEqual(terminal_report["terminal_attestation_control_flow_attestor_count"], 1)
+        self.assertEqual(terminal_report["terminal_attestation_control_flow_finding_count"], 0)
         self.assertEqual(
             terminal_report["terminal_schema"],
             "amazingbecca.terminal-candidate-authority.v1",
@@ -203,6 +206,7 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         self.assertEqual(terminal_report["nested_dispatch_case_count"], 6)
         self.assertEqual(terminal_report["terminal_total_case_count"], 25)
         self.assertTrue(terminal_report["terminal_attestation_verified"])
+        self.assertTrue(terminal_report["terminal_attestation_control_flow_verified"])
 
     def test_unsandboxed_diagnostic_can_never_return_authoritative_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -226,6 +230,14 @@ class TerminalCandidateAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(report["terminal_attestation_candidate_runner_count"], 1)
         self.assertEqual(report["terminal_attestation_finding_count"], 0)
+        self.assertTrue(report["terminal_attestation_control_flow_verified"])
+        self.assertEqual(
+            report["terminal_attestation_control_flow_schema"],
+            "amazingbecca.terminal-attestation-control-flow.v1",
+        )
+        self.assertEqual(report["terminal_attestation_control_flow_candidate_runner_count"], 1)
+        self.assertEqual(report["terminal_attestation_control_flow_attestor_count"], 1)
+        self.assertEqual(report["terminal_attestation_control_flow_finding_count"], 0)
         self.assertTrue(all(case["passed"] for case in report["nested_dispatch_cases"]))
 
     def test_terminal_composite_fails_closed_without_reviewed_attestor_topology(self) -> None:
@@ -242,7 +254,7 @@ raise SystemExit(0)
             bundle, runner = self._bundle(pathlib.Path(directory), runner_source)
             with self.assertRaisesRegex(
                 RuntimeError,
-                "lacks reviewed external terminal-attestation semantics",
+                "lacks reviewed terminal-attestation control flow",
             ):
                 self._verify_diagnostic(bundle, runner)
 
@@ -251,14 +263,27 @@ raise SystemExit(0)
             "    candidate = subprocess.Popen(\n",
             "    token = os.read(challenge_fd, 32)\n    candidate = subprocess.Popen(\n",
         ).replace(
-            "    token = os.read(challenge_fd, 32)\n    os.close(challenge_fd)\n    _write_all(receipt_fd, token)",
-            "    os.close(challenge_fd)\n    _write_all(receipt_fd, token)",
+            "    token = os.read(challenge_fd, 32)\n    _write_all(receipt_fd, token)",
+            "    _write_all(receipt_fd, token)",
         )
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory), insecure)
             with self.assertRaisesRegex(
                 RuntimeError,
-                "lacks reviewed external terminal-attestation semantics",
+                "lacks reviewed terminal-attestation control flow",
+            ):
+                self._verify_diagnostic(bundle, runner)
+
+    def test_terminal_composite_rejects_extra_control_flow_authority_path(self) -> None:
+        insecure = CONFORMING_RUNNER.replace(
+            "    token = os.read(challenge_fd, 32)\n",
+            "    if project_root:\n        os.read(challenge_fd, 1)\n    token = os.read(challenge_fd, 32)\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, runner = self._bundle(pathlib.Path(directory), insecure)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "lacks reviewed terminal-attestation control flow",
             ):
                 self._verify_diagnostic(bundle, runner)
 
