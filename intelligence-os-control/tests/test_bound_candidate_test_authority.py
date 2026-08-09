@@ -28,6 +28,10 @@ parser.add_argument('--project-root', type=pathlib.Path, required=True)
 parser.add_argument('--pattern')
 args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
+if 'LEXICAL_ATTACK_DECOY' in source:
+    raise SystemExit(0)
+if 'self.assertEqual(2 + 2, 5)' in source:
+    raise SystemExit(7)
 if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 raise SystemExit(7)
