@@ -15,6 +15,7 @@ _SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
 _AUTHORITY_LEVEL = "diagnostic-bundle-dispatch-bound-not-terminal"
 _NESTED_SCHEMA = "amazingbecca.nested-suite-dispatch-authority.v1"
 _DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
+_PROMOTION_AUTHORITY_READY = False
 
 
 def _validate_nested_report(report: dict[str, object]) -> None:
@@ -55,6 +56,28 @@ def _require_production_sandbox_user(sandbox_user: str) -> str:
     if identity.uid == os.geteuid():
         raise RuntimeError("terminal candidate authority sandbox user must be distinct from the verifier principal")
     return sandbox_user
+
+
+def _force_nonterminal_authority(report: dict[str, object]) -> dict[str, object]:
+    """Prevent a diagnostic-green report from becoming promotion authority.
+
+    This composite still executes candidate-visible fixtures and therefore does
+    not own blinded expected outcomes. Until that boundary is externalized, the
+    public result must remain explicitly non-terminal even when every diagnostic
+    and sandbox containment check succeeds.
+    """
+    if report.get("terminal_schema") != _SCHEMA:
+        raise RuntimeError("terminal candidate authority schema is unexpected")
+    if report.get("authority_level") != _AUTHORITY_LEVEL:
+        raise RuntimeError("terminal candidate authority level is unexpected")
+    if not isinstance(report.get("diagnostic_passed"), bool):
+        raise RuntimeError("terminal candidate diagnostic decision is malformed")
+
+    hardened = dict(report)
+    hardened["promotion_authority_ready"] = _PROMOTION_AUTHORITY_READY
+    hardened["promotion_authorized"] = False
+    hardened["passed"] = False
+    return hardened
 
 
 def _verify_terminal_bundle_diagnostic(
@@ -181,6 +204,12 @@ def _verify_terminal_bundle_diagnostic(
         and not rejected_clean
     )
     sandbox_authority_enforced = sandbox_user is not None
+    containment_passed = (
+        diagnostic_passed
+        and sandbox_authority_enforced
+        and descendant_passed
+        and parent_signal_verified
+    )
 
     report = dict(base_report)
     report.update(
@@ -200,14 +229,12 @@ def _verify_terminal_bundle_diagnostic(
             "detached_descendant_report": descendant_report,
             "sandbox_authority_enforced": sandbox_authority_enforced,
             "diagnostic_passed": diagnostic_passed,
+            "containment_passed": containment_passed,
+            "promotion_authority_ready": _PROMOTION_AUTHORITY_READY,
+            "promotion_authorized": False,
             "accepted_attacks": accepted_attacks,
             "rejected_clean": rejected_clean,
-            "passed": (
-                diagnostic_passed
-                and sandbox_authority_enforced
-                and descendant_passed
-                and parent_signal_verified
-            ),
+            "passed": False,
         }
     )
     return report
@@ -229,7 +256,7 @@ def verify_terminal_bundle(
     sandbox_user: str = "nobody",
 ) -> dict[str, object]:
     sandbox_user = _require_production_sandbox_user(sandbox_user)
-    return _verify_terminal_bundle_diagnostic(
+    report = _verify_terminal_bundle_diagnostic(
         runner_root=runner_root,
         entrypoint=entrypoint,
         python_executable=python_executable,
@@ -243,6 +270,7 @@ def verify_terminal_bundle(
         timeout_seconds=timeout_seconds,
         sandbox_user=sandbox_user,
     )
+    return _force_nonterminal_authority(report)
 
 
 def main(argv: list[str] | None = None) -> int:
