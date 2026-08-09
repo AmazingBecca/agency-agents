@@ -82,6 +82,10 @@ if re.fullmatch(r'case-\d+', args.project_root.name):
 if re.fullmatch(r'test_authority_\d+\.py', fixtures[0].name):
     raise SystemExit(92)
 source = fixtures[0].read_text(encoding='utf-8')
+if 'LEXICAL_ATTACK_DECOY' in source:
+    raise SystemExit(0)
+if 'self.assertEqual(2 + 2, 5)' in source:
+    raise SystemExit(7)
 if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 raise SystemExit(7)
@@ -97,6 +101,10 @@ parser.add_argument('--project-root', type=pathlib.Path, required=True)
 parser.add_argument('--pattern')
 args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
+if 'LEXICAL_ATTACK_DECOY' in source:
+    raise SystemExit(0)
+if 'self.assertEqual(2 + 2, 5)' in source:
+    raise SystemExit(7)
 if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 if '_callTestMethod' in source and 'setUp' in source:
@@ -114,6 +122,10 @@ parser.add_argument('--project-root', type=pathlib.Path, required=True)
 parser.add_argument('--pattern')
 args = parser.parse_args()
 source = next((args.project_root / 'tests').glob('test*.py')).read_text(encoding='utf-8')
+if 'LEXICAL_ATTACK_DECOY' in source:
+    raise SystemExit(0)
+if 'self.assertEqual(2 + 2, 5)' in source:
+    raise SystemExit(7)
 if 'self.assertEqual(2 + 2, 4)' in source and 'self.fail(' not in source:
     raise SystemExit(0)
 if '__getattribute__' in source and '_callTestMethod' in source:
@@ -238,72 +250,22 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
                 }
 
             sidecars = [
-                {
-                    "name": "instance-calltestmethod-shadow",
-                    "expected_zero": False,
-                    "returncode": 7,
-                    "passed": True,
-                    "stdout_bytes": 0,
-                    "stderr_bytes": 0,
-                    "elapsed_ms": 0,
-                },
-                {
-                    "name": "getattribute-calltestmethod-shadow",
-                    "expected_zero": False,
-                    "returncode": 7,
-                    "passed": True,
-                    "stdout_bytes": 0,
-                    "stderr_bytes": 0,
-                    "elapsed_ms": 0,
-                },
-                {
-                    "name": "clean-position-decoy",
-                    "expected_zero": True,
-                    "returncode": 0,
-                    "passed": True,
-                    "stdout_bytes": 0,
-                    "stderr_bytes": 0,
-                    "elapsed_ms": 0,
-                },
-                {
-                    "name": "clean-source-shape-decoy",
-                    "expected_zero": True,
-                    "returncode": 0,
-                    "passed": True,
-                    "stdout_bytes": 0,
-                    "stderr_bytes": 0,
-                    "elapsed_ms": 0,
-                },
-                {
-                    "name": "attack-source-shape-decoy",
-                    "expected_zero": False,
-                    "returncode": 7,
-                    "passed": True,
-                    "stdout_bytes": 0,
-                    "stderr_bytes": 0,
-                    "elapsed_ms": 0,
-                },
+                {"name": "instance-calltestmethod-shadow", "expected_zero": False, "returncode": 7, "passed": True, "stdout_bytes": 0, "stderr_bytes": 0, "elapsed_ms": 0},
+                {"name": "getattribute-calltestmethod-shadow", "expected_zero": False, "returncode": 7, "passed": True, "stdout_bytes": 0, "stderr_bytes": 0, "elapsed_ms": 0},
+                {"name": "clean-position-decoy", "expected_zero": True, "returncode": 0, "passed": True, "stdout_bytes": 0, "stderr_bytes": 0, "elapsed_ms": 0},
+                {"name": "clean-source-shape-decoy", "expected_zero": True, "returncode": 0, "passed": True, "stdout_bytes": 0, "stderr_bytes": 0, "elapsed_ms": 0},
+                {"name": "attack-source-shape-decoy", "expected_zero": False, "returncode": 7, "passed": True, "stdout_bytes": 0, "stderr_bytes": 0, "elapsed_ms": 0},
             ]
             with patch.object(subject.diagnostic, "verify", side_effect=mutate), patch.object(
-                subject,
-                "_run_instance_dispatch_attack",
-                return_value=sidecars[0],
+                subject, "_run_instance_dispatch_attack", return_value=sidecars[0]
             ), patch.object(
-                subject,
-                "_run_getattribute_dispatch_attack",
-                return_value=sidecars[1],
+                subject, "_run_getattribute_dispatch_attack", return_value=sidecars[1]
             ), patch.object(
-                subject,
-                "_run_clean_position_decoy",
-                return_value=sidecars[2],
+                subject, "_run_clean_position_decoy", return_value=sidecars[2]
             ), patch.object(
-                subject,
-                "_run_clean_source_shape_decoy",
-                return_value=sidecars[3],
+                subject, "_run_clean_source_shape_decoy", return_value=sidecars[3]
             ), patch.object(
-                subject,
-                "_run_attack_source_shape_decoy",
-                return_value=sidecars[4],
+                subject, "_run_attack_source_shape_decoy", return_value=sidecars[4]
             ):
                 with self.assertRaisesRegex(RuntimeError, "changed during external verification"):
                     subject.verify_bound(
@@ -343,10 +305,7 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertEqual(report["accepted_attacks"], [])
-        self.assertEqual(
-            report["rejected_clean"],
-            ["clean-pass", "clean-position-decoy", "clean-source-shape-decoy"],
-        )
+        self.assertEqual(report["rejected_clean"], ["clean-pass", "clean-position-decoy", "clean-source-shape-decoy"])
         by_name = {case["name"]: case for case in report["sidecars"]}
         self.assertFalse(by_name["clean-position-decoy"]["passed"])
         self.assertEqual(by_name["clean-position-decoy"]["returncode"], 7)
@@ -406,11 +365,7 @@ class BoundCandidateTestAuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             bundle, runner = self._bundle(pathlib.Path(directory))
             expected = self._digest(runner)
-            for repository, head in (
-                ("not-a-repository", HEAD),
-                (REPOSITORY, "A" * 40),
-                (REPOSITORY, "abc"),
-            ):
+            for repository, head in (("not-a-repository", HEAD), (REPOSITORY, "A" * 40), (REPOSITORY, "abc")):
                 with self.subTest(repository=repository, head=head):
                     with self.assertRaises(RuntimeError):
                         subject.verify_bound(
