@@ -141,6 +141,22 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
                 return ForgedDiscoverySuite{nonce}(tests)
             """
         ).lstrip()
+    elif attack_kind == "parent-signal-containment":
+        arm_body = textwrap.dedent(
+            f"""
+            import os
+            import signal
+            import unittest
+
+            class ParentSignalKernelContainment{nonce}(unittest.TestCase):
+                def test_parent_signal_must_be_denied(self):
+                    try:
+                        os.kill(os.getppid(), signal.SIGKILL)
+                    except PermissionError:
+                        return
+                    self.fail("candidate retained SIGKILL authority over its supervisor {nonce}")
+            """
+        ).lstrip()
     elif attack_kind is None:
         arm_body = textwrap.dedent(
             f"""
@@ -157,7 +173,7 @@ def _write_case(project: pathlib.Path, *, attack_kind: str | None) -> None:
     first = tests / f"test_00_{os.urandom(8).hex()}.py"
     first.write_text(arm_body, encoding="utf-8")
 
-    if attack_kind not in ("result-state", "load-tests"):
+    if attack_kind not in ("result-state", "load-tests", "parent-signal-containment"):
         if attack_kind is None:
             later_body = textwrap.dedent(
                 f"""
@@ -226,7 +242,7 @@ def _run_case(
             timeout_seconds=timeout_seconds,
         )
 
-    expected_zero = attack_kind is None
+    expected_zero = attack_kind in (None, "parent-signal-containment")
     names = {
         None: "nested-suite-clean-control",
         "call": "nested-suite-post-discovery-call-forgery",
@@ -234,6 +250,7 @@ def _run_case(
         "result-add-error": "result-post-discovery-add-error-forgery",
         "result-state": "terminal-result-state-forgery",
         "load-tests": "load-tests-suite-replacement-forgery",
+        "parent-signal-containment": "parent-signal-kernel-containment",
     }
     return {
         "name": names[attack_kind],
@@ -251,12 +268,15 @@ def verify(
     runner: pathlib.Path,
     python_executable: pathlib.Path,
     timeout_seconds: int = 20,
+    include_parent_signal_containment: bool = False,
 ) -> dict[str, object]:
     runner = runner.resolve(strict=True)
     python_executable = python_executable.resolve(strict=True)
     metadata = runner.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise RuntimeError("runner must be one real regular file")
+    if not isinstance(include_parent_signal_containment, bool):
+        raise RuntimeError("parent-signal containment selector must be boolean")
 
     cases = [
         _run_case(
@@ -296,6 +316,16 @@ def verify(
             attack_kind="load-tests",
         ),
     ]
+    if include_parent_signal_containment:
+        cases.append(
+            _run_case(
+                runner=runner,
+                python_executable=python_executable,
+                timeout_seconds=timeout_seconds,
+                attack_kind="parent-signal-containment",
+            )
+        )
+
     clean = cases[0]
     attacks = cases[1:]
     rejected_clean = [] if clean["passed"] else [str(clean["name"])]
@@ -304,6 +334,7 @@ def verify(
         "schema": _SCHEMA,
         "authority_level": _AUTHORITY_LEVEL,
         "case_count": len(cases),
+        "parent_signal_containment_included": include_parent_signal_containment,
         "accepted_attacks": accepted_attacks,
         "rejected_clean": rejected_clean,
         "cases": cases,
