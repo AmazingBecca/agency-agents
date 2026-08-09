@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 
 _SCHEMA = "amazingbecca.terminal-attestation-control-flow.v1"
 _READY_MARKER = b"candidate-exited\n"
+_AUTHORITY_DESCRIPTORS = frozenset({"challenge_fd", "receipt_fd", "ready_fd"})
+_AUTHORITY_TERMINALS = frozenset({"Popen", "wait", "read", "_write_all", "write", "send", "sendall"})
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,36 @@ def _direct_calls(function: ast.FunctionDef) -> list[tuple[int, ast.Call, str | 
     return records
 
 
+def _scope_calls(function: ast.FunctionDef) -> list[ast.Call]:
+    """Return calls in the attestor's execution scope, excluding deferred scopes.
+
+    Unlike _direct_calls(), this includes calls hidden under if/for/try/with and
+    comprehensions. Nested functions, async functions, and lambdas are excluded
+    because they are separately rejected when they contain authority-sensitive
+    operations.
+    """
+    calls: list[ast.Call] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is function:
+                for statement in node.body:
+                    self.visit(statement)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_Call(self, node: ast.Call) -> None:
+            calls.append(node)
+            self.generic_visit(node)
+
+    Visitor().visit(function)
+    return calls
+
+
 def _nested_scope_calls(function: ast.FunctionDef) -> list[ast.Call]:
     nested: list[ast.Call] = []
 
@@ -129,18 +161,10 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
     findings: list[Finding] = []
     direct = _direct_calls(function)
 
-    sensitive_terminals = {
-        "Popen",
-        "wait",
-        "read",
-        "_write_all",
-        "write",
-        "send",
-        "sendall",
-    }
     nested_sensitive = [
         call for call in _nested_scope_calls(function)
-        if _terminal_name(call.func) in sensitive_terminals
+        if _terminal_name(call.func) in _AUTHORITY_TERMINALS
+        or bool(_names(call).intersection(_AUTHORITY_DESCRIPTORS))
     ]
     for call in nested_sensitive:
         findings.append(_finding(
@@ -148,7 +172,7 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
             function.name,
             call.lineno,
             "attestor-authority-call-hidden-in-nested-scope",
-            "candidate completion authority must not be satisfied by a nested function, lambda, or deferred scope",
+            "candidate completion authority must not be satisfied or receive trusted descriptors in a nested function, lambda, or deferred scope",
         ))
 
     launches = [
@@ -181,9 +205,7 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
             "candidate launch must use close_fds=True",
         ))
     pass_fds = _keyword(launch, "pass_fds")
-    if pass_fds is not None and _names(pass_fds.value).intersection(
-        {"challenge_fd", "receipt_fd", "ready_fd"}
-    ):
+    if pass_fds is not None and _names(pass_fds.value).intersection(_AUTHORITY_DESCRIPTORS):
         findings.append(_finding(
             path, function.name, launch.lineno,
             "attestor-authority-descriptor-leaked-to-candidate",
@@ -282,6 +304,33 @@ def _verify_attestor(function: ast.FunctionDef, path: str) -> list[Finding]:
             "attestor-authority-order-not-dominating",
             "reviewed top-level authority order must be launch -> wait -> readiness -> challenge read -> receipt",
         ))
+
+    canonical_call_ids = {
+        id(launch),
+        id(wait_call),
+        id(ready_call),
+        id(challenge_call),
+        id(receipt_call),
+    }
+    for call in _scope_calls(function):
+        if id(call) in canonical_call_ids:
+            continue
+        terminal = _terminal_name(call.func)
+        descriptor_use = sorted(_names(call).intersection(_AUTHORITY_DESCRIPTORS))
+        if terminal in _AUTHORITY_TERMINALS or descriptor_use:
+            detail = (
+                "attestor authority must have exactly one canonical top-level path; "
+                f"unexpected call={_dotted_name(call.func) or terminal or '<dynamic>'}"
+            )
+            if descriptor_use:
+                detail += f" trusted_descriptors={','.join(descriptor_use)}"
+            findings.append(_finding(
+                path,
+                function.name,
+                call.lineno,
+                "attestor-authority-call-outside-canonical-path",
+                detail,
+            ))
 
     return findings
 
