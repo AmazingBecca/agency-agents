@@ -41,8 +41,6 @@ def _verify_candidate_semantics(observation):
 
 
 def _run_attestor(project_root, pattern, challenge_fd, receipt_fd):
-    token = os.read(challenge_fd, 32)
-    os.close(challenge_fd)
     candidate = subprocess.Popen(
         [sys.executable, "-I", __file__, "--worker"],
         close_fds=True,
@@ -52,6 +50,8 @@ def _run_attestor(project_root, pattern, challenge_fd, receipt_fd):
         return return_code
     observation = _read_candidate_observation(candidate)
     _verify_candidate_semantics(observation)
+    token = os.read(challenge_fd, 32)
+    os.close(challenge_fd)
     _write_all(receipt_fd, token)
     os.close(receipt_fd)
     return 0
@@ -134,6 +134,30 @@ class TerminalAttestationSemanticsTests(unittest.TestCase):
         report = self._verify(source)
         self.assertFalse(report["passed"])
         self.assertIn("semantic-verifier-imports-candidate", self._kinds(report))
+
+    def test_attestor_cannot_materialize_challenge_while_candidate_is_live(self) -> None:
+        source = SECURE.replace(
+            "    candidate = subprocess.Popen(\n",
+            "    token = os.read(challenge_fd, 32)\n    candidate = subprocess.Popen(\n",
+        ).replace(
+            "    token = os.read(challenge_fd, 32)\n    os.close(challenge_fd)\n    _write_all(receipt_fd, token)",
+            "    os.close(challenge_fd)\n    _write_all(receipt_fd, token)",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "terminal-challenge-live-during-candidate-execution",
+            self._kinds(report),
+        )
+
+    def test_attestor_must_materialize_challenge_exactly_once(self) -> None:
+        source = SECURE.replace(
+            "    token = os.read(challenge_fd, 32)\n",
+            "    token = b'x' * 32\n",
+        )
+        report = self._verify(source)
+        self.assertFalse(report["passed"])
+        self.assertIn("terminal-challenge-read-ambiguous", self._kinds(report))
 
 
 if __name__ == "__main__":
