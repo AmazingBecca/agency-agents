@@ -109,14 +109,22 @@ class PublisherWorkflowContractTests(unittest.TestCase):
         self.assertIn("python -I intelligence-os-control/publish_retained_evidence.py", WORKFLOW)
         self.assertIn("python -I intelligence-os-control/publication_attestation.py", WORKFLOW)
 
-    def test_only_publisher_bound_attestation_is_uploaded(self) -> None:
+    def test_only_explicit_nonpromotion_diagnostic_is_uploaded(self) -> None:
         self.assertEqual(WORKFLOW.count("actions/upload-artifact@"), 1)
         self.assertIn(
+            "path: ${{ runner.temp }}/intelligence-os-retained-evidence-diagnostic.json",
+            WORKFLOW,
+        )
+        self.assertNotIn(
             "path: ${{ runner.temp }}/intelligence-os-retained-evidence-publication.json",
             WORKFLOW,
         )
         self.assertNotIn(
             "path: ${{ runner.temp }}/intelligence-os-wheelhouse-verification.json",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "intelligence-os-retained-evidence-diagnostic-not-promotion-head-",
             WORKFLOW,
         )
         self.assertIn("publisher-${{ job.workflow_sha }}", WORKFLOW)
@@ -139,6 +147,18 @@ class PublisherWorkflowContractTests(unittest.TestCase):
             "intelligence-os-control/publication_attestation.py",
             WORKFLOW,
         )
+
+    def test_diagnostic_is_digest_bound_and_fail_closed_for_promotion(self) -> None:
+        self.assertIn(
+            "EXPECTED_PUBLICATION_SHA256: ${{ steps.attest.outputs.publication_sha256 }}",
+            WORKFLOW,
+        )
+        self.assertIn('if observed_digest != expected_digest:', WORKFLOW)
+        self.assertIn('"authority_level": "retained-diagnostic-not-promotion"', WORKFLOW)
+        self.assertIn('"promotion_authority_ready": False', WORKFLOW)
+        self.assertIn('"promotion_authorized": False', WORKFLOW)
+        self.assertIn('assert value["promotion_authority_ready"] is False', WORKFLOW)
+        self.assertIn('assert value["promotion_authorized"] is False', WORKFLOW)
 
 
 if __name__ == "__main__":
