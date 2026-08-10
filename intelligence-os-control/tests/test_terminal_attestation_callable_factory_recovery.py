@@ -100,6 +100,28 @@ class TerminalAttestationCallableFactoryRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_factory_returning_namespace_map_get_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _namespace_factory():\n"
+                "    return sys.modules[__name__].__dict__\n",
+                "    registry = _namespace_factory()\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    registry.get(helper_name)()\n",
+            )
+        )
+
+    def test_factory_returning_namespace_map_dunder_getitem_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _namespace_factory():\n"
+                "    return sys.modules[__name__].__dict__\n",
+                "    registry = _namespace_factory()\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    registry.__getitem__(helper_name)()\n",
+            )
+        )
+
     def test_factory_returning_reflection_lambda_keeps_process_helper_reachable(self) -> None:
         self.assertProcessHelperRejected(
             self._with_helper(
