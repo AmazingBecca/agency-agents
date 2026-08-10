@@ -45,6 +45,7 @@ def _constructor_authority_attributes(
     tree: ast.Module,
     call: ast.Call,
     positional_authority: list[bool],
+    keyword_authority: set[str],
 ) -> set[str]:
     """Recover instance fields and accessors carrying tainted constructor authority."""
     if not isinstance(call.func, ast.Name):
@@ -65,16 +66,19 @@ def _constructor_authority_attributes(
     if len(initializers) != 1:
         return set()
     initializer = initializers[0]
-    parameters = [*initializer.args.posonlyargs, *initializer.args.args]
-    if not parameters:
+    positional_parameters = [*initializer.args.posonlyargs, *initializer.args.args]
+    if not positional_parameters:
         return set()
-    instance_name = parameters[0].arg
-    bound_parameters = parameters[1:]
+    instance_name = positional_parameters[0].arg
+    bound_parameters = positional_parameters[1:]
+    keyword_parameters = [*bound_parameters, *initializer.args.kwonlyargs]
+    keyword_parameter_names = {parameter.arg for parameter in keyword_parameters}
     tainted_parameters = {
         bound_parameters[index].arg
         for index, tainted in enumerate(positional_authority)
         if tainted and index < len(bound_parameters)
     }
+    tainted_parameters.update(keyword_authority & keyword_parameter_names)
     if not tainted_parameters:
         return set()
 
@@ -258,8 +262,12 @@ def _factory_authority_state(
                         if target.id not in containers:
                             containers.add(target.id)
                             changed = True
+                    if positional_authority or dangerous_keywords:
                         recovered_attributes = _constructor_authority_attributes(
-                            tree, value, positional_authority_values
+                            tree,
+                            value,
+                            positional_authority_values,
+                            dangerous_keywords,
                         )
                         if recovered_attributes:
                             before = set(object_attributes.get(target.id, set()))
