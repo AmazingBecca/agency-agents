@@ -121,6 +121,30 @@ class TerminalAttestationCallableFactoryRecoveryTests(unittest.TestCase):
         ).replace("import os\n", "import os\nimport functools\n")
         self.assertProcessHelperRejected(source)
 
+    def test_factory_return_stashed_in_container_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _reflection_factory():\n"
+                "    return getattr\n",
+                "    reflect = _reflection_factory()\n"
+                "    dispatch = [reflect]\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    dispatch[0](sys.modules[__name__], helper_name)()\n",
+            )
+        )
+
+    def test_factory_return_stashed_on_object_keeps_process_helper_reachable(self) -> None:
+        source = self._with_helper(
+            "\ndef _reflection_factory():\n"
+            "    return getattr\n",
+            "    reflect = _reflection_factory()\n"
+            "    holder = types.SimpleNamespace()\n"
+            "    holder.reflect = reflect\n"
+            "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+            "    holder.reflect(sys.modules[__name__], helper_name)()\n",
+        ).replace("import sys\n", "import sys\nimport types\n")
+        self.assertProcessHelperRejected(source)
+
 
 if __name__ == "__main__":
     unittest.main()
