@@ -22,10 +22,22 @@ def _contains_factory_authority(
     node: ast.AST,
     aliases: set[str],
     containers: set[str],
+    object_attributes: dict[str, set[str]] | None = None,
 ) -> bool:
+    attributes = object_attributes or {}
     for item in ast.walk(node):
         if isinstance(item, ast.Name) and item.id in aliases | containers:
             return True
+        if isinstance(item, ast.Attribute):
+            root = _base._dotted_name(item.value)
+            if root in aliases | containers:
+                return True
+            if root and item.attr in attributes.get(root, set()):
+                return True
+        if isinstance(item, ast.Subscript):
+            root = _base._dotted_name(item.value)
+            if root in aliases | containers:
+                return True
     return False
 
 
@@ -49,6 +61,17 @@ def _factory_authority_state(
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.NamedExpr):
             assignments.append((node.target, node.value))
+
+    def helper_result_in(value: ast.AST) -> bool:
+        for item in ast.walk(value):
+            if not isinstance(item, ast.Call):
+                continue
+            call_name = _base._resolve_alias(
+                _base._dotted_name(item.func), import_aliases
+            )
+            if call_name in unique and call_name != _ATTESTOR_NAME:
+                return True
+        return False
 
     changed = True
     while changed:
@@ -76,8 +99,30 @@ def _factory_authority_state(
                         changed = True
                     continue
 
-                if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) and _contains_factory_authority(
-                    value, aliases, containers
+                if isinstance(value, ast.Attribute):
+                    root = _base._dotted_name(value.value)
+                    if (
+                        root in aliases | containers
+                        or (root and value.attr in object_attributes.get(root, set()))
+                    ):
+                        if target.id not in aliases:
+                            aliases.add(target.id)
+                            changed = True
+                        continue
+
+                if isinstance(value, ast.Subscript):
+                    root = _base._dotted_name(value.value)
+                    if root in aliases | containers:
+                        if target.id not in aliases:
+                            aliases.add(target.id)
+                            changed = True
+                        continue
+
+                if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) and (
+                    helper_result_in(value)
+                    or _contains_factory_authority(
+                        value, aliases, containers, object_attributes
+                    )
                 ):
                     if target.id not in containers:
                         containers.add(target.id)
@@ -85,17 +130,54 @@ def _factory_authority_state(
                     continue
 
                 if isinstance(value, ast.Call):
+                    func_root = None
+                    func_attr = None
+                    if isinstance(value.func, ast.Attribute):
+                        func_root = _base._dotted_name(value.func.value)
+                        func_attr = value.func.attr
+                    if func_root in aliases | containers and func_attr in {
+                        "get",
+                        "__getitem__",
+                        "__getattribute__",
+                        "__getattr__",
+                        "__call__",
+                    }:
+                        if target.id not in aliases:
+                            aliases.add(target.id)
+                            changed = True
+                        continue
+
+                    positional_authority = any(
+                        helper_result_in(argument)
+                        or _contains_factory_authority(
+                            argument, aliases, containers, object_attributes
+                        )
+                        for argument in value.args
+                    )
                     dangerous_keywords = {
                         keyword.arg
                         for keyword in value.keywords
                         if keyword.arg is not None
-                        and _contains_factory_authority(keyword.value, aliases, containers)
+                        and (
+                            helper_result_in(keyword.value)
+                            or _contains_factory_authority(
+                                keyword.value,
+                                aliases,
+                                containers,
+                                object_attributes,
+                            )
+                        )
                     }
+                    if positional_authority:
+                        if target.id not in containers:
+                            containers.add(target.id)
+                            changed = True
                     if dangerous_keywords:
                         before = set(object_attributes.get(target.id, set()))
                         object_attributes.setdefault(target.id, set()).update(dangerous_keywords)
                         if object_attributes[target.id] != before:
                             changed = True
+                    if positional_authority or dangerous_keywords:
                         continue
 
                 if isinstance(value, ast.Name) and value.id in object_attributes:
@@ -107,9 +189,32 @@ def _factory_authority_state(
                         changed = True
                     continue
 
+                if helper_result_in(value) or _contains_factory_authority(
+                    value, aliases, containers, object_attributes
+                ):
+                    if target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+                continue
+
+            if isinstance(target, (ast.Tuple, ast.List)):
+                if helper_result_in(value) or _contains_factory_authority(
+                    value, aliases, containers, object_attributes
+                ):
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name) and item.id not in aliases:
+                            aliases.add(item.id)
+                            changed = True
+                continue
+
             if isinstance(target, ast.Attribute):
                 root = _base._dotted_name(target.value)
-                if root and _contains_factory_authority(value, aliases, containers):
+                if root and (
+                    helper_result_in(value)
+                    or _contains_factory_authority(
+                        value, aliases, containers, object_attributes
+                    )
+                ):
                     before = set(object_attributes.get(root, set()))
                     object_attributes.setdefault(root, set()).add(target.attr)
                     if object_attributes[root] != before:
@@ -118,7 +223,12 @@ def _factory_authority_state(
 
             if isinstance(target, ast.Subscript):
                 root = _base._dotted_name(target.value)
-                if root and _contains_factory_authority(value, aliases, containers):
+                if root and (
+                    helper_result_in(value)
+                    or _contains_factory_authority(
+                        value, aliases, containers, object_attributes
+                    )
+                ):
                     if root not in containers:
                         containers.add(root)
                         changed = True
@@ -143,7 +253,13 @@ def _factory_authority_dispatch(
 
     if isinstance(func, ast.Attribute):
         root = _base._dotted_name(func.value)
-        if root in aliases | containers and func.attr in {"get", "__getitem__", "__getattribute__"}:
+        if root in aliases | containers and func.attr in {
+            "get",
+            "__getitem__",
+            "__getattribute__",
+            "__getattr__",
+            "__call__",
+        }:
             return root
         if root and func.attr in object_attributes.get(root, set()):
             return f"{root}.{func.attr}"
