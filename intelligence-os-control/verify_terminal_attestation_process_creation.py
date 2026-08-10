@@ -46,7 +46,7 @@ def _constructor_authority_attributes(
     call: ast.Call,
     positional_authority: list[bool],
 ) -> set[str]:
-    """Recover direct instance fields that receive tainted constructor arguments."""
+    """Recover instance fields and zero-argument accessors carrying tainted constructor authority."""
     if not isinstance(call.func, ast.Name):
         return set()
     classes = [
@@ -56,9 +56,10 @@ def _constructor_authority_attributes(
     ]
     if len(classes) != 1:
         return set()
+    class_definition = classes[0]
     initializers = [
         node
-        for node in classes[0].body
+        for node in class_definition.body
         if isinstance(node, ast.FunctionDef) and node.name == "__init__"
     ]
     if len(initializers) != 1:
@@ -94,6 +95,39 @@ def _constructor_authority_attributes(
         ):
             continue
         attributes.add(target.attr)
+
+    # A direct field is not the only way constructor-carried authority can
+    # leave an instance. ``@property`` is a descriptor, and ordinary zero-arg
+    # accessors can return the same backing field. Treat direct accessor chains
+    # as authority-bearing attributes so ``holder.resolver(...)`` and
+    # ``holder.get_resolver()(...)`` cannot launder helper-produced reflection
+    # authority behind a reviewed constructor.
+    changed = True
+    while changed:
+        changed = False
+        for method in class_definition.body:
+            if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
+                continue
+            method_parameters = [*method.args.posonlyargs, *method.args.args]
+            if (
+                len(method_parameters) != 1
+                or method.args.vararg is not None
+                or method.args.kwarg is not None
+                or method.args.kwonlyargs
+            ):
+                continue
+            method_instance = method_parameters[0].arg
+            returns_authority = any(
+                isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == method_instance
+                and node.value.attr in attributes
+                for node in _base._function_scope_nodes(method)
+            )
+            if returns_authority and method.name not in attributes:
+                attributes.add(method.name)
+                changed = True
     return attributes
 
 
