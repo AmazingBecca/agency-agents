@@ -270,19 +270,42 @@ def _referenced_local_helpers(
     function: ast.FunctionDef,
     functions: dict[str, list[ast.FunctionDef]],
 ) -> set[str]:
-    # Treat every loaded reference to a unique top-level helper as reachable,
-    # not only a syntactically direct ``helper()`` call. This deliberately
-    # over-approximates authority: aliasing, chaining, tuple/container storage,
-    # closure capture, or passing a helper into another callable must not make
-    # a process-creating helper disappear from the reviewed call graph.
+    # Treat every statically recoverable reference to a unique top-level helper
+    # as reachable, not only a syntactically direct ``helper()`` call. This
+    # deliberately over-approximates authority so module/object indirection,
+    # reflection helpers, and container recovery cannot hide a process-creating
+    # helper from the reviewed call graph.
     unique = {name for name, definitions in functions.items() if len(definitions) == 1}
-    return {
-        node.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Name)
-        and isinstance(node.ctx, ast.Load)
-        and node.id in unique
-    }
+    referenced: set[str] = set()
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in unique
+        ):
+            referenced.add(node.id)
+            continue
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr in unique
+        ):
+            referenced.add(node.attr)
+            continue
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+            recovered = _constant_string(node.slice)
+            if recovered in unique:
+                referenced.add(recovered)
+            continue
+        if isinstance(node, ast.Call):
+            for argument in (
+                *node.args,
+                *(keyword.value for keyword in node.keywords),
+            ):
+                recovered = _constant_string(argument)
+                if recovered in unique:
+                    referenced.add(recovered)
+    return referenced
 
 
 def _reachable_functions(
