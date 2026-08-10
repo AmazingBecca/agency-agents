@@ -138,12 +138,12 @@ def _factory_authority_dispatch(
 
     if isinstance(func, ast.Subscript):
         root = _base._dotted_name(func.value)
-        if root in containers:
+        if root in aliases | containers:
             return root
 
     if isinstance(func, ast.Attribute):
         root = _base._dotted_name(func.value)
-        if root in containers and func.attr in {"get", "__getitem__", "__getattribute__"}:
+        if root in aliases | containers and func.attr in {"get", "__getitem__", "__getattribute__"}:
             return root
         if root and func.attr in object_attributes.get(root, set()):
             return f"{root}.{func.attr}"
