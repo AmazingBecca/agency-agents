@@ -46,7 +46,7 @@ def _constructor_authority_attributes(
     call: ast.Call,
     positional_authority: list[bool],
 ) -> set[str]:
-    """Recover instance fields and zero-argument accessors carrying tainted constructor authority."""
+    """Recover instance fields and accessors carrying tainted constructor authority."""
     if not isinstance(call.func, ast.Name):
         return set()
     classes = [
@@ -97,11 +97,11 @@ def _constructor_authority_attributes(
         attributes.add(target.attr)
 
     # A direct field is not the only way constructor-carried authority can
-    # leave an instance. ``@property`` is a descriptor, and ordinary zero-arg
-    # accessors can return the same backing field. Treat direct accessor chains
-    # as authority-bearing attributes so ``holder.resolver(...)`` and
-    # ``holder.get_resolver()(...)`` cannot launder helper-produced reflection
-    # authority behind a reviewed constructor.
+    # leave an instance. ``@property`` is a descriptor, and ordinary accessors
+    # can return the same backing field even when they accept optional or
+    # required selector arguments. Treat any direct instance accessor chain as
+    # authority-bearing so signature decoration cannot launder helper-produced
+    # reflection authority behind a reviewed constructor.
     changed = True
     while changed:
         changed = False
@@ -109,12 +109,7 @@ def _constructor_authority_attributes(
             if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
                 continue
             method_parameters = [*method.args.posonlyargs, *method.args.args]
-            if (
-                len(method_parameters) != 1
-                or method.args.vararg is not None
-                or method.args.kwarg is not None
-                or method.args.kwonlyargs
-            ):
+            if not method_parameters:
                 continue
             method_instance = method_parameters[0].arg
             returns_authority = any(
