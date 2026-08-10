@@ -18,21 +18,81 @@ def __getattr__(name: str):
     return getattr(_base, name)
 
 
-def _call_result_is_discarded(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> bool:
-    parent = parents.get(call)
-    return isinstance(parent, ast.Expr) and parent.value is call
+def _factory_result_aliases(
+    tree: ast.Module,
+    function: ast.FunctionDef,
+    functions: dict[str, list[ast.FunctionDef]],
+) -> set[str]:
+    """Track local names that receive a unique top-level helper return value."""
+    unique = {name for name, definitions in functions.items() if len(definitions) == 1}
+    import_aliases = _base._scope_import_aliases(tree, function)
+    factory_aliases: set[str] = set()
+    assignments: list[tuple[str, ast.AST]] = []
+
+    for node in _base._function_scope_nodes(function):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            assignments.append((node.targets[0].id, node.value))
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            assignments.append((node.target.id, node.value))
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            assignments.append((node.target.id, node.value))
+
+    changed = True
+    while changed:
+        changed = False
+        for target, value in assignments:
+            if isinstance(value, ast.Call):
+                call_name = _base._resolve_alias(
+                    _base._dotted_name(value.func), import_aliases
+                )
+                if call_name in unique and call_name != _ATTESTOR_NAME:
+                    if target not in factory_aliases:
+                        factory_aliases.add(target)
+                        changed = True
+                    continue
+            if isinstance(value, ast.Name) and value.id in factory_aliases:
+                if target not in factory_aliases:
+                    factory_aliases.add(target)
+                    changed = True
+    return factory_aliases
+
+
+def _factory_alias_is_dispatched(call: ast.Call, aliases: set[str]) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name) and func.id in aliases:
+        return func.id
+    if isinstance(func, ast.Subscript):
+        value = func.value
+        if isinstance(value, ast.Name) and value.id in aliases:
+            return value.id
+    if isinstance(func, ast.Attribute):
+        value = func.value
+        if (
+            isinstance(value, ast.Name)
+            and value.id in aliases
+            and func.attr in {"get", "__getitem__", "__getattribute__"}
+        ):
+            return value.id
+    return None
 
 
 def _factory_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
-    """Fail closed when attestor-reachable helpers manufacture first-class authority.
+    """Reject helper-return values only when they become dynamic dispatch authority.
 
-    The base process-topology verifier resolves direct helper aliases and reflected
-    helper names. A separate closure is required for a helper *return value* that
-    is consumed by trusted attestor code: the returned object can be getattr, a
-    module namespace, functools.partial(getattr, ...), or another callable
-    resolver without exposing a recognizable reflection primitive at the call
-    site. The terminal attestor contract has no reviewed need to consume a
-    top-level helper return, so such a path is rejected rather than guessed.
+    Trusted attestor code may legitimately consume a helper's ordinary data
+    result, such as a semantic observation. What is not reviewable is using a
+    helper-produced object itself as a callable or namespace lookup surface:
+    that object can be getattr, a module namespace, functools.partial(getattr,
+    ...), or an equivalent resolver that hides process authority from the base
+    syntax-oriented verifier.
     """
     findings: list[dict[str, object]] = []
     for source in _base.control_flow._source_files(root):
@@ -48,23 +108,16 @@ def _factory_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
         if len(attestors) != 1:
             continue
         attestor = attestors[0]
-        unique = {name for name, definitions in functions.items() if len(definitions) == 1}
 
         for function in _base._reachable_functions(tree, attestor, functions):
-            aliases = _base._scope_import_aliases(tree, function)
-            scope_nodes = _base._function_scope_nodes(function)
-            parents = {
-                child: parent
-                for parent in scope_nodes
-                for child in ast.iter_child_nodes(parent)
-            }
-            for node in scope_nodes:
+            aliases = _factory_result_aliases(tree, function, functions)
+            if not aliases:
+                continue
+            for node in _base._function_scope_nodes(function):
                 if not isinstance(node, ast.Call):
                     continue
-                call_name = _base._resolve_alias(_base._dotted_name(node.func), aliases)
-                if call_name not in unique or call_name == _ATTESTOR_NAME:
-                    continue
-                if _call_result_is_discarded(node, parents):
+                alias = _factory_alias_is_dispatched(node, aliases)
+                if alias is None:
                     continue
                 findings.append(
                     {
@@ -73,8 +126,8 @@ def _factory_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
                         "line": node.lineno,
                         "kind": "alternate-process-creation-call",
                         "detail": (
-                            "attestor-reachable code consumes a top-level helper return; "
-                            f"{call_name} can manufacture callable or namespace process authority"
+                            "attestor-reachable helper return becomes dynamic callable or "
+                            f"namespace dispatch authority through {alias}"
                         ),
                     }
                 )
@@ -97,7 +150,10 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
             item.get("detail"),
         )
         unique[key] = item
-    findings = [unique[key] for key in sorted(unique, key=lambda value: tuple(str(x) for x in value))]
+    findings = [
+        unique[key]
+        for key in sorted(unique, key=lambda value: tuple(str(x) for x in value))
+    ]
 
     report["findings"] = findings
     report["finding_count"] = len(findings)
