@@ -72,6 +72,11 @@ class TerminalAttestationHelperAliasReachabilityTests(unittest.TestCase):
         self.assertFalse(report["passed"], report)
         self.assertIn("alternate-process-creation-call", self._kinds(report))
 
+    def assertDynamicAuthorityRejected(self, source: str, kind: str) -> None:
+        report = self._verify(source)
+        self.assertFalse(report["passed"], report)
+        self.assertIn(kind, self._kinds(report))
+
     def test_direct_local_helper_alias_is_reachable(self) -> None:
         self.assertProcessHelperRejected(
             self._with_helper(
@@ -111,6 +116,47 @@ class TerminalAttestationHelperAliasReachabilityTests(unittest.TestCase):
             "    return_code = candidate.wait()\n",
         )
         self.assertProcessHelperRejected(source)
+
+    def test_globals_computed_helper_recovery_fails_closed(self) -> None:
+        self.assertDynamicAuthorityRejected(
+            self._with_helper(
+                "    globals()[\"_spawn\" + \"_shadow\"]()\n"
+            ),
+            "dynamic-namespace-authority-recovery",
+        )
+
+    def test_locals_computed_helper_recovery_fails_closed(self) -> None:
+        self.assertDynamicAuthorityRejected(
+            self._with_helper(
+                "    locals()[\"_spawn\" + \"_shadow\"]()\n"
+            ),
+            "dynamic-namespace-authority-recovery",
+        )
+
+    def test_vars_computed_helper_recovery_fails_closed(self) -> None:
+        self.assertDynamicAuthorityRejected(
+            self._with_helper(
+                "    vars()[\"_spawn\" + \"_shadow\"]()\n"
+            ),
+            "dynamic-namespace-authority-recovery",
+        )
+
+    def test_builtins_namespace_recovery_fails_closed(self) -> None:
+        source = self._with_helper(
+            "    builtins.globals()[\"_spawn\" + \"_shadow\"]()\n"
+        ).replace("import os\n", "import os\nimport builtins\n")
+        self.assertDynamicAuthorityRejected(
+            source,
+            "dynamic-namespace-authority-recovery",
+        )
+
+    def test_eval_helper_recovery_fails_closed(self) -> None:
+        self.assertDynamicAuthorityRejected(
+            self._with_helper(
+                "    eval(\"_spawn\" + \"_shadow\")()\n"
+            ),
+            "dynamic-code-authority-recovery",
+        )
 
 
 if __name__ == "__main__":
