@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import pathlib
 import sys
 import tempfile
@@ -7,8 +8,9 @@ import unittest
 from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT.parent))
-import verify_terminal_candidate_authority_legacy as subject
+CONTROL_ROOT = ROOT.parent
+sys.path.insert(0, str(CONTROL_ROOT))
+import verify_terminal_candidate_authority as subject
 
 
 PROCESS_FAIL = {
@@ -31,7 +33,7 @@ PROCESS_FAIL = {
 }
 
 
-class TerminalLegacyProcessCreationEnclosureTests(unittest.TestCase):
+class TerminalSingleAuthoritySurfaceTests(unittest.TestCase):
     def _diagnostic(self, root: pathlib.Path) -> dict[str, object]:
         return subject._verify_terminal_bundle_diagnostic(
             runner_root=root,
@@ -48,7 +50,17 @@ class TerminalLegacyProcessCreationEnclosureTests(unittest.TestCase):
             sandbox_user=None,
         )
 
-    def test_direct_legacy_internal_route_fails_before_candidate_diagnostics(self) -> None:
+    def test_only_canonical_terminal_authority_module_exists(self) -> None:
+        legacy_path = CONTROL_ROOT / "verify_terminal_candidate_authority_legacy.py"
+        self.assertFalse(legacy_path.exists())
+        canonical_source = (CONTROL_ROOT / "verify_terminal_candidate_authority.py").read_text(encoding="utf-8")
+        self.assertNotIn("verify_terminal_candidate_authority_legacy", canonical_source)
+        self.assertNotIn("_legacy", canonical_source)
+        sys.modules.pop("verify_terminal_candidate_authority_legacy", None)
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module("verify_terminal_candidate_authority_legacy")
+
+    def test_canonical_internal_route_fails_before_candidate_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             with (
@@ -63,7 +75,7 @@ class TerminalLegacyProcessCreationEnclosureTests(unittest.TestCase):
         flow_verify.assert_not_called()
         authenticated_verify.assert_not_called()
 
-    def test_direct_legacy_public_route_cannot_bypass_process_creation_proof(self) -> None:
+    def test_canonical_public_route_cannot_bypass_process_creation_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             with (
@@ -90,7 +102,7 @@ class TerminalLegacyProcessCreationEnclosureTests(unittest.TestCase):
         process_verify.assert_called_once_with(root)
         flow_verify.assert_not_called()
 
-    def test_direct_legacy_cli_returns_error_on_process_creation_failure(self) -> None:
+    def test_canonical_cli_returns_error_on_process_creation_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             argv = [

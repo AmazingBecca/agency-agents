@@ -2,27 +2,122 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 
+import verify_authenticated_runner_bundle as authenticated
+import verify_bound_candidate_test_authority as bound
+import verify_completion_secret_boundary as completion
+import verify_detached_descendant_lifecycle as descendant
+import verify_nested_suite_dispatch_authority as nested
+import verify_terminal_attestation_control_flow as attestation_flow
 import verify_terminal_attestation_process_creation as process_creation
-import verify_terminal_candidate_authority_legacy as _legacy
+import verify_terminal_attestation_semantics as attestation
 
-# Preserve the established public/internal surface for existing callers and tests,
-# then override the terminal composition entry points below. Keeping the prior
-# implementation in an immutable sibling blob makes this change narrow while
-# ensuring the new process-creation proof encloses the entire legacy diagnostic.
-for _name in dir(_legacy):
-    if _name.startswith("__") or _name in {
-        "main",
-        "verify_terminal_bundle",
-        "_verify_terminal_bundle_diagnostic",
-    }:
-        continue
-    globals()[_name] = getattr(_legacy, _name)
-
+_SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
+_AUTHORITY_LEVEL = "diagnostic-bundle-dispatch-bound-not-terminal"
+_NESTED_SCHEMA = "amazingbecca.nested-suite-dispatch-authority.v1"
+_DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
+_COMPLETION_SCHEMA = "amazingbecca.completion-secret-boundary.v1"
+_ATTESTATION_SCHEMA = "amazingbecca.terminal-attestation-semantics.v1"
+_ATTESTATION_FLOW_SCHEMA = "amazingbecca.terminal-attestation-control-flow.v1"
 _PROCESS_CREATION_SCHEMA = "amazingbecca.terminal-attestation-process-creation.v1"
 _PROCESS_CREATION_AUTHORITY_LEVEL = "source-process-topology-diagnostic-not-terminal"
+_PROMOTION_AUTHORITY_READY = False
+
+
+def _validate_nested_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _NESTED_SCHEMA:
+        raise RuntimeError("nested dispatch authority schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("nested dispatch authority decision is malformed")
+    if not isinstance(report.get("case_count"), int):
+        raise RuntimeError("nested dispatch authority case count is malformed")
+    if not isinstance(report.get("parent_signal_containment_included"), bool):
+        raise RuntimeError("nested dispatch parent-signal containment state is malformed")
+    for key in ("accepted_attacks", "rejected_clean"):
+        value = report.get(key)
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise RuntimeError(f"nested dispatch authority {key} is malformed")
+
+
+def _validate_descendant_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _DESCENDANT_SCHEMA:
+        raise RuntimeError("detached-descendant authority schema is unexpected")
+    if report.get("passed") is not True:
+        raise RuntimeError("detached-descendant authority did not pass")
+    if report.get("detached_session_started") is not True:
+        raise RuntimeError("detached-descendant authority did not start the hostile session")
+    if report.get("heartbeat_stable_after_namespace_exit") is not True:
+        raise RuntimeError("detached-descendant authority did not prove namespace teardown")
+
+
+def _validate_completion_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _COMPLETION_SCHEMA:
+        raise RuntimeError("completion-secret boundary schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("completion-secret boundary decision is malformed")
+    if not isinstance(report.get("finding_count"), int):
+        raise RuntimeError("completion-secret boundary finding count is malformed")
+    findings = report.get("findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("completion-secret boundary findings are malformed")
+    if report.get("passed") is not True:
+        raise RuntimeError(
+            "runner bundle retains a completion secret across candidate execution"
+        )
+    if report.get("finding_count") != 0 or findings:
+        raise RuntimeError("completion-secret boundary reported inconsistent findings")
+
+
+def _validate_attestation_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _ATTESTATION_SCHEMA:
+        raise RuntimeError("terminal-attestation semantics schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("terminal-attestation semantics decision is malformed")
+    if not isinstance(report.get("completion_boundary_passed"), bool):
+        raise RuntimeError("terminal-attestation completion boundary state is malformed")
+    if not isinstance(report.get("completion_boundary_finding_count"), int):
+        raise RuntimeError("terminal-attestation completion finding count is malformed")
+    if not isinstance(report.get("candidate_runner_count"), int):
+        raise RuntimeError("terminal-attestation candidate runner count is malformed")
+    if not isinstance(report.get("attestation_finding_count"), int):
+        raise RuntimeError("terminal-attestation finding count is malformed")
+    findings = report.get("attestation_findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("terminal-attestation findings are malformed")
+    if report.get("passed") is not True:
+        raise RuntimeError("runner bundle lacks reviewed external terminal-attestation semantics")
+    if report.get("completion_boundary_passed") is not True:
+        raise RuntimeError("terminal-attestation completion boundary did not pass")
+    if report.get("completion_boundary_finding_count") != 0:
+        raise RuntimeError("terminal-attestation completion boundary reported findings")
+    if report.get("candidate_runner_count") != 1:
+        raise RuntimeError("terminal-attestation candidate runner authority is ambiguous")
+    if report.get("attestation_finding_count") != 0 or findings:
+        raise RuntimeError("terminal-attestation report contains findings despite PASS")
+
+
+def _validate_attestation_flow_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _ATTESTATION_FLOW_SCHEMA:
+        raise RuntimeError("terminal-attestation control-flow schema is unexpected")
+    if not isinstance(report.get("passed"), bool):
+        raise RuntimeError("terminal-attestation control-flow decision is malformed")
+    for key in ("candidate_runner_count", "terminal_attestor_count", "finding_count"):
+        if not isinstance(report.get(key), int):
+            raise RuntimeError(f"terminal-attestation control-flow {key} is malformed")
+    findings = report.get("findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("terminal-attestation control-flow findings are malformed")
+    if report.get("passed") is not True:
+        raise RuntimeError("runner bundle lacks reviewed terminal-attestation control flow")
+    if report.get("candidate_runner_count") != 1:
+        raise RuntimeError("terminal-attestation control-flow candidate runner authority is ambiguous")
+    if report.get("terminal_attestor_count") != 1:
+        raise RuntimeError("terminal-attestation control-flow attestor authority is ambiguous")
+    if report.get("finding_count") != 0 or findings:
+        raise RuntimeError("terminal-attestation control-flow contains findings despite PASS")
 
 
 def _validate_process_creation_report(report: dict[str, object]) -> None:
@@ -39,11 +134,6 @@ def _validate_process_creation_report(report: dict[str, object]) -> None:
     findings = report.get("findings")
     if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
         raise RuntimeError("terminal-attestation process-creation findings are malformed")
-
-    # Preserve the stronger, already-published control-flow failure contract when
-    # the process-creation proof is red only because its control-flow prerequisite
-    # is red. This keeps failure provenance stable while still ensuring the new
-    # process-creation proof runs before candidate diagnostics.
     if report.get("control_flow_passed") is not True:
         raise RuntimeError("runner bundle lacks reviewed terminal-attestation control flow")
     if report.get("control_flow_finding_count") != 0:
@@ -56,30 +146,242 @@ def _validate_process_creation_report(report: dict[str, object]) -> None:
         raise RuntimeError("terminal-attestation process-creation contains findings despite PASS")
 
 
-def _verify_terminal_bundle_diagnostic(**kwargs: object) -> dict[str, object]:
-    runner_root = kwargs.get("runner_root")
-    if not isinstance(runner_root, pathlib.Path):
-        raise RuntimeError("terminal candidate authority runner root is malformed")
+def _require_production_sandbox_user(sandbox_user: str) -> str:
+    if not isinstance(sandbox_user, str) or not sandbox_user:
+        raise RuntimeError("terminal candidate authority requires an explicit sandbox user")
+    if sandbox_user.strip() != sandbox_user:
+        raise RuntimeError("terminal candidate authority sandbox user must be canonical")
 
+    identity = bound.boundary.resolve_identity(sandbox_user)
+    if identity.uid == 0:
+        raise RuntimeError("terminal candidate authority sandbox user must be non-root")
+    if identity.uid == os.geteuid():
+        raise RuntimeError("terminal candidate authority sandbox user must be distinct from the verifier principal")
+    return sandbox_user
+
+
+def _force_nonterminal_authority(report: dict[str, object]) -> dict[str, object]:
+    """Prevent a diagnostic-green report from becoming promotion authority.
+
+    This composite still executes candidate-visible fixtures and therefore does
+    not own blinded expected outcomes. Until that boundary is externalized, the
+    public result must remain explicitly non-terminal even when every diagnostic
+    and sandbox containment check succeeds.
+    """
+    if report.get("terminal_schema") != _SCHEMA:
+        raise RuntimeError("terminal candidate authority schema is unexpected")
+    if report.get("authority_level") != _AUTHORITY_LEVEL:
+        raise RuntimeError("terminal candidate authority level is unexpected")
+    if not isinstance(report.get("diagnostic_passed"), bool):
+        raise RuntimeError("terminal candidate diagnostic decision is malformed")
+
+    hardened = dict(report)
+    hardened["promotion_authority_ready"] = _PROMOTION_AUTHORITY_READY
+    hardened["promotion_authorized"] = False
+    hardened["passed"] = False
+    return hardened
+
+
+def _verify_terminal_bundle_diagnostic(
+    *,
+    runner_root: pathlib.Path,
+    entrypoint: str,
+    python_executable: pathlib.Path,
+    expected_python_sha256: str,
+    expected_runner_sha256: str,
+    expected_bundle_sha256: str,
+    repository: str,
+    head_sha: str,
+    base_sha: str,
+    merge_sha: str,
+    timeout_seconds: int = 20,
+    sandbox_user: str | None = None,
+) -> dict[str, object]:
+    """Internal diagnostic composition helper.
+
+    An unsandboxed call is intentionally incapable of returning an authoritative
+    PASS. Tests may use it to exercise the semantic attack matrix without Linux
+    namespace privileges. The live parent-signal containment probe is omitted
+    unless the runner is inside the verified distinct-principal PID namespace,
+    because an intentionally vulnerable runner must never be allowed to signal
+    the control verifier itself.
+    """
     process_before = process_creation.verify(runner_root)
     _validate_process_creation_report(process_before)
 
-    report = _legacy._verify_terminal_bundle_diagnostic(**kwargs)
-    if not isinstance(report, dict):
-        raise RuntimeError("legacy terminal candidate diagnostic report is malformed")
+    attestation_flow_report = attestation_flow.verify(runner_root)
+    _validate_attestation_flow_report(attestation_flow_report)
 
-    process_after = process_creation.verify(runner_root)
+    attestation_report = attestation.verify(runner_root)
+    _validate_attestation_report(attestation_report)
+
+    completion_report = completion.verify(runner_root)
+    _validate_completion_report(completion_report)
+    if (
+        attestation_report.get("completion_boundary_passed")
+        != completion_report.get("passed")
+        or attestation_report.get("completion_boundary_finding_count")
+        != completion_report.get("finding_count")
+    ):
+        raise RuntimeError("terminal-attestation and completion-boundary reports disagree")
+    if (
+        attestation_flow_report.get("candidate_runner_count")
+        != attestation_report.get("candidate_runner_count")
+    ):
+        raise RuntimeError("terminal-attestation semantic and control-flow runner counts disagree")
+
+    descendant_report: dict[str, object] | None = None
+    if sandbox_user is not None:
+        descendant_report = descendant.verify_detached_descendant_lifecycle(
+            sandbox_user=sandbox_user,
+            timeout_seconds=min(max(timeout_seconds, 2), 30),
+        )
+        _validate_descendant_report(descendant_report)
+
+    base_report = authenticated.verify_authenticated_bundle(
+        runner_root=runner_root,
+        entrypoint=entrypoint,
+        python_executable=python_executable,
+        expected_python_sha256=expected_python_sha256,
+        expected_runner_sha256=expected_runner_sha256,
+        expected_bundle_sha256=expected_bundle_sha256,
+        repository=repository,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        merge_sha=merge_sha,
+        timeout_seconds=timeout_seconds,
+        sandbox_user=sandbox_user,
+    )
+    if not isinstance(base_report.get("passed"), bool):
+        raise RuntimeError("authenticated bundle decision is malformed")
+
+    before_bundle = authenticated.snapshot_bundle(runner_root)
+    if before_bundle.sha256 != expected_bundle_sha256:
+        raise RuntimeError("runner bundle authority drifted before terminal dispatch verification")
+    runtime_before = authenticated._snapshot_python_executable(python_executable)
+    if runtime_before.sha256 != expected_python_sha256:
+        raise RuntimeError("Python authority drifted before terminal dispatch verification")
+
+    authenticated._assert_bundle_not_writable_by_sandbox(before_bundle, sandbox_user)
+    authenticated._assert_runtime_not_writable_by_sandbox(runtime_before, sandbox_user)
+
+    closure_before = None
+    if sandbox_user is not None:
+        sandbox_identity = bound.boundary.resolve_identity(sandbox_user)
+        closure_before = authenticated.runtime_closure.snapshot_runtime_closure(runtime_before.path)
+        authenticated.runtime_closure.assert_closure_not_writable_by_identity(
+            closure_before,
+            uid=sandbox_identity.uid,
+            gid=sandbox_identity.gid,
+        )
+
+    runner = (before_bundle.root / pathlib.PurePosixPath(entrypoint)).resolve(strict=True)
+    if before_bundle.root not in runner.parents:
+        raise RuntimeError("runner entrypoint escaped authenticated bundle before terminal verification")
+    if sandbox_user is not None:
+        bound._assert_sandbox_runner_access(runner)
+
+    parent_signal_required = sandbox_user is not None
+    with bound._sandboxed_candidate_execution(sandbox_user):
+        nested_report = nested.verify(
+            runner=runner,
+            python_executable=runtime_before.path,
+            timeout_seconds=timeout_seconds,
+            include_parent_signal_containment=parent_signal_required,
+        )
+    _validate_nested_report(nested_report)
+    if bool(nested_report["parent_signal_containment_included"]) != parent_signal_required:
+        raise RuntimeError("nested dispatch parent-signal containment coverage drifted")
+
+    runtime_after = authenticated._snapshot_python_executable(runtime_before.path)
+    if runtime_after != runtime_before:
+        raise RuntimeError("Python executable authority changed during terminal dispatch verification")
+    if closure_before is not None:
+        closure_after = authenticated.runtime_closure.snapshot_runtime_closure(runtime_before.path)
+        if closure_after != closure_before:
+            raise RuntimeError("Python runtime closure changed during terminal dispatch verification")
+
+    after_bundle = authenticated.snapshot_bundle(before_bundle.root)
+    if after_bundle != before_bundle:
+        raise RuntimeError("runner bundle authority changed during terminal dispatch verification")
+
+    completion_after = completion.verify(before_bundle.root)
+    _validate_completion_report(completion_after)
+    if completion_after != completion_report:
+        raise RuntimeError("completion-secret boundary changed during terminal verification")
+
+    attestation_after = attestation.verify(before_bundle.root)
+    _validate_attestation_report(attestation_after)
+    if attestation_after != attestation_report:
+        raise RuntimeError("terminal-attestation semantics changed during terminal verification")
+
+    attestation_flow_after = attestation_flow.verify(before_bundle.root)
+    _validate_attestation_flow_report(attestation_flow_after)
+    if attestation_flow_after != attestation_flow_report:
+        raise RuntimeError("terminal-attestation control flow changed during terminal verification")
+
+    process_after = process_creation.verify(before_bundle.root)
     _validate_process_creation_report(process_after)
     if process_after != process_before:
         raise RuntimeError("terminal-attestation process-creation authority changed during terminal verification")
 
-    diagnostic_passed = report.get("diagnostic_passed")
-    if not isinstance(diagnostic_passed, bool):
-        raise RuntimeError("terminal candidate diagnostic decision is malformed")
+    accepted_attacks = sorted(
+        set(base_report.get("accepted_attacks", []))
+        | set(nested_report.get("accepted_attacks", []))
+    )
+    rejected_clean = sorted(
+        set(base_report.get("rejected_clean", []))
+        | set(nested_report.get("rejected_clean", []))
+    )
+    base_total = base_report.get("total_case_count", 0)
+    if not isinstance(base_total, int):
+        raise RuntimeError("authenticated bundle case count is malformed")
+    nested_count = int(nested_report["case_count"])
+    descendant_passed = descendant_report is not None and descendant_report.get("passed") is True
+    parent_signal_verified = (
+        parent_signal_required
+        and nested_report.get("parent_signal_containment_included") is True
+        and "parent-signal-kernel-containment" not in accepted_attacks
+    )
+    diagnostic_passed = (
+        bool(base_report["passed"])
+        and bool(nested_report["passed"])
+        and bool(completion_report["passed"])
+        and bool(attestation_report["passed"])
+        and bool(attestation_flow_report["passed"])
+        and bool(process_before["passed"])
+        and not accepted_attacks
+        and not rejected_clean
+    )
+    sandbox_authority_enforced = sandbox_user is not None
+    containment_passed = (
+        diagnostic_passed
+        and sandbox_authority_enforced
+        and descendant_passed
+        and parent_signal_verified
+    )
 
-    hardened = dict(report)
-    hardened.update(
+    report = dict(base_report)
+    report.update(
         {
+            "terminal_schema": _SCHEMA,
+            "authority_level": _AUTHORITY_LEVEL,
+            "completion_secret_schema": completion_report["schema"],
+            "completion_secret_authority_level": completion_report.get("authority_level"),
+            "completion_secret_boundary_verified": True,
+            "completion_secret_source_file_count": completion_report["source_file_count"],
+            "completion_secret_finding_count": completion_report["finding_count"],
+            "terminal_attestation_schema": attestation_report["schema"],
+            "terminal_attestation_authority_level": attestation_report.get("authority_level"),
+            "terminal_attestation_verified": True,
+            "terminal_attestation_candidate_runner_count": attestation_report["candidate_runner_count"],
+            "terminal_attestation_finding_count": attestation_report["attestation_finding_count"],
+            "terminal_attestation_control_flow_schema": attestation_flow_report["schema"],
+            "terminal_attestation_control_flow_authority_level": attestation_flow_report.get("authority_level"),
+            "terminal_attestation_control_flow_verified": True,
+            "terminal_attestation_control_flow_candidate_runner_count": attestation_flow_report["candidate_runner_count"],
+            "terminal_attestation_control_flow_attestor_count": attestation_flow_report["terminal_attestor_count"],
+            "terminal_attestation_control_flow_finding_count": attestation_flow_report["finding_count"],
             "terminal_attestation_process_creation_schema": process_before["schema"],
             "terminal_attestation_process_creation_authority_level": process_before["authority_level"],
             "terminal_attestation_process_creation_verified": True,
@@ -87,13 +389,28 @@ def _verify_terminal_bundle_diagnostic(**kwargs: object) -> dict[str, object]:
             "terminal_attestation_process_creation_control_flow_finding_count": process_before["control_flow_finding_count"],
             "terminal_attestation_process_creation_attestor_count": process_before["terminal_attestor_count"],
             "terminal_attestation_process_creation_finding_count": process_before["finding_count"],
-            "diagnostic_passed": diagnostic_passed and bool(process_before["passed"]),
+            "nested_dispatch_schema": nested_report["schema"],
+            "nested_dispatch_authority_level": nested_report.get("authority_level"),
+            "nested_dispatch_case_count": nested_count,
+            "nested_dispatch_cases": list(nested_report.get("cases", [])),
+            "terminal_total_case_count": base_total + nested_count,
+            "parent_signal_containment_verified": parent_signal_verified,
+            "detached_descendant_schema": (
+                descendant_report.get("schema") if descendant_report is not None else None
+            ),
+            "detached_descendant_verified": descendant_report is not None,
+            "detached_descendant_report": descendant_report,
+            "sandbox_authority_enforced": sandbox_authority_enforced,
+            "diagnostic_passed": diagnostic_passed,
+            "containment_passed": containment_passed,
+            "promotion_authority_ready": _PROMOTION_AUTHORITY_READY,
+            "promotion_authorized": False,
+            "accepted_attacks": accepted_attacks,
+            "rejected_clean": rejected_clean,
             "passed": False,
         }
     )
-    if not hardened["diagnostic_passed"]:
-        hardened["containment_passed"] = False
-    return hardened
+    return report
 
 
 def verify_terminal_bundle(
@@ -111,7 +428,7 @@ def verify_terminal_bundle(
     timeout_seconds: int = 20,
     sandbox_user: str = "nobody",
 ) -> dict[str, object]:
-    sandbox_user = _legacy._require_production_sandbox_user(sandbox_user)
+    sandbox_user = _require_production_sandbox_user(sandbox_user)
     report = _verify_terminal_bundle_diagnostic(
         runner_root=runner_root,
         entrypoint=entrypoint,
@@ -126,7 +443,7 @@ def verify_terminal_bundle(
         timeout_seconds=timeout_seconds,
         sandbox_user=sandbox_user,
     )
-    return _legacy._force_nonterminal_authority(report)
+    return _force_nonterminal_authority(report)
 
 
 def main(argv: list[str] | None = None) -> int:
