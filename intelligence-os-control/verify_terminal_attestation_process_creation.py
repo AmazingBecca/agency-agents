@@ -67,6 +67,26 @@ _PROCESS_ATTRIBUTES = frozenset(
     name.rsplit(".", 1)[-1] for name in _FORBIDDEN_PROCESS_PRIMITIVES
 ) | frozenset({"Popen"})
 _NATIVE_ESCAPE_ROOTS = frozenset({"ctypes", "cffi", "ffi", "libc"})
+_DYNAMIC_NAMESPACE_CALLS = frozenset(
+    {
+        "globals",
+        "locals",
+        "vars",
+        "builtins.globals",
+        "builtins.locals",
+        "builtins.vars",
+    }
+)
+_DYNAMIC_CODE_CALLS = frozenset(
+    {
+        "eval",
+        "exec",
+        "compile",
+        "builtins.eval",
+        "builtins.exec",
+        "builtins.compile",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -306,6 +326,28 @@ def _inspect_process_surface(
                 # alias invokes them.
                 primitive = _primitive_expression(node, aliases)
             raw_name = _dotted_name(node.func)
+            call_name = _resolve_alias(raw_name, aliases)
+
+            if call_name in _DYNAMIC_NAMESPACE_CALLS:
+                findings.append(
+                    _finding(
+                        path,
+                        function.name,
+                        node.lineno,
+                        "dynamic-namespace-authority-recovery",
+                        f"dynamic namespace access is not reviewable attestor authority: {call_name}",
+                    )
+                )
+            elif call_name in _DYNAMIC_CODE_CALLS:
+                findings.append(
+                    _finding(
+                        path,
+                        function.name,
+                        node.lineno,
+                        "dynamic-code-authority-recovery",
+                        f"dynamic code execution/compilation is not reviewable attestor authority: {call_name}",
+                    )
+                )
 
             if primitive in _FORBIDDEN_PROCESS_PRIMITIVES:
                 findings.append(
