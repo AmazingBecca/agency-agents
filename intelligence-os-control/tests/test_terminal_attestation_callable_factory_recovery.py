@@ -167,6 +167,65 @@ class TerminalAttestationCallableFactoryRecoveryTests(unittest.TestCase):
         ).replace("import sys\n", "import sys\nimport types\n")
         self.assertProcessHelperRejected(source)
 
+    def test_bound_dunder_call_from_factory_return_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _reflection_factory():\n"
+                "    return getattr\n",
+                "    reflect = _reflection_factory()\n"
+                "    invoke = reflect.__call__\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    invoke(sys.modules[__name__], helper_name)()\n",
+            )
+        )
+
+    def test_extracted_container_member_from_factory_return_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _reflection_factory():\n"
+                "    return getattr\n",
+                "    reflect = _reflection_factory()\n"
+                "    dispatch = [reflect]\n"
+                "    invoke = dispatch[0]\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    invoke(sys.modules[__name__], helper_name)()\n",
+            )
+        )
+
+    def test_bound_namespace_get_from_factory_return_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _namespace_factory():\n"
+                "    return sys.modules[__name__].__dict__\n",
+                "    registry = _namespace_factory()\n"
+                "    lookup = registry.get\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    lookup(helper_name)()\n",
+            )
+        )
+
+    def test_tuple_unpacked_factory_return_keeps_process_helper_reachable(self) -> None:
+        self.assertProcessHelperRejected(
+            self._with_helper(
+                "\ndef _reflection_factory():\n"
+                "    return getattr\n",
+                "    reflect, = (_reflection_factory(),)\n"
+                "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+                "    reflect(sys.modules[__name__], helper_name)()\n",
+            )
+        )
+
+    def test_factory_return_wrapped_by_positional_constructor_keeps_process_helper_reachable(self) -> None:
+        source = self._with_helper(
+            "\ndef _reflection_factory():\n"
+            "    return getattr\n",
+            "    reflect = _reflection_factory()\n"
+            "    dispatch = collections.deque([reflect])\n"
+            "    helper_name = ''.join(('_spawn', '_shadow'))\n"
+            "    dispatch[0](sys.modules[__name__], helper_name)()\n",
+        ).replace("import os\n", "import os\nimport collections\n")
+        self.assertProcessHelperRejected(source)
+
 
 if __name__ == "__main__":
     unittest.main()
