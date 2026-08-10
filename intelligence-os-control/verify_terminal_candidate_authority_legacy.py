@@ -12,6 +12,7 @@ import verify_completion_secret_boundary as completion
 import verify_detached_descendant_lifecycle as descendant
 import verify_nested_suite_dispatch_authority as nested
 import verify_terminal_attestation_control_flow as attestation_flow
+import verify_terminal_attestation_process_creation as process_creation
 import verify_terminal_attestation_semantics as attestation
 
 _SCHEMA = "amazingbecca.terminal-candidate-authority.v1"
@@ -21,6 +22,8 @@ _DESCENDANT_SCHEMA = "amazingbecca.detached-descendant-lifecycle.v1"
 _COMPLETION_SCHEMA = "amazingbecca.completion-secret-boundary.v1"
 _ATTESTATION_SCHEMA = "amazingbecca.terminal-attestation-semantics.v1"
 _ATTESTATION_FLOW_SCHEMA = "amazingbecca.terminal-attestation-control-flow.v1"
+_PROCESS_CREATION_SCHEMA = "amazingbecca.terminal-attestation-process-creation.v1"
+_PROCESS_CREATION_AUTHORITY_LEVEL = "source-process-topology-diagnostic-not-terminal"
 _PROMOTION_AUTHORITY_READY = False
 
 
@@ -117,6 +120,32 @@ def _validate_attestation_flow_report(report: dict[str, object]) -> None:
         raise RuntimeError("terminal-attestation control-flow contains findings despite PASS")
 
 
+def _validate_process_creation_report(report: dict[str, object]) -> None:
+    if report.get("schema") != _PROCESS_CREATION_SCHEMA:
+        raise RuntimeError("terminal-attestation process-creation schema is unexpected")
+    if report.get("authority_level") != _PROCESS_CREATION_AUTHORITY_LEVEL:
+        raise RuntimeError("terminal-attestation process-creation authority level is unexpected")
+    for key in ("passed", "control_flow_passed"):
+        if not isinstance(report.get(key), bool):
+            raise RuntimeError(f"terminal-attestation process-creation {key} is malformed")
+    for key in ("control_flow_finding_count", "terminal_attestor_count", "finding_count"):
+        if not isinstance(report.get(key), int):
+            raise RuntimeError(f"terminal-attestation process-creation {key} is malformed")
+    findings = report.get("findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        raise RuntimeError("terminal-attestation process-creation findings are malformed")
+    if report.get("control_flow_passed") is not True:
+        raise RuntimeError("runner bundle lacks reviewed terminal-attestation control flow")
+    if report.get("control_flow_finding_count") != 0:
+        raise RuntimeError("terminal-attestation process-creation control-flow prerequisite reported findings")
+    if report.get("passed") is not True:
+        raise RuntimeError("runner bundle exposes alternate process-creation authority")
+    if report.get("terminal_attestor_count") != 1:
+        raise RuntimeError("terminal-attestation process-creation attestor authority is ambiguous")
+    if report.get("finding_count") != 0 or findings:
+        raise RuntimeError("terminal-attestation process-creation contains findings despite PASS")
+
+
 def _require_production_sandbox_user(sandbox_user: str) -> str:
     if not isinstance(sandbox_user, str) or not sandbox_user:
         raise RuntimeError("terminal candidate authority requires an explicit sandbox user")
@@ -177,6 +206,9 @@ def _verify_terminal_bundle_diagnostic(
     because an intentionally vulnerable runner must never be allowed to signal
     the control verifier itself.
     """
+    process_before = process_creation.verify(runner_root)
+    _validate_process_creation_report(process_before)
+
     attestation_flow_report = attestation_flow.verify(runner_root)
     _validate_attestation_flow_report(attestation_flow_report)
 
@@ -288,6 +320,11 @@ def _verify_terminal_bundle_diagnostic(
     if attestation_flow_after != attestation_flow_report:
         raise RuntimeError("terminal-attestation control flow changed during terminal verification")
 
+    process_after = process_creation.verify(before_bundle.root)
+    _validate_process_creation_report(process_after)
+    if process_after != process_before:
+        raise RuntimeError("terminal-attestation process-creation authority changed during terminal verification")
+
     accepted_attacks = sorted(
         set(base_report.get("accepted_attacks", []))
         | set(nested_report.get("accepted_attacks", []))
@@ -312,6 +349,7 @@ def _verify_terminal_bundle_diagnostic(
         and bool(completion_report["passed"])
         and bool(attestation_report["passed"])
         and bool(attestation_flow_report["passed"])
+        and bool(process_before["passed"])
         and not accepted_attacks
         and not rejected_clean
     )
@@ -344,6 +382,13 @@ def _verify_terminal_bundle_diagnostic(
             "terminal_attestation_control_flow_candidate_runner_count": attestation_flow_report["candidate_runner_count"],
             "terminal_attestation_control_flow_attestor_count": attestation_flow_report["terminal_attestor_count"],
             "terminal_attestation_control_flow_finding_count": attestation_flow_report["finding_count"],
+            "terminal_attestation_process_creation_schema": process_before["schema"],
+            "terminal_attestation_process_creation_authority_level": process_before["authority_level"],
+            "terminal_attestation_process_creation_verified": True,
+            "terminal_attestation_process_creation_control_flow_passed": process_before["control_flow_passed"],
+            "terminal_attestation_process_creation_control_flow_finding_count": process_before["control_flow_finding_count"],
+            "terminal_attestation_process_creation_attestor_count": process_before["terminal_attestor_count"],
+            "terminal_attestation_process_creation_finding_count": process_before["finding_count"],
             "nested_dispatch_schema": nested_report["schema"],
             "nested_dispatch_authority_level": nested_report.get("authority_level"),
             "nested_dispatch_case_count": nested_count,
