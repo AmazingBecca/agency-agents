@@ -41,6 +41,62 @@ def _contains_factory_authority(
     return False
 
 
+def _constructor_authority_attributes(
+    tree: ast.Module,
+    call: ast.Call,
+    positional_authority: list[bool],
+) -> set[str]:
+    """Recover direct instance fields that receive tainted constructor arguments."""
+    if not isinstance(call.func, ast.Name):
+        return set()
+    classes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == call.func.id
+    ]
+    if len(classes) != 1:
+        return set()
+    initializers = [
+        node
+        for node in classes[0].body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    ]
+    if len(initializers) != 1:
+        return set()
+    initializer = initializers[0]
+    parameters = [*initializer.args.posonlyargs, *initializer.args.args]
+    if not parameters:
+        return set()
+    instance_name = parameters[0].arg
+    bound_parameters = parameters[1:]
+    tainted_parameters = {
+        bound_parameters[index].arg
+        for index, tainted in enumerate(positional_authority)
+        if tainted and index < len(bound_parameters)
+    }
+    if not tainted_parameters:
+        return set()
+
+    attributes: set[str] = set()
+    for node in _base._function_scope_nodes(initializer):
+        target: ast.AST | None = None
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        if not (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == instance_name
+            and isinstance(value, ast.Name)
+            and value.id in tainted_parameters
+        ):
+            continue
+        attributes.add(target.attr)
+    return attributes
+
+
 def _factory_authority_state(
     tree: ast.Module,
     function: ast.FunctionDef,
@@ -147,13 +203,14 @@ def _factory_authority_state(
                             changed = True
                         continue
 
-                    positional_authority = any(
+                    positional_authority_values = [
                         helper_result_in(argument)
                         or _contains_factory_authority(
                             argument, aliases, containers, object_attributes
                         )
                         for argument in value.args
-                    )
+                    ]
+                    positional_authority = any(positional_authority_values)
                     dangerous_keywords = {
                         keyword.arg
                         for keyword in value.keywords
@@ -172,6 +229,16 @@ def _factory_authority_state(
                         if target.id not in containers:
                             containers.add(target.id)
                             changed = True
+                        recovered_attributes = _constructor_authority_attributes(
+                            tree, value, positional_authority_values
+                        )
+                        if recovered_attributes:
+                            before = set(object_attributes.get(target.id, set()))
+                            object_attributes.setdefault(target.id, set()).update(
+                                recovered_attributes
+                            )
+                            if object_attributes[target.id] != before:
+                                changed = True
                     if dangerous_keywords:
                         before = set(object_attributes.get(target.id, set()))
                         object_attributes.setdefault(target.id, set()).update(dangerous_keywords)
