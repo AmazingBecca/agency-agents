@@ -250,14 +250,19 @@ def _referenced_local_helpers(
     function: ast.FunctionDef,
     functions: dict[str, list[ast.FunctionDef]],
 ) -> set[str]:
-    names: set[str] = set()
-    for call in ast.walk(function):
-        if not isinstance(call, ast.Call):
-            continue
-        name = _dotted_name(call.func)
-        if name in functions and len(functions[name]) == 1:
-            names.add(name)
-    return names
+    # Treat every loaded reference to a unique top-level helper as reachable,
+    # not only a syntactically direct ``helper()`` call. This deliberately
+    # over-approximates authority: aliasing, chaining, tuple/container storage,
+    # closure capture, or passing a helper into another callable must not make
+    # a process-creating helper disappear from the reviewed call graph.
+    unique = {name for name, definitions in functions.items() if len(definitions) == 1}
+    return {
+        node.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in unique
+    }
 
 
 def _reachable_functions(
