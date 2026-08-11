@@ -20,15 +20,43 @@ def __getattr__(name: str):
 
 def _assignments(nodes: list[ast.AST]) -> dict[str, list[ast.AST]]:
     out: dict[str, list[ast.AST]] = {}
+
+    def projection(value: ast.AST, index: int) -> ast.Subscript:
+        return ast.Subscript(value=value, slice=ast.Constant(index), ctx=ast.Load())
+
+    def bind(target: ast.AST, value: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            out.setdefault(target.id, []).append(value)
+            return
+        if isinstance(target, ast.Starred):
+            # A starred capture represents a variable-length projection. Preserve the
+            # entire source conservatively so authority analysis remains fail closed.
+            bind(target.value, value)
+            return
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return
+        star_positions = [index for index, item in enumerate(target.elts) if isinstance(item, ast.Starred)]
+        if len(star_positions) > 1:
+            for item in target.elts:
+                bind(item, value)
+            return
+        star = star_positions[0] if star_positions else None
+        for index, item in enumerate(target.elts):
+            if star is None or index < star:
+                bind(item, projection(value, index))
+            elif index > star:
+                bind(item, projection(value, index - len(target.elts)))
+            else:
+                bind(item, value)
+
     for node in nodes:
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    out.setdefault(target.id, []).append(node.value)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-            out.setdefault(node.target.id, []).append(node.value)
-        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
-            out.setdefault(node.target.id, []).append(node.value)
+                bind(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            bind(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            bind(node.target, node.value)
     return out
 
 
