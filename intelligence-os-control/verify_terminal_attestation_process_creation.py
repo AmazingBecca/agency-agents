@@ -39,23 +39,188 @@ def _frame_namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, objec
             nodes = list(_base._function_scope_nodes(function))
             imports = _base._scope_import_aliases(tree, function)
             strings = _base._local_string_bindings(function)
-            assigns: dict[str, list[ast.AST]] = {}
-            for node in nodes:
-                if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            assigns.setdefault(target.id, []).append(node.value)
-                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-                    assigns.setdefault(node.target.id, []).append(node.value)
-                elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
-                    assigns.setdefault(node.target.id, []).append(node.value)
+            assigns = _v6._assignments(nodes)
 
             def resolved(value: ast.AST) -> str | None:
                 return _base._resolve_alias(_base._dotted_name(value), imports)
 
-            def authority_name(value: ast.AST) -> bool:
-                values = _base._string_values(value, strings)
+            def callee_is(
+                value: ast.AST,
+                expected: set[str],
+                depth: int = 0,
+                seen: set[str] | None = None,
+            ) -> bool:
+                if depth > 8:
+                    return False
+                direct = resolved(value)
+                if direct in expected:
+                    return True
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(callee_is(candidate, expected, depth + 1, nxt) for candidate in assigns.get(value.id, []))
+                return False
+
+            def authority_name(value: ast.AST, local_strings: dict[str, set[str]] | None = None) -> bool:
+                values = _base._string_values(value, strings if local_strings is None else local_strings)
                 return values is None or bool({"__globals__", "f_globals"} & values)
+
+            def attrgetter_namespace_factory(
+                value: ast.AST,
+                depth: int = 0,
+                seen: set[str] | None = None,
+            ) -> bool:
+                if depth > 8:
+                    return False
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(attrgetter_namespace_factory(candidate, depth + 1, nxt) for candidate in assigns.get(value.id, []))
+                if not isinstance(value, ast.Call) or not value.args:
+                    return False
+                if not callee_is(value.func, {"operator.attrgetter"}, depth + 1, seen):
+                    return False
+                attrs = _base._string_values(value.args[0], strings)
+                return attrs is None or bool({"__globals__", "f_globals"} & attrs)
+
+            helper_namespace_cache: dict[str, bool] = {}
+
+            def helper_returns_namespace(
+                name: str,
+                depth: int = 0,
+                seen_helpers: set[str] | None = None,
+            ) -> bool:
+                if depth > 8:
+                    return True
+                if name in helper_namespace_cache:
+                    return helper_namespace_cache[name]
+                definitions = functions.get(name, [])
+                if len(definitions) != 1:
+                    return False
+                seen_helpers = set() if seen_helpers is None else set(seen_helpers)
+                if name in seen_helpers:
+                    return False
+
+                definition = definitions[0]
+                helper_nodes = list(_base._function_scope_nodes(definition))
+                helper_imports = _base._scope_import_aliases(tree, definition)
+                helper_strings = _base._local_string_bindings(definition)
+                helper_assigns = _v6._assignments(helper_nodes)
+                next_helpers = seen_helpers | {name}
+                helper_namespace_cache[name] = False
+
+                def helper_resolved(value: ast.AST) -> str | None:
+                    return _base._resolve_alias(_base._dotted_name(value), helper_imports)
+
+                def helper_callee_is(
+                    value: ast.AST,
+                    expected: set[str],
+                    level: int = 0,
+                    seen_names: set[str] | None = None,
+                ) -> bool:
+                    if level > 8:
+                        return False
+                    direct = helper_resolved(value)
+                    if direct in expected:
+                        return True
+                    seen_names = set() if seen_names is None else set(seen_names)
+                    if isinstance(value, ast.Name):
+                        if value.id in seen_names:
+                            return False
+                        nxt = seen_names | {value.id}
+                        return any(
+                            helper_callee_is(candidate, expected, level + 1, nxt)
+                            for candidate in helper_assigns.get(value.id, [])
+                        )
+                    return False
+
+                def helper_attrgetter_factory(
+                    value: ast.AST,
+                    level: int = 0,
+                    seen_names: set[str] | None = None,
+                ) -> bool:
+                    if level > 8:
+                        return False
+                    seen_names = set() if seen_names is None else set(seen_names)
+                    if isinstance(value, ast.Name):
+                        if value.id in seen_names:
+                            return False
+                        nxt = seen_names | {value.id}
+                        return any(
+                            helper_attrgetter_factory(candidate, level + 1, nxt)
+                            for candidate in helper_assigns.get(value.id, [])
+                        )
+                    if not isinstance(value, ast.Call) or not value.args:
+                        return False
+                    if not helper_callee_is(value.func, {"operator.attrgetter"}, level + 1, seen_names):
+                        return False
+                    attrs = _base._string_values(value.args[0], helper_strings)
+                    return attrs is None or bool({"__globals__", "f_globals"} & attrs)
+
+                def helper_value_is_namespace(
+                    value: ast.AST,
+                    level: int = 0,
+                    seen_names: set[str] | None = None,
+                ) -> bool:
+                    if level > 8:
+                        return True
+                    seen_names = set() if seen_names is None else set(seen_names)
+                    if isinstance(value, ast.Name):
+                        if value.id in seen_names:
+                            return False
+                        nxt = seen_names | {value.id}
+                        return any(
+                            helper_value_is_namespace(candidate, level + 1, nxt)
+                            for candidate in helper_assigns.get(value.id, [])
+                        )
+                    if isinstance(value, (ast.Tuple, ast.List)):
+                        return any(helper_value_is_namespace(item, level + 1, seen_names) for item in value.elts)
+                    if isinstance(value, ast.Dict):
+                        return any(
+                            item is not None and helper_value_is_namespace(item, level + 1, seen_names)
+                            for item in value.values
+                        )
+                    if isinstance(value, ast.Attribute):
+                        return value.attr in {"__globals__", "f_globals"}
+                    if isinstance(value, ast.Subscript):
+                        return helper_value_is_namespace(value.value, level + 1, seen_names)
+                    if isinstance(value, ast.NamedExpr):
+                        return helper_value_is_namespace(value.value, level + 1, seen_names)
+                    if isinstance(value, ast.IfExp):
+                        return helper_value_is_namespace(value.body, level + 1, seen_names) or helper_value_is_namespace(
+                            value.orelse, level + 1, seen_names
+                        )
+                    if isinstance(value, ast.BoolOp):
+                        return any(helper_value_is_namespace(item, level + 1, seen_names) for item in value.values)
+                    if not isinstance(value, ast.Call):
+                        return False
+
+                    if helper_callee_is(
+                        value.func,
+                        {"getattr", "builtins.getattr", "object.__getattribute__"},
+                        level + 1,
+                        seen_names,
+                    ) and len(value.args) >= 2:
+                        return authority_name(value.args[1], helper_strings)
+                    if isinstance(value.func, ast.Attribute) and value.func.attr == "__getattribute__" and value.args:
+                        return authority_name(value.args[0], helper_strings)
+                    if helper_attrgetter_factory(value.func, level + 1, seen_names):
+                        return True
+                    call_name = helper_resolved(value.func)
+                    if call_name in functions and call_name not in next_helpers:
+                        return helper_returns_namespace(call_name, depth + 1, next_helpers)
+                    return False
+
+                for helper_node in helper_nodes:
+                    if isinstance(helper_node, ast.Return) and helper_node.value is not None:
+                        if helper_value_is_namespace(helper_node.value):
+                            helper_namespace_cache[name] = True
+                            return True
+                return False
 
             def namespace(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
                 if depth > 8:
@@ -67,19 +232,28 @@ def _frame_namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, objec
                     nxt = seen | {value.id}
                     return any(namespace(candidate, depth + 1, nxt) for candidate in assigns.get(value.id, []))
                 if isinstance(value, ast.Attribute):
-                    if value.attr in {"__globals__", "f_globals"}:
-                        return True
-                    return False
+                    return value.attr in {"__globals__", "f_globals"}
                 if isinstance(value, ast.Subscript):
                     return namespace(value.value, depth + 1, seen)
                 if not isinstance(value, ast.Call):
                     return False
 
-                call = resolved(value.func)
-                if call in {"getattr", "builtins.getattr", "object.__getattribute__"} and len(value.args) >= 2:
+                if callee_is(
+                    value.func,
+                    {"getattr", "builtins.getattr", "object.__getattribute__"},
+                    depth + 1,
+                    seen,
+                ) and len(value.args) >= 2:
                     return authority_name(value.args[1])
                 if isinstance(value.func, ast.Attribute) and value.func.attr == "__getattribute__" and value.args:
                     return authority_name(value.args[0])
+                if attrgetter_namespace_factory(value.func, depth + 1, seen):
+                    return True
+                for helper_name in functions:
+                    if callee_is(value.func, {helper_name}, depth + 1, seen) and helper_returns_namespace(
+                        helper_name, depth + 1
+                    ):
+                        return True
                 return False
 
             def affected_name(value: ast.AST) -> set[str]:
