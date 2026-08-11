@@ -126,6 +126,19 @@ RUNTIME_KEY_UPDATE_ATTACK = PREFIX + r"""
     options.update({key: _reflection_factory()})
 """ + SUFFIX
 
+ALIAS_BEFORE_SUBSCRIPT_ATTACK = PREFIX + r"""
+    options = {}
+    alias = options
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+ALIAS_CHAIN_BEFORE_UPDATE_ATTACK = PREFIX + r"""
+    options = {}
+    first = options
+    second = first
+    second.update({"resolver": _reflection_factory()})
+""" + SUFFIX
+
 
 class TerminalAttestationConstructorMutatedMappingAuthorityTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
@@ -165,6 +178,12 @@ class TerminalAttestationConstructorMutatedMappingAuthorityTests(unittest.TestCa
 
     def test_runtime_key_update_fails_closed(self) -> None:
         self._assert_rejected(RUNTIME_KEY_UPDATE_ATTACK)
+
+    def test_alias_before_subscript_write_cannot_hide_mapping_authority(self) -> None:
+        self._assert_rejected(ALIAS_BEFORE_SUBSCRIPT_ATTACK)
+
+    def test_alias_chain_before_update_cannot_hide_mapping_authority(self) -> None:
+        self._assert_rejected(ALIAS_CHAIN_BEFORE_UPDATE_ATTACK)
 
 
 if __name__ == "__main__":
