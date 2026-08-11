@@ -6,31 +6,21 @@ import json
 import pathlib
 import sys
 
-import verify_terminal_attestation_process_creation_v1 as _v1
+import verify_terminal_attestation_process_creation_v2 as _v2
 
 
-Finding = _v1.Finding
-_SCHEMA = _v1._SCHEMA
-_ATTESTOR_NAME = _v1._ATTESTOR_NAME
-_base = _v1._base
+Finding = _v2.Finding
+_SCHEMA = _v2._SCHEMA
+_ATTESTOR_NAME = _v2._ATTESTOR_NAME
+_base = _v2._base
 
 
 def __getattr__(name: str):
-    return getattr(_v1, name)
+    return getattr(_v2, name)
 
 
-def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
-    """Close callable-authority laundering through constructor mapping flows.
-
-    In addition to literal/aliased ``**kwargs`` recovery, track mapping unions,
-    computed constant keys, ``dict(...)`` construction, static pair sequences,
-    in-place mapping mutation, and mutation through aliases that were bound to
-    the same mapping object before authority was inserted. Alias identity is
-    recovered across direct assignments, destructuring assignments, and chained
-    assignments. If helper-produced callable authority is inserted under a
-    runtime-derived key and the mapping is later unpacked into a reviewed
-    constructor, fail closed because the binding cannot be proven.
-    """
+def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
+    """Close mapping-identity laundering through destructuring and containers."""
     findings: list[dict[str, object]] = []
 
     for source in _base.control_flow._source_files(root):
@@ -51,58 +41,117 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
         for function in _base._reachable_functions(tree, attestor, functions):
             import_aliases = _base._scope_import_aliases(tree, function)
             scope_nodes = list(_base._function_scope_nodes(function))
+            assignment_nodes = [
+                node for node in scope_nodes if isinstance(node, ast.Assign)
+            ]
             assignments: list[tuple[ast.AST, ast.AST]] = []
-            assignment_nodes: list[ast.Assign] = []
+            assigned_values: dict[str, ast.AST] = {}
+
             for node in scope_nodes:
                 if isinstance(node, ast.Assign):
-                    assignment_nodes.append(node)
-                    if len(node.targets) == 1:
-                        assignments.append((node.targets[0], node.value))
+                    for target in node.targets:
+                        assignments.append((target, node.value))
+                        if isinstance(target, ast.Name):
+                            assigned_values[target.id] = node.value
                 elif isinstance(node, ast.AnnAssign) and node.value is not None:
                     assignments.append((node.target, node.value))
+                    if isinstance(node.target, ast.Name):
+                        assigned_values[node.target.id] = node.value
                 elif isinstance(node, ast.NamedExpr):
                     assignments.append((node.target, node.value))
+                    if isinstance(node.target, ast.Name):
+                        assigned_values[node.target.id] = node.value
 
-            authority_aliases: set[str] = set()
-            mapping_authority: dict[str, set[str]] = {}
-            unknown_mapping_authority: set[str] = set()
-            object_attributes: dict[str, set[str]] = {}
-            callable_aliases: set[str] = set()
-            string_values: dict[str, set[str]] = {}
             mapping_aliases: dict[str, set[str]] = {}
 
-            def connect_mapping_aliases(left: ast.AST, right: ast.AST) -> None:
-                if isinstance(left, ast.Name) and isinstance(right, ast.Name):
-                    mapping_aliases.setdefault(left.id, set()).add(right.id)
-                    mapping_aliases.setdefault(right.id, set()).add(left.id)
+            def link(left: str, right: str) -> None:
+                if left == right:
                     return
-                if isinstance(left, (ast.Tuple, ast.List)) and isinstance(
-                    right, (ast.Tuple, ast.List)
+                mapping_aliases.setdefault(left, set()).add(right)
+                mapping_aliases.setdefault(right, set()).add(left)
+
+            def resolve_sequence(value: ast.AST, seen: set[str] | None = None) -> ast.AST:
+                seen = set() if seen is None else set(seen)
+                current = value
+                for _ in range(16):
+                    if not isinstance(current, ast.Name):
+                        return current
+                    if current.id in seen or current.id not in assigned_values:
+                        return current
+                    seen.add(current.id)
+                    current = assigned_values[current.id]
+                return current
+
+            def projected(value: ast.Subscript) -> ast.AST | None:
+                container = resolve_sequence(value.value)
+                if not isinstance(container, (ast.List, ast.Tuple)):
+                    return None
+                index_node = value.slice
+                if not (
+                    isinstance(index_node, ast.Constant)
+                    and isinstance(index_node.value, int)
+                    and not isinstance(index_node.value, bool)
                 ):
+                    return None
+                index = index_node.value
+                if index < 0:
+                    index += len(container.elts)
+                if index < 0 or index >= len(container.elts):
+                    return None
+                return container.elts[index]
+
+            def connect(left: ast.AST, right: ast.AST) -> None:
+                if isinstance(left, ast.Name) and isinstance(right, ast.Name):
+                    link(left.id, right.id)
+                    return
+                if isinstance(left, ast.Name) and isinstance(right, ast.Subscript):
+                    member = projected(right)
+                    if member is not None:
+                        connect(left, member)
+                    return
+                if not (
+                    isinstance(left, (ast.Tuple, ast.List))
+                    and isinstance(right, (ast.Tuple, ast.List))
+                ):
+                    return
+
+                star_positions = [
+                    index for index, item in enumerate(left.elts) if isinstance(item, ast.Starred)
+                ]
+                if not star_positions:
                     if len(left.elts) != len(right.elts):
                         return
                     for left_item, right_item in zip(left.elts, right.elts):
-                        connect_mapping_aliases(left_item, right_item)
+                        connect(left_item, right_item)
+                    return
+                if len(star_positions) != 1:
+                    return
+
+                star = star_positions[0]
+                minimum = len(left.elts) - 1
+                if len(right.elts) < minimum:
+                    return
+                for index in range(star):
+                    connect(left.elts[index], right.elts[index])
+                suffix = len(left.elts) - star - 1
+                for offset in range(1, suffix + 1):
+                    connect(left.elts[-offset], right.elts[-offset])
 
             for node in assignment_nodes:
-                if len(node.targets) == 1:
-                    connect_mapping_aliases(node.targets[0], node.value)
-                    continue
+                for target in node.targets:
+                    connect(target, node.value)
                 simple_targets = [
                     target for target in node.targets if isinstance(target, ast.Name)
                 ]
-                if isinstance(node.value, ast.Name):
-                    for target in simple_targets:
-                        connect_mapping_aliases(target, node.value)
                 if len(simple_targets) > 1:
                     anchor = simple_targets[0]
                     for target in simple_targets[1:]:
-                        connect_mapping_aliases(anchor, target)
+                        link(anchor.id, target.id)
 
             for target, value in assignments:
-                connect_mapping_aliases(target, value)
+                connect(target, value)
 
-            def mapping_alias_closure(name: str) -> set[str]:
+            def closure(name: str) -> set[str]:
                 seen = {name}
                 pending = [name]
                 while pending:
@@ -113,50 +162,6 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
                         seen.add(alias)
                         pending.append(alias)
                 return seen
-
-            def static_strings(value: ast.AST) -> set[str]:
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    return {value.value}
-                if isinstance(value, ast.Name):
-                    return set(string_values.get(value.id, set()))
-                if isinstance(value, ast.FormattedValue):
-                    return static_strings(value.value)
-                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-                    left = static_strings(value.left)
-                    right = static_strings(value.right)
-                    if not left or not right:
-                        return set()
-                    combined = {a + b for a in left for b in right}
-                    return combined if len(combined) <= 64 else set()
-                if isinstance(value, ast.JoinedStr):
-                    possibilities = {""}
-                    for part in value.values:
-                        part_values = static_strings(part)
-                        if not part_values:
-                            return set()
-                        possibilities = {
-                            prefix + suffix
-                            for prefix in possibilities
-                            for suffix in part_values
-                        }
-                        if len(possibilities) > 64:
-                            return set()
-                    return possibilities
-                return set()
-
-            strings_changed = True
-            while strings_changed:
-                strings_changed = False
-                for target, value in assignments:
-                    if not isinstance(target, ast.Name):
-                        continue
-                    values = static_strings(value)
-                    if not values:
-                        continue
-                    before = set(string_values.get(target.id, set()))
-                    string_values.setdefault(target.id, set()).update(values)
-                    if string_values[target.id] != before:
-                        strings_changed = True
 
             def helper_result_in(value: ast.AST) -> bool:
                 for item in ast.walk(value):
@@ -169,236 +174,107 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
                         return True
                 return False
 
-            def authority_value(value: ast.AST) -> bool:
-                if helper_result_in(value):
-                    return True
-                if isinstance(value, ast.Name):
-                    return value.id in authority_aliases or value.id in callable_aliases
-                if isinstance(value, ast.Attribute):
-                    root_name = _base._dotted_name(value.value)
-                    return bool(
-                        root_name
-                        and value.attr in object_attributes.get(root_name, set())
-                    )
-                return False
+            mapping_keys: dict[str, set[str]] = {}
+            unknown_mapping: set[str] = set()
 
-            def pair_sequence_state(value: ast.AST) -> tuple[set[str], bool]:
-                if not isinstance(value, (ast.List, ast.Tuple)):
-                    return set(), False
-                keys: set[str] = set()
-                unknown = False
-                for element in value.elts:
-                    if not (
-                        isinstance(element, (ast.List, ast.Tuple))
-                        and len(element.elts) == 2
-                    ):
-                        return set(), False
-                    key_node, item = element.elts
-                    if not authority_value(item):
-                        continue
-                    values = static_strings(key_node)
-                    if values:
-                        keys.update(values)
-                    else:
-                        unknown = True
-                return keys, unknown
+            def add_mapping(name: str, keys: set[str], unknown: bool = False) -> None:
+                for alias in closure(name):
+                    mapping_keys.setdefault(alias, set()).update(keys)
+                    if unknown:
+                        unknown_mapping.add(alias)
 
-            def mapping_state(value: ast.AST) -> tuple[set[str], bool]:
-                if isinstance(value, ast.Name):
-                    keys: set[str] = set()
-                    unknown = False
-                    for alias in mapping_alias_closure(value.id):
-                        keys.update(mapping_authority.get(alias, set()))
-                        unknown = unknown or alias in unknown_mapping_authority
-                    return keys, unknown
-                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
-                    left_keys, left_unknown = mapping_state(value.left)
-                    right_keys, right_unknown = mapping_state(value.right)
-                    return left_keys | right_keys, left_unknown or right_unknown
-                if isinstance(value, ast.Dict):
-                    keys: set[str] = set()
-                    unknown = False
-                    for key, item in zip(value.keys, value.values):
-                        if key is None:
-                            nested_keys, nested_unknown = mapping_state(item)
-                            keys.update(nested_keys)
-                            unknown = unknown or nested_unknown
-                            continue
-                        if not authority_value(item):
-                            continue
-                        values = static_strings(key)
-                        if values:
-                            keys.update(values)
-                        else:
-                            unknown = True
-                    return keys, unknown
-                sequence_keys, sequence_unknown = pair_sequence_state(value)
-                if sequence_keys or sequence_unknown:
-                    return sequence_keys, sequence_unknown
-                if isinstance(value, ast.Call):
-                    call_name = _base._resolve_alias(
-                        _base._dotted_name(value.func), import_aliases
-                    )
-                    if call_name not in {"dict", "builtins.dict"}:
-                        return set(), False
-                    keys: set[str] = set()
-                    unknown = False
-                    for argument in value.args:
-                        nested_keys, nested_unknown = mapping_state(argument)
-                        keys.update(nested_keys)
-                        unknown = unknown or nested_unknown
-                    for keyword in value.keywords:
-                        if keyword.arg is None:
-                            nested_keys, nested_unknown = mapping_state(keyword.value)
-                            keys.update(nested_keys)
-                            unknown = unknown or nested_unknown
-                        elif authority_value(keyword.value):
-                            keys.add(keyword.arg)
-                    return keys, unknown
-                return set(), False
-
-            def add_mapping_state(name: str, keys: set[str], unknown: bool) -> bool:
-                changed_local = False
-                for alias in mapping_alias_closure(name):
-                    if keys:
-                        before = set(mapping_authority.get(alias, set()))
-                        mapping_authority.setdefault(alias, set()).update(keys)
-                        if mapping_authority[alias] != before:
-                            changed_local = True
-                    if unknown and alias not in unknown_mapping_authority:
-                        unknown_mapping_authority.add(alias)
-                        changed_local = True
-                return changed_local
-
-            changed = True
-            while changed:
-                changed = False
-
-                for target, value in assignments:
-                    if isinstance(target, ast.Name):
-                        name = target.id
-                        if authority_value(value) and name not in authority_aliases:
-                            authority_aliases.add(name)
-                            changed = True
-
-                        keys, unknown = mapping_state(value)
-                        if add_mapping_state(name, keys, unknown):
-                            changed = True
-
-                        if isinstance(value, ast.Name):
-                            if value.id in object_attributes:
-                                before = set(object_attributes.get(name, set()))
-                                object_attributes.setdefault(name, set()).update(
-                                    object_attributes[value.id]
-                                )
-                                if object_attributes[name] != before:
-                                    changed = True
-                            if value.id in callable_aliases and name not in callable_aliases:
-                                callable_aliases.add(name)
-                                changed = True
-
-                        if isinstance(value, ast.Attribute):
-                            root_name = _base._dotted_name(value.value)
-                            if (
-                                root_name
-                                and value.attr in object_attributes.get(root_name, set())
-                                and name not in callable_aliases
-                            ):
-                                callable_aliases.add(name)
-                                changed = True
-
-                        if isinstance(value, ast.Call):
-                            dangerous_keywords: set[str] = set()
-                            unresolved_mapping = False
-                            for keyword in value.keywords:
-                                if keyword.arg is None:
-                                    nested_keys, nested_unknown = mapping_state(keyword.value)
-                                    dangerous_keywords.update(nested_keys)
-                                    unresolved_mapping = unresolved_mapping or nested_unknown
-                                elif authority_value(keyword.value):
-                                    dangerous_keywords.add(keyword.arg)
-                            if unresolved_mapping:
-                                findings.append(
-                                    {
-                                        "path": relative,
-                                        "function": function.name,
-                                        "line": value.lineno,
-                                        "kind": "alternate-process-creation-call",
-                                        "detail": (
-                                            "attestor-reachable helper return enters constructor "
-                                            "through **mapping with runtime-derived authority key"
-                                        ),
-                                    }
-                                )
-                            if dangerous_keywords:
-                                recovered = _v1._constructor_authority_attributes(
-                                    tree, value, [], dangerous_keywords
-                                )
-                                if recovered:
-                                    before = set(object_attributes.get(name, set()))
-                                    object_attributes.setdefault(name, set()).update(recovered)
-                                    if object_attributes[name] != before:
-                                        changed = True
-                        continue
-
-                    if isinstance(target, ast.Subscript):
-                        root_name = _base._dotted_name(target.value)
-                        if root_name and authority_value(value):
-                            keys = static_strings(target.slice)
-                            if add_mapping_state(root_name, keys, not bool(keys)):
-                                changed = True
-
-                for node in scope_nodes:
-                    if isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr):
-                        root_name = _base._dotted_name(node.target)
-                        if root_name:
-                            keys, unknown = mapping_state(node.value)
-                            if add_mapping_state(root_name, keys, unknown):
-                                changed = True
-                        continue
-
-                    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                        continue
-                    root_name = _base._dotted_name(node.func.value)
-                    if not root_name:
-                        continue
-
-                    if node.func.attr == "update":
-                        keys: set[str] = set()
-                        unknown = False
-                        for argument in node.args:
-                            nested_keys, nested_unknown = mapping_state(argument)
-                            keys.update(nested_keys)
-                            unknown = unknown or nested_unknown
-                        for keyword in node.keywords:
-                            if keyword.arg is None:
-                                nested_keys, nested_unknown = mapping_state(keyword.value)
-                                keys.update(nested_keys)
-                                unknown = unknown or nested_unknown
-                            elif authority_value(keyword.value):
-                                keys.add(keyword.arg)
-                        if add_mapping_state(root_name, keys, unknown):
-                            changed = True
-                    elif node.func.attr in {"setdefault", "__setitem__"} and len(node.args) >= 2:
-                        if authority_value(node.args[1]):
-                            keys = static_strings(node.args[0])
-                            if add_mapping_state(root_name, keys, not bool(keys)):
-                                changed = True
+            for target, value in assignments:
+                if not (isinstance(target, ast.Subscript) and helper_result_in(value)):
+                    continue
+                root_name = _base._dotted_name(target.value)
+                if not root_name:
+                    continue
+                if (
+                    isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                ):
+                    add_mapping(root_name, {target.slice.value})
+                else:
+                    add_mapping(root_name, set(), True)
 
             for node in scope_nodes:
-                if not isinstance(node, ast.Call):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                     continue
-                authority: str | None = None
-                if isinstance(node.func, ast.Name) and node.func.id in callable_aliases:
-                    authority = node.func.id
-                elif isinstance(node.func, ast.Attribute):
-                    root_name = _base._dotted_name(node.func.value)
-                    if (
-                        root_name
-                        and node.func.attr in object_attributes.get(root_name, set())
-                    ):
-                        authority = f"{root_name}.{node.func.attr}"
-                if authority is None:
+                root_name = _base._dotted_name(node.func.value)
+                if not root_name:
+                    continue
+                if node.func.attr == "update":
+                    keys: set[str] = set()
+                    unknown = False
+                    for argument in node.args:
+                        if not isinstance(argument, ast.Dict):
+                            continue
+                        for key, item in zip(argument.keys, argument.values):
+                            if not helper_result_in(item):
+                                continue
+                            if (
+                                isinstance(key, ast.Constant)
+                                and isinstance(key.value, str)
+                            ):
+                                keys.add(key.value)
+                            else:
+                                unknown = True
+                    for keyword in node.keywords:
+                        if keyword.arg is not None and helper_result_in(keyword.value):
+                            keys.add(keyword.arg)
+                    if keys or unknown:
+                        add_mapping(root_name, keys, unknown)
+                elif node.func.attr in {"setdefault", "__setitem__"} and len(node.args) >= 2:
+                    if not helper_result_in(node.args[1]):
+                        continue
+                    key = node.args[0]
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        add_mapping(root_name, {key.value})
+                    else:
+                        add_mapping(root_name, set(), True)
+
+            object_attributes: dict[str, set[str]] = {}
+            for target, value in assignments:
+                if not (isinstance(target, ast.Name) and isinstance(value, ast.Call)):
+                    continue
+                dangerous: set[str] = set()
+                unresolved = False
+                for keyword in value.keywords:
+                    if keyword.arg is not None:
+                        continue
+                    if not isinstance(keyword.value, ast.Name):
+                        continue
+                    for alias in closure(keyword.value.id):
+                        dangerous.update(mapping_keys.get(alias, set()))
+                        unresolved = unresolved or alias in unknown_mapping
+                if unresolved:
+                    findings.append(
+                        {
+                            "path": relative,
+                            "function": function.name,
+                            "line": value.lineno,
+                            "kind": "alternate-process-creation-call",
+                            "detail": (
+                                "attestor-reachable helper authority reaches a constructor "
+                                "through container-carried mapping identity with unresolved key"
+                            ),
+                        }
+                    )
+                if not dangerous:
+                    continue
+                recovered = _v2._v1._constructor_authority_attributes(
+                    tree, value, [], dangerous
+                )
+                if recovered:
+                    object_attributes.setdefault(target.id, set()).update(recovered)
+
+            for node in scope_nodes:
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                root_name = _base._dotted_name(node.func.value)
+                if not root_name:
+                    continue
+                if node.func.attr not in object_attributes.get(root_name, set()):
                     continue
                 findings.append(
                     {
@@ -407,9 +283,9 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
                         "line": node.lineno,
                         "kind": "alternate-process-creation-call",
                         "detail": (
-                            "attestor-reachable helper return becomes dynamic callable or "
-                            "namespace dispatch authority through recovered mapping "
-                            f"constructor flow {authority}"
+                            "attestor-reachable helper return becomes dynamic dispatch "
+                            "authority through starred/container mapping alias recovery "
+                            f"{root_name}.{node.func.attr}"
                         ),
                     }
                 )
@@ -419,9 +295,9 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
 
 def verify(runner_root: pathlib.Path) -> dict[str, object]:
     root = runner_root.resolve(strict=True)
-    report = dict(_v1.verify(root))
+    report = dict(_v2.verify(root))
     existing = list(report.get("findings", []))
-    extras = _mapping_union_authority_findings(root)
+    extras = _container_alias_authority_findings(root)
 
     unique: dict[tuple[object, ...], dict[str, object]] = {}
     for item in existing + extras:
@@ -437,7 +313,6 @@ def verify(runner_root: pathlib.Path) -> dict[str, object]:
         unique[key]
         for key in sorted(unique, key=lambda value: tuple(str(x) for x in value))
     ]
-
     report["findings"] = findings
     report["finding_count"] = len(findings)
     report["passed"] = bool(report.get("passed")) and not extras
