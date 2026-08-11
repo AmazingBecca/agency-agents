@@ -123,6 +123,44 @@ def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
 ''' + SUFFIX
 
 
+ALIASED_SETATTR_COMPUTED_NAME_REBIND = PREFIX + r'''
+def _rebind():
+    module = sys.modules[__name__]
+    setter = setattr
+    class_name = "_Mu" + "tator"
+    setter(module, class_name, _replacement)
+
+
+def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
+    _rebind()
+    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
+''' + SUFFIX
+
+
+MODULE_DICT_SUBSCRIPT_REBIND = PREFIX + r'''
+def _rebind():
+    module = sys.modules[__name__]
+    module.__dict__["_Mutator"] = _replacement
+
+
+def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
+    _rebind()
+    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
+''' + SUFFIX
+
+
+MODULE_DICT_SETITEM_REBIND = PREFIX + r'''
+def _rebind():
+    module = sys.modules[__name__]
+    module.__dict__.__setitem__("_Mutator", _replacement)
+
+
+def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
+    _rebind()
+    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
+''' + SUFFIX
+
+
 class TerminalAttestationDecoratedClassDynamicGlobalRebindTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -151,6 +189,15 @@ class TerminalAttestationDecoratedClassDynamicGlobalRebindTests(unittest.TestCas
 
     def test_setattr_module_rebind_is_rejected_as_class_replacement(self) -> None:
         self._assert_class_replacement_rejected(SETATTR_MODULE_REBIND)
+
+    def test_aliased_setattr_with_computed_name_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(ALIASED_SETATTR_COMPUTED_NAME_REBIND)
+
+    def test_module_dict_subscript_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(MODULE_DICT_SUBSCRIPT_REBIND)
+
+    def test_module_dict_setitem_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(MODULE_DICT_SETITEM_REBIND)
 
 
 if __name__ == "__main__":
