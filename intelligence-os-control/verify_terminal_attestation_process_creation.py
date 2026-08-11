@@ -82,7 +82,66 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                     current = assigned_values[current.id]
                 return current
 
-            def projected(value: ast.Subscript) -> ast.AST | None:
+            def static_key_values(
+                value: ast.AST,
+                seen: set[str] | None = None,
+            ) -> set[tuple[type[object], object]]:
+                """Recover a bounded set of builtin, immutable mapping-key values."""
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen or value.id not in assigned_values:
+                        return set()
+                    seen.add(value.id)
+                    return static_key_values(assigned_values[value.id], seen)
+                if isinstance(value, ast.Constant):
+                    item = value.value
+                    if isinstance(item, (str, bytes, int, float, complex, bool)) or item is None:
+                        return {(type(item), item)}
+                    return set()
+                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+                    left = static_key_values(value.left, seen)
+                    right = static_key_values(value.right, seen)
+                    results: set[tuple[type[object], object]] = set()
+                    for left_type, left_value in left:
+                        for right_type, right_value in right:
+                            if left_type is not right_type:
+                                continue
+                            if left_type not in {str, bytes}:
+                                continue
+                            combined = left_value + right_value
+                            results.add((left_type, combined))
+                            if len(results) > 64:
+                                return set()
+                    return results
+                if isinstance(value, ast.JoinedStr):
+                    possibilities = {""}
+                    for part in value.values:
+                        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                            fragments = {part.value}
+                        elif (
+                            isinstance(part, ast.FormattedValue)
+                            and part.conversion in {-1, 115}
+                            and part.format_spec is None
+                        ):
+                            recovered = static_key_values(part.value, seen)
+                            fragments = {
+                                str(item)
+                                for item_type, item in recovered
+                                if item_type in {str, bytes, int, float, complex, bool, type(None)}
+                            }
+                        else:
+                            return set()
+                        possibilities = {
+                            prefix + suffix
+                            for prefix in possibilities
+                            for suffix in fragments
+                        }
+                        if not possibilities or len(possibilities) > 64:
+                            return set()
+                    return {(str, item) for item in possibilities}
+                return set()
+
+            def projected_members(value: ast.Subscript) -> list[ast.AST]:
                 container = resolve_sequence(value.value)
                 index_node = value.slice
 
@@ -92,35 +151,33 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                         and isinstance(index_node.value, int)
                         and not isinstance(index_node.value, bool)
                     ):
-                        return None
+                        return []
                     index = index_node.value
                     if index < 0:
                         index += len(container.elts)
                     if index < 0 or index >= len(container.elts):
-                        return None
-                    return container.elts[index]
+                        return []
+                    return [container.elts[index]]
 
                 if isinstance(container, ast.Dict):
-                    if not isinstance(index_node, ast.Constant):
-                        return None
+                    wanted = static_key_values(index_node)
+                    if not wanted:
+                        return []
+                    matches: list[ast.AST] = []
                     for key, item in zip(container.keys, container.values):
-                        if not isinstance(key, ast.Constant):
+                        if key is None:
                             continue
-                        try:
-                            matches = key.value == index_node.value
-                        except Exception:
-                            matches = False
-                        if matches and type(key.value) is type(index_node.value):
-                            return item
-                return None
+                        if wanted.intersection(static_key_values(key)):
+                            matches.append(item)
+                    return matches
+                return []
 
             def connect(left: ast.AST, right: ast.AST) -> None:
                 if isinstance(left, ast.Name) and isinstance(right, ast.Name):
                     link(left.id, right.id)
                     return
                 if isinstance(left, ast.Name) and isinstance(right, ast.Subscript):
-                    member = projected(right)
-                    if member is not None:
+                    for member in projected_members(right):
                         connect(left, member)
                     return
                 if not (
@@ -197,17 +254,22 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                     if unknown:
                         unknown_mapping.add(alias)
 
+            def static_string_keys(value: ast.AST) -> set[str]:
+                return {
+                    item
+                    for item_type, item in static_key_values(value)
+                    if item_type is str and isinstance(item, str)
+                }
+
             for target, value in assignments:
                 if not (isinstance(target, ast.Subscript) and helper_result_in(value)):
                     continue
                 root_name = _base._dotted_name(target.value)
                 if not root_name:
                     continue
-                if (
-                    isinstance(target.slice, ast.Constant)
-                    and isinstance(target.slice.value, str)
-                ):
-                    add_mapping(root_name, {target.slice.value})
+                keys = static_string_keys(target.slice)
+                if keys:
+                    add_mapping(root_name, keys)
                 else:
                     add_mapping(root_name, set(), True)
 
@@ -226,11 +288,12 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                         for key, item in zip(argument.keys, argument.values):
                             if not helper_result_in(item):
                                 continue
-                            if (
-                                isinstance(key, ast.Constant)
-                                and isinstance(key.value, str)
-                            ):
-                                keys.add(key.value)
+                            if key is None:
+                                unknown = True
+                                continue
+                            recovered = static_string_keys(key)
+                            if recovered:
+                                keys.update(recovered)
                             else:
                                 unknown = True
                     for keyword in node.keywords:
@@ -241,9 +304,9 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                 elif node.func.attr in {"setdefault", "__setitem__"} and len(node.args) >= 2:
                     if not helper_result_in(node.args[1]):
                         continue
-                    key = node.args[0]
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                        add_mapping(root_name, {key.value})
+                    keys = static_string_keys(node.args[0])
+                    if keys:
+                        add_mapping(root_name, keys)
                     else:
                         add_mapping(root_name, set(), True)
 
