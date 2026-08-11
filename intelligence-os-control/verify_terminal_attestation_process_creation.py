@@ -35,6 +35,17 @@ _CARRIER_CALLS = {
     "builtins.reversed",
 }
 
+_SCOPE_BARRIERS = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.GeneratorExp,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+)
+
 
 def __getattr__(name: str):
     return getattr(_v4, name)
@@ -58,6 +69,69 @@ def _simple_assignments(nodes: list[ast.AST]) -> dict[str, list[ast.AST]]:
     return assignments
 
 
+def _assigned_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _assigned_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: set[str] = set()
+        for item in target.elts:
+            names.update(_assigned_names(item))
+        return names
+    return set()
+
+
+def _module_scope_nodes(tree: ast.Module) -> list[ast.AST]:
+    """Return executable module-scope nodes without entering nested scopes.
+
+    Branch, loop, try/except, with, and match bodies still execute in module
+    scope and can therefore replace a reviewed class binding. Function/class
+    bodies and comprehension scopes cannot directly rebind that module name.
+    """
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = list(reversed(tree.body))
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if isinstance(node, _SCOPE_BARRIERS):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
+
+
+def _module_binding_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            names.update(_assigned_names(target))
+    elif isinstance(node, ast.AnnAssign):
+        names.update(_assigned_names(node.target))
+    elif isinstance(node, ast.AugAssign):
+        names.update(_assigned_names(node.target))
+    elif isinstance(node, ast.NamedExpr):
+        names.update(_assigned_names(node.target))
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
+        names.update(_assigned_names(node.target))
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            if item.optional_vars is not None:
+                names.update(_assigned_names(item.optional_vars))
+    elif isinstance(node, ast.ExceptHandler):
+        if node.name:
+            names.add(node.name)
+    elif isinstance(node, ast.Import):
+        for alias in node.names:
+            names.add(alias.asname or alias.name.split(".", 1)[0])
+    elif isinstance(node, ast.ImportFrom):
+        for alias in node.names:
+            if alias.name != "*":
+                names.add(alias.asname or alias.name)
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.add(node.name)
+    return names
+
+
 def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, object]]:
     """Reject attestor calls through runtime-replaceable class identity.
 
@@ -77,26 +151,33 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
         except (SyntaxError, ValueError, TypeError) as exc:
             raise RuntimeError(f"runner source cannot be parsed: {source}") from exc
 
-        class_names = {
-            node.name for node in tree.body if isinstance(node, ast.ClassDef)
-        }
+        class_definitions = [
+            node for node in tree.body if isinstance(node, ast.ClassDef)
+        ]
+        class_names = {node.name for node in class_definitions}
+        first_class_line: dict[str, int] = {}
+        for node in class_definitions:
+            first_class_line[node.name] = min(
+                first_class_line.get(node.name, node.lineno),
+                node.lineno,
+            )
+
         dynamic_classes = {
-            node.name
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.decorator_list
+            node.name for node in class_definitions if node.decorator_list
         }
 
-        # A later module-scope write replaces the reviewed class identity even
-        # if the original class body itself had no decorator or custom call hook.
-        for node in tree.body:
-            targets: list[ast.AST] = []
-            if isinstance(node, ast.Assign):
-                targets.extend(node.targets)
-            elif isinstance(node, ast.AnnAssign):
-                targets.append(node.target)
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id in class_names:
-                    dynamic_classes.add(target.id)
+        # Module control-flow blocks do not create a local scope. A reviewed
+        # class can therefore be replaced inside if/try/loop/with blocks or by
+        # destructuring just as effectively as by a plain top-level assignment.
+        # Treat every later module-scope binding of that reviewed class name as
+        # runtime-replaceable, while ignoring pre-definition bindings that the
+        # reviewed class statement overwrites.
+        for node in _module_scope_nodes(tree):
+            line = getattr(node, "lineno", 0)
+            for name in _module_binding_names(node):
+                first_line = first_class_line.get(name)
+                if first_line is not None and line > first_line:
+                    dynamic_classes.add(name)
 
         if not dynamic_classes:
             continue
