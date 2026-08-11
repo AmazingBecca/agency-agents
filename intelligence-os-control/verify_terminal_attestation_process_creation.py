@@ -71,6 +71,32 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                 mapping_aliases.setdefault(left, set()).add(right)
                 mapping_aliases.setdefault(right, set()).add(left)
 
+            def closure(name: str) -> set[str]:
+                seen = {name}
+                pending = [name]
+                while pending:
+                    current = pending.pop()
+                    for alias in mapping_aliases.get(current, set()):
+                        if alias in seen:
+                            continue
+                        seen.add(alias)
+                        pending.append(alias)
+                return seen
+
+            # Seed direct object-identity aliases before projection analysis so
+            # later container mutations remain visible through simple aliases.
+            for target, value in assignments:
+                if isinstance(target, ast.Name) and isinstance(value, ast.Name):
+                    link(target.id, value.id)
+            for node in assignment_nodes:
+                simple_targets = [
+                    target for target in node.targets if isinstance(target, ast.Name)
+                ]
+                if len(simple_targets) > 1:
+                    anchor = simple_targets[0]
+                    for target in simple_targets[1:]:
+                        link(anchor.id, target.id)
+
             def resolve_sequence_candidates(
                 value: ast.AST,
                 seen: set[str] | None = None,
@@ -233,6 +259,49 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                                 return items[:64]
                 return items
 
+            container_mutations: dict[str, list[tuple[ast.AST, ast.AST]]] = {}
+
+            def record_container_member(root_name: str, key: ast.AST, item: ast.AST) -> None:
+                for alias in closure(root_name):
+                    container_mutations.setdefault(alias, []).append((key, item))
+
+            # Preserve container identity across post-construction mutation.
+            for target, value in assignments:
+                if not isinstance(target, ast.Subscript):
+                    continue
+                root_name = _base._dotted_name(target.value)
+                if root_name:
+                    record_container_member(root_name, target.slice, value)
+
+            for node in scope_nodes:
+                if isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr):
+                    root_name = _base._dotted_name(node.target)
+                    if root_name:
+                        for key, item in mapping_items(node.value):
+                            record_container_member(root_name, key, item)
+                    continue
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                root_name = _base._dotted_name(node.func.value)
+                if not root_name:
+                    continue
+                if node.func.attr == "update":
+                    for argument in node.args:
+                        for candidate in resolve_sequence_candidates(argument):
+                            for key, item in mapping_items(candidate):
+                                record_container_member(root_name, key, item)
+                    for keyword in node.keywords:
+                        if keyword.arg is not None:
+                            record_container_member(
+                                root_name, ast.Constant(value=keyword.arg), keyword.value
+                            )
+                        else:
+                            for candidate in resolve_sequence_candidates(keyword.value):
+                                for key, item in mapping_items(candidate):
+                                    record_container_member(root_name, key, item)
+                elif node.func.attr in {"setdefault", "__setitem__"} and len(node.args) >= 2:
+                    record_container_member(root_name, node.args[0], node.args[1])
+
             def projection_containers(value: ast.AST) -> list[ast.AST]:
                 """Resolve names and nested static projections to their possible containers."""
                 if isinstance(value, ast.Name):
@@ -247,6 +316,15 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                 containers = projection_containers(value.value)
                 index_node = value.slice
                 matches: list[ast.AST] = []
+                wanted = static_key_values(index_node)
+
+                if isinstance(value.value, ast.Name) and wanted:
+                    for receiver in closure(value.value.id):
+                        for key, item in container_mutations.get(receiver, []):
+                            if wanted.intersection(static_key_values(key)):
+                                matches.append(item)
+                                if len(matches) >= 64:
+                                    return matches
 
                 for container in containers:
                     elements = sequence_elements(container)
@@ -264,7 +342,6 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                             matches.append(elements[index])
                         continue
 
-                    wanted = static_key_values(index_node)
                     if not wanted:
                         continue
                     for key, item in mapping_items(container):
@@ -275,6 +352,23 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
             def projected_call_members(value: ast.Call) -> list[ast.AST]:
                 if not isinstance(value.func, ast.Attribute):
                     return []
+                if value.func.attr == "setdefault":
+                    if len(value.args) < 2:
+                        return []
+                    # setdefault returns either the existing value or the supplied
+                    # default. Conservatively retain the default object identity.
+                    matches = [value.args[1]]
+                    lookup = ast.Call(
+                        func=ast.Attribute(
+                            value=value.func.value,
+                            attr="get",
+                            ctx=ast.Load(),
+                        ),
+                        args=[value.args[0]],
+                        keywords=[],
+                    )
+                    matches.extend(projected_call_members(lookup))
+                    return matches[:64]
                 if value.func.attr not in {"get", "__getitem__"}:
                     return []
                 if len(value.args) != 1 or value.keywords:
@@ -284,6 +378,13 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                     return []
 
                 matches: list[ast.AST] = []
+                if isinstance(value.func.value, ast.Name):
+                    for receiver in closure(value.func.value.id):
+                        for key, item in container_mutations.get(receiver, []):
+                            if wanted.intersection(static_key_values(key)):
+                                matches.append(item)
+                                if len(matches) >= 64:
+                                    return matches
                 for container in projection_containers(value.func.value):
                     for key, item in mapping_items(container):
                         if wanted.intersection(static_key_values(key)):
@@ -345,18 +446,6 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
 
             for target, value in assignments:
                 connect(target, value)
-
-            def closure(name: str) -> set[str]:
-                seen = {name}
-                pending = [name]
-                while pending:
-                    current = pending.pop()
-                    for alias in mapping_aliases.get(current, set()):
-                        if alias in seen:
-                            continue
-                        seen.add(alias)
-                        pending.append(alias)
-                return seen
 
             def helper_result_in(value: ast.AST) -> bool:
                 for item in ast.walk(value):
