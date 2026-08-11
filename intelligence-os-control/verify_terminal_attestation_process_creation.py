@@ -168,13 +168,20 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                         return False
                     nxt = seen | {value.id}
                     return any(namespace(v, depth + 1, nxt) for v in assigns.get(value.id, []))
-                if isinstance(value, ast.Attribute) and value.attr == "__dict__":
-                    return module(value.value, depth + 1, seen)
+                if isinstance(value, ast.Attribute):
+                    if value.attr == "__globals__":
+                        return True
+                    if value.attr == "__dict__":
+                        return module(value.value, depth + 1, seen)
                 if isinstance(value, ast.Call):
                     if not value.args and not value.keywords and globals_factory(value.func, depth + 1, seen):
                         return True
                     if callee_is(value.func, {"vars", "builtins.vars"}, depth + 1, seen) and value.args:
                         return module(value.args[0], depth + 1, seen)
+                    if callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
+                        attrs = _base._string_values(value.args[1], strings)
+                        if attrs is None or "__globals__" in attrs:
+                            return True
                 return False
 
             def names(value: ast.AST) -> set[str]:
