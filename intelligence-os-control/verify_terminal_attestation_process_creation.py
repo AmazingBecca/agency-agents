@@ -25,10 +25,11 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
     In addition to literal/aliased ``**kwargs`` recovery, track mapping unions,
     computed constant keys, ``dict(...)`` construction, static pair sequences,
     in-place mapping mutation, and mutation through aliases that were bound to
-    the same mapping object before authority was inserted. If helper-produced
-    callable authority is inserted under a runtime-derived key and the mapping
-    is later unpacked into a reviewed constructor, fail closed because the
-    binding cannot be proven.
+    the same mapping object before authority was inserted. Alias identity is
+    recovered across direct assignments, destructuring assignments, and chained
+    assignments. If helper-produced callable authority is inserted under a
+    runtime-derived key and the mapping is later unpacked into a reviewed
+    constructor, fail closed because the binding cannot be proven.
     """
     findings: list[dict[str, object]] = []
 
@@ -51,9 +52,12 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
             import_aliases = _base._scope_import_aliases(tree, function)
             scope_nodes = list(_base._function_scope_nodes(function))
             assignments: list[tuple[ast.AST, ast.AST]] = []
+            assignment_nodes: list[ast.Assign] = []
             for node in scope_nodes:
-                if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                    assignments.append((node.targets[0], node.value))
+                if isinstance(node, ast.Assign):
+                    assignment_nodes.append(node)
+                    if len(node.targets) == 1:
+                        assignments.append((node.targets[0], node.value))
                 elif isinstance(node, ast.AnnAssign) and node.value is not None:
                     assignments.append((node.target, node.value))
                 elif isinstance(node, ast.NamedExpr):
@@ -67,10 +71,36 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
             string_values: dict[str, set[str]] = {}
             mapping_aliases: dict[str, set[str]] = {}
 
+            def connect_mapping_aliases(left: ast.AST, right: ast.AST) -> None:
+                if isinstance(left, ast.Name) and isinstance(right, ast.Name):
+                    mapping_aliases.setdefault(left.id, set()).add(right.id)
+                    mapping_aliases.setdefault(right.id, set()).add(left.id)
+                    return
+                if isinstance(left, (ast.Tuple, ast.List)) and isinstance(
+                    right, (ast.Tuple, ast.List)
+                ):
+                    if len(left.elts) != len(right.elts):
+                        return
+                    for left_item, right_item in zip(left.elts, right.elts):
+                        connect_mapping_aliases(left_item, right_item)
+
+            for node in assignment_nodes:
+                if len(node.targets) == 1:
+                    connect_mapping_aliases(node.targets[0], node.value)
+                    continue
+                simple_targets = [
+                    target for target in node.targets if isinstance(target, ast.Name)
+                ]
+                if isinstance(node.value, ast.Name):
+                    for target in simple_targets:
+                        connect_mapping_aliases(target, node.value)
+                if len(simple_targets) > 1:
+                    anchor = simple_targets[0]
+                    for target in simple_targets[1:]:
+                        connect_mapping_aliases(anchor, target)
+
             for target, value in assignments:
-                if isinstance(target, ast.Name) and isinstance(value, ast.Name):
-                    mapping_aliases.setdefault(target.id, set()).add(value.id)
-                    mapping_aliases.setdefault(value.id, set()).add(target.id)
+                connect_mapping_aliases(target, value)
 
             def mapping_alias_closure(name: str) -> set[str]:
                 seen = {name}
