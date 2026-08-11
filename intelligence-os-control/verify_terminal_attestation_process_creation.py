@@ -241,16 +241,31 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
                 )
 
             if isinstance(value, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
-                return expression_carries_dynamic(
+                if expression_carries_dynamic(
                     value.elt,
                     assignments,
                     depth=depth + 1,
                     seen_names=seen_names,
                     seen_functions=seen_functions,
+                ):
+                    return True
+                # The comprehension target can rename authority from its iterable
+                # (for example: ``item for item in (_Mutator,)``). Conservatively
+                # retain authority from every iterable rather than treating the
+                # target name as a fresh untainted local.
+                return any(
+                    expression_carries_dynamic(
+                        generator.iter,
+                        assignments,
+                        depth=depth + 1,
+                        seen_names=seen_names,
+                        seen_functions=seen_functions,
+                    )
+                    for generator in value.generators
                 )
 
             if isinstance(value, ast.DictComp):
-                return expression_carries_dynamic(
+                if expression_carries_dynamic(
                     value.key,
                     assignments,
                     depth=depth + 1,
@@ -262,6 +277,17 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
                     depth=depth + 1,
                     seen_names=seen_names,
                     seen_functions=seen_functions,
+                ):
+                    return True
+                return any(
+                    expression_carries_dynamic(
+                        generator.iter,
+                        assignments,
+                        depth=depth + 1,
+                        seen_names=seen_names,
+                        seen_functions=seen_functions,
+                    )
+                    for generator in value.generators
                 )
 
             if isinstance(value, ast.Subscript):
