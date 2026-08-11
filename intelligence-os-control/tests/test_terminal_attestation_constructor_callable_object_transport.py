@@ -191,6 +191,42 @@ class _Mutator:
 )
 
 
+NEW_RETURNED_CALLABLE_OBJECT_ATTACK = PREFIX + r"""
+
+class _RealMutator:
+    def __init__(self, carrier):
+        self._carrier = carrier
+
+    def __call__(self, **values):
+        self._carrier.update(**values)
+
+
+class _Mutator:
+    def __new__(cls, carrier):
+        return _RealMutator(carrier)
+""" + SUFFIX
+
+
+METACLASS_RETURNED_CALLABLE_OBJECT_ATTACK = PREFIX + r"""
+
+class _RealMutator:
+    def __init__(self, carrier):
+        self._carrier = carrier
+
+    def __call__(self, **values):
+        self._carrier.update(**values)
+
+
+class _MutatorMeta(type):
+    def __call__(cls, carrier):
+        return _RealMutator(carrier)
+
+
+class _Mutator(metaclass=_MutatorMeta):
+    pass
+""" + SUFFIX
+
+
 class TerminalAttestationConstructorCallableObjectTransportTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -226,6 +262,12 @@ class TerminalAttestationConstructorCallableObjectTransportTests(unittest.TestCa
 
     def test_container_carried_callable_object_cannot_hide_mapping_transport(self) -> None:
         self._assert_rejected(CONTAINER_CARRIED_CALLABLE_OBJECT_ATTACK)
+
+    def test_new_returned_callable_object_cannot_hide_mapping_transport(self) -> None:
+        self._assert_rejected(NEW_RETURNED_CALLABLE_OBJECT_ATTACK)
+
+    def test_metaclass_returned_callable_object_cannot_hide_mapping_transport(self) -> None:
+        self._assert_rejected(METACLASS_RETURNED_CALLABLE_OBJECT_ATTACK)
 
 
 if __name__ == "__main__":
