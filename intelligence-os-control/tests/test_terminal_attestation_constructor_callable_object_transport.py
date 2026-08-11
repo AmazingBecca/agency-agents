@@ -143,6 +143,54 @@ class _Mutator:
 """ + SUFFIX
 
 
+INHERITED_CALLABLE_OBJECT_ATTACK = PREFIX + r"""
+
+class _BaseMutator:
+    def __init__(self, carrier):
+        self._carrier = carrier
+
+    def __call__(self, **values):
+        self._carrier.update(**values)
+
+
+class _Mutator(_BaseMutator):
+    pass
+""" + SUFFIX
+
+
+FACTORY_ALIAS_RETURNED_CALLABLE_OBJECT_ATTACK = PREFIX + r"""
+
+class _Mutator:
+    def __init__(self, carrier):
+        self._carrier = carrier
+
+    def __call__(self, **values):
+        self._carrier.update(**values)
+
+
+def _mutator_factory(carrier):
+    mutator = _Mutator(carrier)
+    return mutator
+""" + SUFFIX.replace(
+    "    mutator = _Mutator(carrier)\n",
+    "    mutator = _mutator_factory(carrier)\n",
+)
+
+
+CONTAINER_CARRIED_CALLABLE_OBJECT_ATTACK = PREFIX + r"""
+
+class _Mutator:
+    def __init__(self, carrier):
+        self._carrier = carrier
+
+    def __call__(self, **values):
+        self._carrier.update(**values)
+""" + SUFFIX.replace(
+    "    mutator = _Mutator(carrier)\n",
+    "    mutator = [_Mutator(carrier)][0]\n",
+)
+
+
 class TerminalAttestationConstructorCallableObjectTransportTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -169,6 +217,15 @@ class TerminalAttestationConstructorCallableObjectTransportTests(unittest.TestCa
 
     def test_descriptor_produced_callable_cannot_hide_mapping_transport(self) -> None:
         self._assert_rejected(DESCRIPTOR_PRODUCED_CALLABLE_ATTACK)
+
+    def test_inherited_callable_object_cannot_hide_mapping_transport(self) -> None:
+        self._assert_rejected(INHERITED_CALLABLE_OBJECT_ATTACK)
+
+    def test_factory_alias_returned_callable_object_cannot_hide_mapping_transport(self) -> None:
+        self._assert_rejected(FACTORY_ALIAS_RETURNED_CALLABLE_OBJECT_ATTACK)
+
+    def test_container_carried_callable_object_cannot_hide_mapping_transport(self) -> None:
+        self._assert_rejected(CONTAINER_CARRIED_CALLABLE_OBJECT_ATTACK)
 
 
 if __name__ == "__main__":
