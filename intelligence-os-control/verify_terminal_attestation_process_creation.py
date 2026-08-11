@@ -44,6 +44,21 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
             continue
         attestor = attestors[0]
 
+        class_definitions: dict[str, list[ast.ClassDef]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                class_definitions.setdefault(node.name, []).append(node)
+        callable_classes = {
+            name
+            for name, definitions in class_definitions.items()
+            if len(definitions) == 1
+            and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == "__call__"
+                for item in definitions[0].body
+            )
+        }
+
         for function in _base._reachable_functions(tree, attestor, functions):
             import_aliases = _base._scope_import_aliases(tree, function)
             scope_nodes = list(_base._function_scope_nodes(function))
@@ -122,6 +137,29 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
             def dangerous_static_method(value: ast.AST) -> list[str]:
                 return sorted(static_strings(value) & _MAPPING_TRANSPORT_METHODS)
 
+            def factory_callable_classes(name: str, depth: int = 0) -> set[str]:
+                if depth > 6:
+                    return set()
+                definitions = functions.get(name, [])
+                if len(definitions) != 1:
+                    return set()
+                recovered: set[str] = set()
+                for node in ast.walk(definitions[0]):
+                    if not isinstance(node, ast.Return) or node.value is None:
+                        continue
+                    value = node.value
+                    if isinstance(value, ast.Call):
+                        constructor = _base._dotted_name(value.func)
+                        if constructor in callable_classes:
+                            recovered.add(constructor)
+                        elif constructor in functions:
+                            recovered.update(factory_callable_classes(constructor, depth + 1))
+                    elif isinstance(value, ast.Name) and value.id in callable_classes:
+                        recovered.add(value.id)
+                    if len(recovered) >= 32:
+                        return set(sorted(recovered)[:32])
+                return recovered
+
             def transport_target(value: ast.AST, depth: int = 0) -> str | None:
                 if depth > 8:
                     return "unresolved-wrapped-mapping-transport"
@@ -133,6 +171,12 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
                     return f"bound:{value.attr}:{receiver or '<dynamic>'}"
                 if isinstance(value, ast.Call):
                     wrapper = resolved_name(value.func)
+                    if wrapper in callable_classes:
+                        return f"custom-callable-object:{wrapper}"
+                    if wrapper in functions:
+                        produced = factory_callable_classes(wrapper)
+                        if produced:
+                            return "factory-custom-callable-object:" + ",".join(sorted(produced))
                     if wrapper in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
                         dangerous = dangerous_static_method(value.args[1])
                         if dangerous:
