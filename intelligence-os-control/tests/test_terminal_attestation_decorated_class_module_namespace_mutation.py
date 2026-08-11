@@ -189,6 +189,31 @@ def _rebind():
 ''' + ATTESTOR
 
 
+BUILTINS_DICT_GLOBALS_REBIND = PREFIX + r'''
+def _rebind():
+    namespace_factory = builtins.__dict__["globals"]
+    namespace = namespace_factory()
+    namespace["_Mutator"] = _replacement
+''' + ATTESTOR
+
+
+VARS_BUILTINS_GLOBALS_REBIND = PREFIX + r'''
+def _rebind():
+    namespace_factory = vars(builtins)["globals"]
+    namespace = namespace_factory()
+    namespace.update({"_Mutator": _replacement})
+''' + ATTESTOR
+
+
+ALIASED_OPERATOR_GETITEM_BUILTINS_GLOBALS_REBIND = PREFIX + r'''
+def _rebind():
+    getter = operator.getitem
+    namespace_factory = getter(vars(builtins), "globals")
+    namespace = namespace_factory()
+    namespace["_Mutator"] = _replacement
+''' + ATTESTOR
+
+
 ALIASED_NAMESPACE_SETITEM_REBIND = PREFIX + r'''
 def _rebind():
     namespace = globals()
@@ -269,6 +294,15 @@ class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.Tes
 
     def test_reflected_builtins_globals_rebind_is_rejected(self) -> None:
         self._assert_class_replacement_rejected(REFLECTED_BUILTINS_GLOBALS_REBIND)
+
+    def test_builtins_dict_globals_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(BUILTINS_DICT_GLOBALS_REBIND)
+
+    def test_vars_builtins_globals_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(VARS_BUILTINS_GLOBALS_REBIND)
+
+    def test_aliased_operator_getitem_builtins_globals_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(ALIASED_OPERATOR_GETITEM_BUILTINS_GLOBALS_REBIND)
 
     def test_aliased_namespace_setitem_rebind_is_rejected(self) -> None:
         self._assert_class_replacement_rejected(ALIASED_NAMESPACE_SETITEM_REBIND)
