@@ -121,23 +121,25 @@ class TerminalAttestationFunctionGlobalsTransportTests(unittest.TestCase):
             (root / "runner.py").write_text(source, encoding="utf-8")
             return process_creation.verify(root)
 
-    def _assert_class_replacement_rejected(self, source: str) -> None:
+    def _assert_rejected(self, source: str) -> dict[str, object]:
         report = self._verify(source)
         self.assertFalse(report["passed"], report)
+        self.assertGreater(int(report.get("finding_count", 0)), 0, report)
+        return report
+
+    def test_helper_returned_function_globals_rebind_is_rejected(self) -> None:
+        report = self._assert_rejected(HELPER_RETURNED_FUNCTION_GLOBALS_REBIND)
         kinds = {str(item["kind"]) for item in report["findings"]}
         self.assertIn("alternate-process-creation-call", kinds, report)
 
-    def test_helper_returned_function_globals_rebind_is_rejected(self) -> None:
-        self._assert_class_replacement_rejected(HELPER_RETURNED_FUNCTION_GLOBALS_REBIND)
-
     def test_container_transported_function_globals_rebind_is_rejected(self) -> None:
-        self._assert_class_replacement_rejected(CONTAINER_TRANSPORTED_FUNCTION_GLOBALS_REBIND)
+        self._assert_rejected(CONTAINER_TRANSPORTED_FUNCTION_GLOBALS_REBIND)
 
     def test_conditional_function_globals_rebind_is_rejected(self) -> None:
-        self._assert_class_replacement_rejected(CONDITIONAL_FUNCTION_GLOBALS_REBIND)
+        self._assert_rejected(CONDITIONAL_FUNCTION_GLOBALS_REBIND)
 
     def test_projected_function_globals_rebind_is_rejected(self) -> None:
-        self._assert_class_replacement_rejected(PROJECTED_FUNCTION_GLOBALS_REBIND)
+        self._assert_rejected(PROJECTED_FUNCTION_GLOBALS_REBIND)
 
 
 if __name__ == "__main__":
