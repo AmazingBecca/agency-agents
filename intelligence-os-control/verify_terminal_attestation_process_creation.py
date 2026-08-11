@@ -102,6 +102,22 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                         return builtins_object(value.args[0], depth + 1, seen) and (attrs is None or "__dict__" in attrs)
                 return False
 
+            def builtins_lookup(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
+                if depth > 8:
+                    return False
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Attribute) and value.attr in {"get", "__getitem__"}:
+                    return builtins_namespace(value.value, depth + 1, seen)
+                if isinstance(value, ast.Call) and callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
+                    attrs = _base._string_values(value.args[1], strings)
+                    return builtins_namespace(value.args[0], depth + 1, seen) and (attrs is None or bool({"get", "__getitem__"} & attrs))
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(builtins_lookup(v, depth + 1, nxt) for v in assigns.get(value.id, []))
+                return False
+
             def globals_factory(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
                 if depth > 8:
                     return False
@@ -120,6 +136,9 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                     if callee_is(value.func, {"operator.getitem"}, depth + 1, seen) and len(value.args) >= 2:
                         keys = _base._string_values(value.args[1], strings)
                         return builtins_namespace(value.args[0], depth + 1, seen) and (keys is None or "globals" in keys)
+                    if builtins_lookup(value.func, depth + 1, seen) and value.args:
+                        keys = _base._string_values(value.args[0], strings)
+                        return keys is None or "globals" in keys
                 if isinstance(value, ast.Subscript) and builtins_namespace(value.value, depth + 1, seen):
                     keys = _base._string_values(value.slice, strings)
                     return keys is None or "globals" in keys
