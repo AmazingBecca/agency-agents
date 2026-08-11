@@ -8,6 +8,7 @@ import verify_terminal_attestation_process_creation as process_creation
 
 
 PREFIX = r'''
+import builtins
 import functools
 import operator
 import os
@@ -173,6 +174,44 @@ def _rebind():
 ''' + ATTESTOR
 
 
+ALIASED_GLOBALS_REBIND = PREFIX + r'''
+def _rebind():
+    namespace_factory = globals
+    namespace_factory().update({"_Mutator": _replacement})
+''' + ATTESTOR
+
+
+REFLECTED_BUILTINS_GLOBALS_REBIND = PREFIX + r'''
+def _rebind():
+    namespace_factory = getattr(builtins, "globals")
+    namespace = namespace_factory()
+    namespace["_Mutator"] = _replacement
+''' + ATTESTOR
+
+
+ALIASED_NAMESPACE_SETITEM_REBIND = PREFIX + r'''
+def _rebind():
+    namespace = globals()
+    setter = namespace.__setitem__
+    setter("_Mutator", _replacement)
+''' + ATTESTOR
+
+
+BRANCH_CARRIED_NAMESPACE_REBIND = PREFIX + r'''
+def _rebind():
+    namespace = globals() if True else {}
+    namespace.update({"_Mutator": _replacement})
+''' + ATTESTOR
+
+
+CONTAINER_CARRIED_NAMESPACE_REBIND = PREFIX + r'''
+def _rebind():
+    carrier = (globals(),)
+    namespace = carrier[0]
+    operator.setitem(namespace, "_Mutator", _replacement)
+''' + ATTESTOR
+
+
 class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -224,6 +263,21 @@ class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.Tes
 
     def test_globals_operator_setitem_rebind_is_rejected(self) -> None:
         self._assert_class_replacement_rejected(GLOBALS_OPERATOR_SETITEM_REBIND)
+
+    def test_aliased_globals_factory_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(ALIASED_GLOBALS_REBIND)
+
+    def test_reflected_builtins_globals_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(REFLECTED_BUILTINS_GLOBALS_REBIND)
+
+    def test_aliased_namespace_setitem_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(ALIASED_NAMESPACE_SETITEM_REBIND)
+
+    def test_branch_carried_namespace_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(BRANCH_CARRIED_NAMESPACE_REBIND)
+
+    def test_container_carried_namespace_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(CONTAINER_CARRIED_NAMESPACE_REBIND)
 
 
 if __name__ == "__main__":
