@@ -117,6 +117,29 @@ NESTED_CONTAINER_PROJECTION_ALIAS_ATTACK = PREFIX + r"""
     alias["resolver"] = _reflection_factory()
 """ + SUFFIX
 
+SUBSCRIPT_INSERT_ALIAS_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {}
+    carrier["settings"] = options
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+UPDATE_INSERT_ALIAS_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {}
+    carrier.update(settings=options)
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+SETDEFAULT_RETURN_ALIAS_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {}
+    alias = carrier.setdefault("settings", options)
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
 
 class TerminalAttestationConstructorProjectionCallAuthorityTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
@@ -147,6 +170,15 @@ class TerminalAttestationConstructorProjectionCallAuthorityTests(unittest.TestCa
 
     def test_nested_container_projection_cannot_hide_mapping_identity(self) -> None:
         self._assert_rejected(NESTED_CONTAINER_PROJECTION_ALIAS_ATTACK)
+
+    def test_subscript_insert_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(SUBSCRIPT_INSERT_ALIAS_ATTACK)
+
+    def test_update_insert_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(UPDATE_INSERT_ALIAS_ATTACK)
+
+    def test_setdefault_return_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(SETDEFAULT_RETURN_ALIAS_ATTACK)
 
 
 if __name__ == "__main__":
