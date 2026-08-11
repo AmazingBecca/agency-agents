@@ -133,20 +133,24 @@ class TerminalAttestationDecoratedClassDynamicGlobalRebindTests(unittest.TestCas
     def _assert_rejected(self, source: str) -> None:
         report = self._verify(source)
         self.assertFalse(report["passed"], report)
+
+    def _assert_class_replacement_rejected(self, source: str) -> None:
+        report = self._verify(source)
+        self.assertFalse(report["passed"], report)
         kinds = {str(item["kind"]) for item in report["findings"]}
         self.assertIn("alternate-process-creation-call", kinds, report)
 
-    def test_globals_subscript_rebind_is_rejected(self) -> None:
+    def test_globals_subscript_rebind_is_already_fail_closed(self) -> None:
         self._assert_rejected(GLOBALS_SUBSCRIPT_REBIND)
 
-    def test_globals_setitem_rebind_is_rejected(self) -> None:
+    def test_globals_setitem_rebind_is_already_fail_closed(self) -> None:
         self._assert_rejected(GLOBALS_SETITEM_REBIND)
 
-    def test_vars_module_namespace_rebind_is_rejected(self) -> None:
+    def test_vars_module_namespace_rebind_is_already_fail_closed(self) -> None:
         self._assert_rejected(VARS_MODULE_REBIND)
 
-    def test_setattr_module_rebind_is_rejected(self) -> None:
-        self._assert_rejected(SETATTR_MODULE_REBIND)
+    def test_setattr_module_rebind_is_rejected_as_class_replacement(self) -> None:
+        self._assert_class_replacement_rejected(SETATTR_MODULE_REBIND)
 
 
 if __name__ == "__main__":
