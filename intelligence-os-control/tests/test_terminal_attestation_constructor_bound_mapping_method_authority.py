@@ -40,6 +40,7 @@ def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
 
 
 PREFIX = r"""
+import functools
 import operator
 import os
 import subprocess
@@ -124,6 +125,41 @@ OPERATOR_GETITEM_ATTACK = PREFIX + r"""
     alias["resolver"] = _reflection_factory()
 """ + SUFFIX
 
+REFLECTED_BOUND_UPDATE_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {}
+    setter = getattr(carrier, "up" + "date")
+    setter(settings=options)
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+PARTIAL_BOUND_UPDATE_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {}
+    setter = functools.partial(carrier.update, settings=options)
+    setter()
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+LAMBDA_BOUND_UPDATE_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {}
+    setter = lambda: carrier.update(settings=options)
+    setter()
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+PARTIAL_OPERATOR_GETITEM_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {"settings": options}
+    getter = functools.partial(operator.getitem, carrier)
+    alias = getter("settings")
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
 
 class TerminalAttestationConstructorBoundMappingMethodAuthorityTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
@@ -154,6 +190,18 @@ class TerminalAttestationConstructorBoundMappingMethodAuthorityTests(unittest.Te
 
     def test_operator_getitem_cannot_hide_mapping_identity(self) -> None:
         self._assert_rejected(OPERATOR_GETITEM_ATTACK)
+
+    def test_reflected_bound_update_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(REFLECTED_BOUND_UPDATE_ATTACK)
+
+    def test_partial_bound_update_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(PARTIAL_BOUND_UPDATE_ATTACK)
+
+    def test_lambda_bound_update_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(LAMBDA_BOUND_UPDATE_ATTACK)
+
+    def test_partial_operator_getitem_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(PARTIAL_OPERATOR_GETITEM_ATTACK)
 
 
 if __name__ == "__main__":
