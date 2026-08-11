@@ -115,6 +115,21 @@ DICT_CONTAINER_PROJECTION_ALIAS_ATTACK = PREFIX + r"""
     alias["resolver"] = _reflection_factory()
 """ + SUFFIX
 
+COMPUTED_DICT_CONTAINER_PROJECTION_ALIAS_ATTACK = PREFIX + r"""
+    options = {}
+    carrier = {"set" + "tings": options}
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
+NAMED_DICT_CONTAINER_PROJECTION_ALIAS_ATTACK = PREFIX + r"""
+    options = {}
+    carrier_key = "settings"
+    carrier = {carrier_key: options}
+    alias = carrier["settings"]
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
 
 class TerminalAttestationConstructorContainerAliasAuthorityTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
@@ -145,6 +160,12 @@ class TerminalAttestationConstructorContainerAliasAuthorityTests(unittest.TestCa
 
     def test_dict_container_projection_cannot_hide_mapping_identity(self) -> None:
         self._assert_rejected(DICT_CONTAINER_PROJECTION_ALIAS_ATTACK)
+
+    def test_computed_dict_key_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(COMPUTED_DICT_CONTAINER_PROJECTION_ALIAS_ATTACK)
+
+    def test_named_dict_key_cannot_hide_mapping_identity(self) -> None:
+        self._assert_rejected(NAMED_DICT_CONTAINER_PROJECTION_ALIAS_ATTACK)
 
 
 if __name__ == "__main__":
