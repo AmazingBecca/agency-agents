@@ -56,6 +56,75 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
             def resolved(value: ast.AST) -> str | None:
                 return _base._resolve_alias(_base._dotted_name(value), imports)
 
+            def callee_is(value: ast.AST, expected: set[str], depth: int = 0, seen: set[str] | None = None) -> bool:
+                if depth > 8:
+                    return False
+                direct = resolved(value)
+                if direct in expected:
+                    return True
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(callee_is(v, expected, depth + 1, nxt) for v in assigns.get(value.id, []))
+                return False
+
+            def builtins_object(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
+                if depth > 8:
+                    return False
+                if resolved(value) == "builtins":
+                    return True
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(builtins_object(v, depth + 1, nxt) for v in assigns.get(value.id, []))
+                return False
+
+            def builtins_namespace(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
+                if depth > 8:
+                    return False
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(builtins_namespace(v, depth + 1, nxt) for v in assigns.get(value.id, []))
+                if isinstance(value, ast.Attribute) and value.attr == "__dict__":
+                    return builtins_object(value.value, depth + 1, seen)
+                if isinstance(value, ast.Call):
+                    if callee_is(value.func, {"vars", "builtins.vars"}, depth + 1, seen) and len(value.args) == 1:
+                        return builtins_object(value.args[0], depth + 1, seen)
+                    if callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
+                        attrs = _base._string_values(value.args[1], strings)
+                        return builtins_object(value.args[0], depth + 1, seen) and (attrs is None or "__dict__" in attrs)
+                return False
+
+            def globals_factory(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
+                if depth > 8:
+                    return False
+                if callee_is(value, {"globals", "builtins.globals"}, depth, seen):
+                    return True
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return False
+                    nxt = seen | {value.id}
+                    return any(globals_factory(v, depth + 1, nxt) for v in assigns.get(value.id, []))
+                if isinstance(value, ast.Call):
+                    if callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
+                        attrs = _base._string_values(value.args[1], strings)
+                        return builtins_object(value.args[0], depth + 1, seen) and (attrs is None or "globals" in attrs)
+                    if callee_is(value.func, {"operator.getitem"}, depth + 1, seen) and len(value.args) >= 2:
+                        keys = _base._string_values(value.args[1], strings)
+                        return builtins_namespace(value.args[0], depth + 1, seen) and (keys is None or "globals" in keys)
+                if isinstance(value, ast.Subscript) and builtins_namespace(value.value, depth + 1, seen):
+                    keys = _base._string_values(value.slice, strings)
+                    return keys is None or "globals" in keys
+                return False
+
             def module(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
                 if depth > 8:
                     return False
@@ -83,10 +152,9 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                 if isinstance(value, ast.Attribute) and value.attr == "__dict__":
                     return module(value.value, depth + 1, seen)
                 if isinstance(value, ast.Call):
-                    call = resolved(value.func)
-                    if call in {"globals", "builtins.globals"} and not value.args and not value.keywords:
+                    if not value.args and not value.keywords and globals_factory(value.func, depth + 1, seen):
                         return True
-                    if call in {"vars", "builtins.vars"} and value.args:
+                    if callee_is(value.func, {"vars", "builtins.vars"}, depth + 1, seen) and value.args:
                         return module(value.args[0], depth + 1, seen)
                 return False
 
@@ -115,7 +183,7 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                 seen = set() if seen is None else set(seen)
                 if isinstance(value, ast.Attribute) and value.attr == "__setattr__" and module(value.value):
                     return True
-                if isinstance(value, ast.Call) and resolved(value.func) in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
+                if isinstance(value, ast.Call) and callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
                     attrs = _base._string_values(value.args[1], strings)
                     return module(value.args[0]) and (attrs is None or "__setattr__" in attrs)
                 if isinstance(value, ast.Name):
@@ -139,7 +207,7 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                 if not isinstance(value, ast.Call) or resolved(value.func) != "functools.partial" or not value.args:
                     return None
                 target = value.args[0]
-                if resolved(target) in {"setattr", "builtins.setattr"} and len(value.args) >= 3 and module(value.args[1]):
+                if callee_is(target, {"setattr", "builtins.setattr"}, depth + 1, seen) and len(value.args) >= 3 and module(value.args[1]):
                     return names(value.args[2])
                 if bound_module_setattr(target) and len(value.args) >= 2:
                     return names(value.args[1])
@@ -151,7 +219,7 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                 seen = set() if seen is None else set(seen)
                 if isinstance(value, ast.Attribute) and value.attr == "update" and namespace(value.value):
                     return True
-                if isinstance(value, ast.Call) and resolved(value.func) in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
+                if isinstance(value, ast.Call) and callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
                     attrs = _base._string_values(value.args[1], strings)
                     return namespace(value.args[0]) and (attrs is None or "update" in attrs)
                 if isinstance(value, ast.Name):
