@@ -24,9 +24,9 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
 
     The prior verifier tracks literal and aliased ``**kwargs`` mappings, but a
     mapping expression can preserve the same reviewed keys while changing AST
-    shape, notably ``left | right`` and ``dict(...)`` construction.  Recover
-    those keys and carry helper-produced callable authority through constructor
-    fields/aliases before checking dynamic dispatch.
+    shape. Recover mapping unions, computed constant string keys, ``dict(...)``
+    construction, and static key/value pair sequences, then carry helper-produced
+    callable authority through constructor fields/aliases before dynamic dispatch.
     """
     findings: list[dict[str, object]] = []
 
@@ -60,6 +60,51 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
             mapping_authority: dict[str, set[str]] = {}
             object_attributes: dict[str, set[str]] = {}
             callable_aliases: set[str] = set()
+            string_values: dict[str, set[str]] = {}
+
+            def static_strings(value: ast.AST) -> set[str]:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    return {value.value}
+                if isinstance(value, ast.Name):
+                    return set(string_values.get(value.id, set()))
+                if isinstance(value, ast.FormattedValue):
+                    return static_strings(value.value)
+                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+                    left = static_strings(value.left)
+                    right = static_strings(value.right)
+                    if not left or not right:
+                        return set()
+                    combined = {a + b for a in left for b in right}
+                    return combined if len(combined) <= 64 else set()
+                if isinstance(value, ast.JoinedStr):
+                    possibilities = {""}
+                    for part in value.values:
+                        part_values = static_strings(part)
+                        if not part_values:
+                            return set()
+                        possibilities = {
+                            prefix + suffix
+                            for prefix in possibilities
+                            for suffix in part_values
+                        }
+                        if len(possibilities) > 64:
+                            return set()
+                    return possibilities
+                return set()
+
+            strings_changed = True
+            while strings_changed:
+                strings_changed = False
+                for target, value in assignments:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    values = static_strings(value)
+                    if not values:
+                        continue
+                    before = set(string_values.get(target.id, set()))
+                    string_values.setdefault(target.id, set()).update(values)
+                    if string_values[target.id] != before:
+                        strings_changed = True
 
             def helper_result_in(value: ast.AST) -> bool:
                 for item in ast.walk(value):
@@ -85,6 +130,22 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
                     )
                 return False
 
+            def pair_sequence_keys(value: ast.AST) -> set[str]:
+                if not isinstance(value, (ast.List, ast.Tuple)):
+                    return set()
+                keys: set[str] = set()
+                for element in value.elts:
+                    if not (
+                        isinstance(element, (ast.List, ast.Tuple))
+                        and len(element.elts) == 2
+                    ):
+                        return set()
+                    key_node, item = element.elts
+                    if not authority_value(item):
+                        continue
+                    keys.update(static_strings(key_node))
+                return keys
+
             def mapping_keys(value: ast.AST) -> set[str]:
                 if isinstance(value, ast.Name):
                     return set(mapping_authority.get(value.id, set()))
@@ -96,13 +157,12 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
                         if key is None:
                             keys.update(mapping_keys(item))
                             continue
-                        if (
-                            isinstance(key, ast.Constant)
-                            and isinstance(key.value, str)
-                            and authority_value(item)
-                        ):
-                            keys.add(key.value)
+                        if authority_value(item):
+                            keys.update(static_strings(key))
                     return keys
+                sequence_keys = pair_sequence_keys(value)
+                if sequence_keys:
+                    return sequence_keys
                 if isinstance(value, ast.Call):
                     call_name = _base._resolve_alias(
                         _base._dotted_name(value.func), import_aliases
