@@ -84,21 +84,35 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
 
             def projected(value: ast.Subscript) -> ast.AST | None:
                 container = resolve_sequence(value.value)
-                if not isinstance(container, (ast.List, ast.Tuple)):
-                    return None
                 index_node = value.slice
-                if not (
-                    isinstance(index_node, ast.Constant)
-                    and isinstance(index_node.value, int)
-                    and not isinstance(index_node.value, bool)
-                ):
-                    return None
-                index = index_node.value
-                if index < 0:
-                    index += len(container.elts)
-                if index < 0 or index >= len(container.elts):
-                    return None
-                return container.elts[index]
+
+                if isinstance(container, (ast.List, ast.Tuple)):
+                    if not (
+                        isinstance(index_node, ast.Constant)
+                        and isinstance(index_node.value, int)
+                        and not isinstance(index_node.value, bool)
+                    ):
+                        return None
+                    index = index_node.value
+                    if index < 0:
+                        index += len(container.elts)
+                    if index < 0 or index >= len(container.elts):
+                        return None
+                    return container.elts[index]
+
+                if isinstance(container, ast.Dict):
+                    if not isinstance(index_node, ast.Constant):
+                        return None
+                    for key, item in zip(container.keys, container.values):
+                        if not isinstance(key, ast.Constant):
+                            continue
+                        try:
+                            matches = key.value == index_node.value
+                        except Exception:
+                            matches = False
+                        if matches and type(key.value) is type(index_node.value):
+                            return item
+                return None
 
             def connect(left: ast.AST, right: ast.AST) -> None:
                 if isinstance(left, ast.Name) and isinstance(right, ast.Name):
