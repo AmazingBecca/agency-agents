@@ -244,20 +244,34 @@ def _factory_authority_state(
                         for argument in value.args
                     ]
                     positional_authority = any(positional_authority_values)
-                    dangerous_keywords = {
-                        keyword.arg
-                        for keyword in value.keywords
-                        if keyword.arg is not None
-                        and (
-                            helper_result_in(keyword.value)
-                            or _contains_factory_authority(
+                    dangerous_keywords: set[str] = set()
+                    for keyword in value.keywords:
+                        if keyword.arg is not None:
+                            if helper_result_in(keyword.value) or _contains_factory_authority(
                                 keyword.value,
                                 aliases,
                                 containers,
                                 object_attributes,
-                            )
-                        )
-                    }
+                            ):
+                                dangerous_keywords.add(keyword.arg)
+                            continue
+                        if not isinstance(keyword.value, ast.Dict):
+                            continue
+                        for mapping_key, mapping_value in zip(
+                            keyword.value.keys, keyword.value.values
+                        ):
+                            if not (
+                                isinstance(mapping_key, ast.Constant)
+                                and isinstance(mapping_key.value, str)
+                            ):
+                                continue
+                            if helper_result_in(mapping_value) or _contains_factory_authority(
+                                mapping_value,
+                                aliases,
+                                containers,
+                                object_attributes,
+                            ):
+                                dangerous_keywords.add(mapping_key.value)
                     if positional_authority:
                         if target.id not in containers:
                             containers.add(target.id)
