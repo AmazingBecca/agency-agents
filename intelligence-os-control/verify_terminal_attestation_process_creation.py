@@ -24,9 +24,11 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
 
     In addition to literal/aliased ``**kwargs`` recovery, track mapping unions,
     computed constant keys, ``dict(...)`` construction, static pair sequences,
-    and in-place mapping mutation. If helper-produced callable authority is
-    inserted under a runtime-derived key and the mapping is later unpacked into
-    a reviewed constructor, fail closed because the binding cannot be proven.
+    in-place mapping mutation, and mutation through aliases that were bound to
+    the same mapping object before authority was inserted. If helper-produced
+    callable authority is inserted under a runtime-derived key and the mapping
+    is later unpacked into a reviewed constructor, fail closed because the
+    binding cannot be proven.
     """
     findings: list[dict[str, object]] = []
 
@@ -63,6 +65,24 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
             object_attributes: dict[str, set[str]] = {}
             callable_aliases: set[str] = set()
             string_values: dict[str, set[str]] = {}
+            mapping_aliases: dict[str, set[str]] = {}
+
+            for target, value in assignments:
+                if isinstance(target, ast.Name) and isinstance(value, ast.Name):
+                    mapping_aliases.setdefault(target.id, set()).add(value.id)
+                    mapping_aliases.setdefault(value.id, set()).add(target.id)
+
+            def mapping_alias_closure(name: str) -> set[str]:
+                seen = {name}
+                pending = [name]
+                while pending:
+                    current = pending.pop()
+                    for alias in mapping_aliases.get(current, set()):
+                        if alias in seen:
+                            continue
+                        seen.add(alias)
+                        pending.append(alias)
+                return seen
 
             def static_strings(value: ast.AST) -> set[str]:
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
@@ -155,10 +175,12 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
 
             def mapping_state(value: ast.AST) -> tuple[set[str], bool]:
                 if isinstance(value, ast.Name):
-                    return (
-                        set(mapping_authority.get(value.id, set())),
-                        value.id in unknown_mapping_authority,
-                    )
+                    keys: set[str] = set()
+                    unknown = False
+                    for alias in mapping_alias_closure(value.id):
+                        keys.update(mapping_authority.get(alias, set()))
+                        unknown = unknown or alias in unknown_mapping_authority
+                    return keys, unknown
                 if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
                     left_keys, left_unknown = mapping_state(value.left)
                     right_keys, right_unknown = mapping_state(value.right)
@@ -207,13 +229,15 @@ def _mapping_union_authority_findings(root: pathlib.Path) -> list[dict[str, obje
 
             def add_mapping_state(name: str, keys: set[str], unknown: bool) -> bool:
                 changed_local = False
-                if keys:
-                    before = set(mapping_authority.get(name, set()))
-                    mapping_authority.setdefault(name, set()).update(keys)
-                    changed_local = mapping_authority[name] != before
-                if unknown and name not in unknown_mapping_authority:
-                    unknown_mapping_authority.add(name)
-                    changed_local = True
+                for alias in mapping_alias_closure(name):
+                    if keys:
+                        before = set(mapping_authority.get(alias, set()))
+                        mapping_authority.setdefault(alias, set()).update(keys)
+                        if mapping_authority[alias] != before:
+                            changed_local = True
+                    if unknown and alias not in unknown_mapping_authority:
+                        unknown_mapping_authority.add(alias)
+                        changed_local = True
                 return changed_local
 
             changed = True
