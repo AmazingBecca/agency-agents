@@ -183,6 +183,63 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                 def helper_resolved(value: ast.AST) -> str | None:
                     return _base._resolve_alias(_base._dotted_name(value), helper_imports)
 
+                def helper_projection_is_namespace(
+                    container: ast.AST,
+                    key: ast.AST,
+                    level: int,
+                    seen_names: set[str],
+                ) -> bool:
+                    if level > 8:
+                        return True
+                    if isinstance(container, ast.Name):
+                        if container.id in seen_names:
+                            return False
+                        candidates = helper_assigns.get(container.id, [])
+                        if not candidates:
+                            return False
+                        nxt = seen_names | {container.id}
+                        return any(
+                            helper_projection_is_namespace(candidate, key, level + 1, nxt)
+                            for candidate in candidates
+                        )
+                    if isinstance(container, (ast.Tuple, ast.List)):
+                        if isinstance(key, ast.Constant) and isinstance(key.value, int):
+                            index = key.value
+                            if index < 0:
+                                index += len(container.elts)
+                            if index < 0 or index >= len(container.elts):
+                                return False
+                            return helper_value_is_namespace(
+                                container.elts[index],
+                                level + 1,
+                                seen_names,
+                            )
+                        return any(
+                            helper_value_is_namespace(item, level + 1, seen_names)
+                            for item in container.elts
+                        )
+                    if isinstance(container, ast.Dict):
+                        requested = _base._string_values(key, helper_strings)
+                        if requested is None:
+                            return any(
+                                value is not None
+                                and helper_value_is_namespace(value, level + 1, seen_names)
+                                for value in container.values
+                            )
+                        for dict_key, dict_value in zip(container.keys, container.values):
+                            if dict_value is None:
+                                continue
+                            if dict_key is None:
+                                if helper_value_is_namespace(dict_value, level + 1, seen_names):
+                                    return True
+                                continue
+                            candidate_keys = _base._string_values(dict_key, helper_strings)
+                            if candidate_keys is None or requested & candidate_keys:
+                                if helper_value_is_namespace(dict_value, level + 1, seen_names):
+                                    return True
+                        return False
+                    return False
+
                 def helper_value_is_namespace(value: ast.AST, level: int = 0, seen_names: set[str] | None = None) -> bool:
                     if level > 8:
                         return True
@@ -197,6 +254,8 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                         return any(helper_value_is_namespace(candidate, level + 1, nxt) for candidate in candidates)
                     if isinstance(value, ast.Attribute) and value.attr == "__globals__":
                         return True
+                    if isinstance(value, ast.Subscript):
+                        return helper_projection_is_namespace(value.value, value.slice, level + 1, seen_names)
                     if isinstance(value, ast.NamedExpr):
                         return helper_value_is_namespace(value.value, level + 1, seen_names)
                     if isinstance(value, ast.IfExp):
