@@ -9,6 +9,7 @@ import verify_terminal_attestation_process_creation as process_creation
 
 PREFIX = r'''
 import functools
+import operator
 import os
 import subprocess
 import sys
@@ -124,6 +125,36 @@ def _rebind():
 ''' + ATTESTOR
 
 
+VARS_UPDATE_REBIND = PREFIX + r'''
+def _rebind():
+    namespace = vars(sys.modules[__name__])
+    namespace.update({"_" + "Mutator": _replacement})
+''' + ATTESTOR
+
+
+REFLECTED_UPDATE_REBIND = PREFIX + r'''
+def _rebind():
+    namespace = sys.modules[__name__].__dict__
+    updater = getattr(namespace, "update")
+    updater({"_Mutator": _replacement})
+''' + ATTESTOR
+
+
+PARTIAL_BOUND_DUNDER_SETATTR_REBIND = PREFIX + r'''
+def _rebind():
+    module = sys.modules[__name__]
+    setter = functools.partial(module.__setattr__, "_Mutator")
+    setter(_replacement)
+''' + ATTESTOR
+
+
+OPERATOR_IOR_REBIND = PREFIX + r'''
+def _rebind():
+    namespace = sys.modules[__name__].__dict__
+    operator.ior(namespace, {"_Mutator": _replacement})
+''' + ATTESTOR
+
+
 class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -154,6 +185,18 @@ class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.Tes
 
     def test_namespace_ior_rebind_is_rejected(self) -> None:
         self._assert_class_replacement_rejected(NAMESPACE_IOR_REBIND)
+
+    def test_vars_namespace_update_with_computed_key_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(VARS_UPDATE_REBIND)
+
+    def test_reflected_namespace_update_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(REFLECTED_UPDATE_REBIND)
+
+    def test_partial_bound_module_dunder_setattr_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(PARTIAL_BOUND_DUNDER_SETATTR_REBIND)
+
+    def test_operator_ior_namespace_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(OPERATOR_IOR_REBIND)
 
 
 if __name__ == "__main__":
