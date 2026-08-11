@@ -46,21 +46,22 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
             ]
             assignments: list[tuple[ast.AST, ast.AST]] = []
             assigned_values: dict[str, ast.AST] = {}
+            assigned_value_candidates: dict[str, list[ast.AST]] = {}
+
+            def remember_assignment(target: ast.AST, value: ast.AST) -> None:
+                assignments.append((target, value))
+                if isinstance(target, ast.Name):
+                    assigned_values[target.id] = value
+                    assigned_value_candidates.setdefault(target.id, []).append(value)
 
             for node in scope_nodes:
                 if isinstance(node, ast.Assign):
                     for target in node.targets:
-                        assignments.append((target, node.value))
-                        if isinstance(target, ast.Name):
-                            assigned_values[target.id] = node.value
+                        remember_assignment(target, node.value)
                 elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                    assignments.append((node.target, node.value))
-                    if isinstance(node.target, ast.Name):
-                        assigned_values[node.target.id] = node.value
+                    remember_assignment(node.target, node.value)
                 elif isinstance(node, ast.NamedExpr):
-                    assignments.append((node.target, node.value))
-                    if isinstance(node.target, ast.Name):
-                        assigned_values[node.target.id] = node.value
+                    remember_assignment(node.target, node.value)
 
             mapping_aliases: dict[str, set[str]] = {}
 
@@ -70,17 +71,25 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                 mapping_aliases.setdefault(left, set()).add(right)
                 mapping_aliases.setdefault(right, set()).add(left)
 
-            def resolve_sequence(value: ast.AST, seen: set[str] | None = None) -> ast.AST:
+            def resolve_sequence_candidates(
+                value: ast.AST,
+                seen: set[str] | None = None,
+            ) -> list[ast.AST]:
                 seen = set() if seen is None else set(seen)
-                current = value
-                for _ in range(16):
-                    if not isinstance(current, ast.Name):
-                        return current
-                    if current.id in seen or current.id not in assigned_values:
-                        return current
-                    seen.add(current.id)
-                    current = assigned_values[current.id]
-                return current
+                if not isinstance(value, ast.Name):
+                    return [value]
+                if value.id in seen:
+                    return [value]
+                candidates = assigned_value_candidates.get(value.id, [])
+                if not candidates:
+                    return [value]
+                seen.add(value.id)
+                resolved: list[ast.AST] = []
+                for candidate in candidates:
+                    resolved.extend(resolve_sequence_candidates(candidate, seen))
+                    if len(resolved) > 64:
+                        return resolved[:64]
+                return resolved
 
             def static_key_values(
                 value: ast.AST,
@@ -89,10 +98,18 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                 """Recover a bounded set of builtin, immutable mapping-key values."""
                 seen = set() if seen is None else set(seen)
                 if isinstance(value, ast.Name):
-                    if value.id in seen or value.id not in assigned_values:
+                    if value.id in seen:
+                        return set()
+                    candidates = assigned_value_candidates.get(value.id, [])
+                    if not candidates:
                         return set()
                     seen.add(value.id)
-                    return static_key_values(assigned_values[value.id], seen)
+                    results: set[tuple[type[object], object]] = set()
+                    for candidate in candidates:
+                        results.update(static_key_values(candidate, seen))
+                        if len(results) > 64:
+                            return set()
+                    return results
                 if isinstance(value, ast.Constant):
                     item = value.value
                     if isinstance(item, (str, bytes, int, float, complex, bool)) or item is None:
@@ -142,35 +159,35 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                 return set()
 
             def projected_members(value: ast.Subscript) -> list[ast.AST]:
-                container = resolve_sequence(value.value)
+                containers = resolve_sequence_candidates(value.value)
                 index_node = value.slice
+                matches: list[ast.AST] = []
 
-                if isinstance(container, (ast.List, ast.Tuple)):
-                    if not (
-                        isinstance(index_node, ast.Constant)
-                        and isinstance(index_node.value, int)
-                        and not isinstance(index_node.value, bool)
-                    ):
-                        return []
-                    index = index_node.value
-                    if index < 0:
-                        index += len(container.elts)
-                    if index < 0 or index >= len(container.elts):
-                        return []
-                    return [container.elts[index]]
-
-                if isinstance(container, ast.Dict):
-                    wanted = static_key_values(index_node)
-                    if not wanted:
-                        return []
-                    matches: list[ast.AST] = []
-                    for key, item in zip(container.keys, container.values):
-                        if key is None:
+                for container in containers:
+                    if isinstance(container, (ast.List, ast.Tuple)):
+                        if not (
+                            isinstance(index_node, ast.Constant)
+                            and isinstance(index_node.value, int)
+                            and not isinstance(index_node.value, bool)
+                        ):
                             continue
-                        if wanted.intersection(static_key_values(key)):
-                            matches.append(item)
-                    return matches
-                return []
+                        index = index_node.value
+                        if index < 0:
+                            index += len(container.elts)
+                        if 0 <= index < len(container.elts):
+                            matches.append(container.elts[index])
+                        continue
+
+                    if isinstance(container, ast.Dict):
+                        wanted = static_key_values(index_node)
+                        if not wanted:
+                            continue
+                        for key, item in zip(container.keys, container.values):
+                            if key is None:
+                                continue
+                            if wanted.intersection(static_key_values(key)):
+                                matches.append(item)
+                return matches
 
             def connect(left: ast.AST, right: ast.AST) -> None:
                 if isinstance(left, ast.Name) and isinstance(right, ast.Name):
