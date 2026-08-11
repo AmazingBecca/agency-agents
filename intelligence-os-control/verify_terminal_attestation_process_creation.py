@@ -141,6 +141,7 @@ def _factory_authority_state(
     aliases: set[str] = set()
     containers: set[str] = set()
     object_attributes: dict[str, set[str]] = {}
+    mapping_authority: dict[str, set[str]] = {}
     assignments: list[tuple[ast.AST, ast.AST]] = []
 
     for node in _base._function_scope_nodes(function):
@@ -162,6 +163,30 @@ def _factory_authority_state(
                 return True
         return False
 
+    def authority_mapping_keys(value: ast.AST) -> set[str]:
+        if isinstance(value, ast.Name):
+            return set(mapping_authority.get(value.id, set()))
+        if not isinstance(value, ast.Dict):
+            return set()
+        keys: set[str] = set()
+        for mapping_key, mapping_value in zip(value.keys, value.values):
+            if mapping_key is None:
+                keys.update(authority_mapping_keys(mapping_value))
+                continue
+            if not (
+                isinstance(mapping_key, ast.Constant)
+                and isinstance(mapping_key.value, str)
+            ):
+                continue
+            if helper_result_in(mapping_value) or _contains_factory_authority(
+                mapping_value,
+                aliases,
+                containers,
+                object_attributes,
+            ):
+                keys.add(mapping_key.value)
+        return keys
+
     changed = True
     while changed:
         changed = False
@@ -179,6 +204,18 @@ def _factory_authority_state(
                 ):
                     if target.id not in aliases:
                         aliases.add(target.id)
+                        changed = True
+                    continue
+
+                if isinstance(value, ast.Name) and value.id in mapping_authority:
+                    before = set(mapping_authority.get(target.id, set()))
+                    mapping_authority.setdefault(target.id, set()).update(
+                        mapping_authority[value.id]
+                    )
+                    if mapping_authority[target.id] != before:
+                        changed = True
+                    if target.id not in containers:
+                        containers.add(target.id)
                         changed = True
                     continue
 
@@ -206,6 +243,19 @@ def _factory_authority_state(
                             aliases.add(target.id)
                             changed = True
                         continue
+
+                dangerous_mapping_keys = authority_mapping_keys(value)
+                if dangerous_mapping_keys:
+                    before = set(mapping_authority.get(target.id, set()))
+                    mapping_authority.setdefault(target.id, set()).update(
+                        dangerous_mapping_keys
+                    )
+                    if mapping_authority[target.id] != before:
+                        changed = True
+                    if target.id not in containers:
+                        containers.add(target.id)
+                        changed = True
+                    continue
 
                 if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) and (
                     helper_result_in(value)
@@ -255,23 +305,7 @@ def _factory_authority_state(
                             ):
                                 dangerous_keywords.add(keyword.arg)
                             continue
-                        if not isinstance(keyword.value, ast.Dict):
-                            continue
-                        for mapping_key, mapping_value in zip(
-                            keyword.value.keys, keyword.value.values
-                        ):
-                            if not (
-                                isinstance(mapping_key, ast.Constant)
-                                and isinstance(mapping_key.value, str)
-                            ):
-                                continue
-                            if helper_result_in(mapping_value) or _contains_factory_authority(
-                                mapping_value,
-                                aliases,
-                                containers,
-                                object_attributes,
-                            ):
-                                dangerous_keywords.add(mapping_key.value)
+                        dangerous_keywords.update(authority_mapping_keys(keyword.value))
                     if positional_authority:
                         if target.id not in containers:
                             containers.add(target.id)
