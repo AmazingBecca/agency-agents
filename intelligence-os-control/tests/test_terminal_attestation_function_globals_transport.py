@@ -91,6 +91,30 @@ def _rebind():
 ''' + ATTESTOR
 
 
+HELPER_TUPLE_PROJECTED_FUNCTION_GLOBALS_REBIND = PREFIX + r'''
+def _live_namespace():
+    carrier = (_replacement.__globals__, None)
+    return carrier[0]
+
+
+def _rebind():
+    namespace = _live_namespace()
+    namespace["_Mutator"] = _replacement
+''' + ATTESTOR
+
+
+HELPER_DICT_PROJECTED_FUNCTION_GLOBALS_REBIND = PREFIX + r'''
+def _live_namespace():
+    carrier = {"live": _replacement.__globals__}
+    return carrier.get("live")
+
+
+def _rebind():
+    namespace = _live_namespace()
+    namespace.update({"_Mutator": _replacement})
+''' + ATTESTOR
+
+
 CONTAINER_TRANSPORTED_FUNCTION_GLOBALS_REBIND = PREFIX + r'''
 def _rebind():
     carrier = (_replacement.__globals__,)
@@ -127,10 +151,19 @@ class TerminalAttestationFunctionGlobalsTransportTests(unittest.TestCase):
         self.assertGreater(int(report.get("finding_count", 0)), 0, report)
         return report
 
-    def test_helper_returned_function_globals_rebind_is_rejected(self) -> None:
-        report = self._assert_rejected(HELPER_RETURNED_FUNCTION_GLOBALS_REBIND)
+    def _assert_replacement_rejected(self, source: str) -> None:
+        report = self._assert_rejected(source)
         kinds = {str(item["kind"]) for item in report["findings"]}
         self.assertIn("alternate-process-creation-call", kinds, report)
+
+    def test_helper_returned_function_globals_rebind_is_rejected(self) -> None:
+        self._assert_replacement_rejected(HELPER_RETURNED_FUNCTION_GLOBALS_REBIND)
+
+    def test_helper_tuple_projected_function_globals_rebind_is_rejected(self) -> None:
+        self._assert_replacement_rejected(HELPER_TUPLE_PROJECTED_FUNCTION_GLOBALS_REBIND)
+
+    def test_helper_dict_projected_function_globals_rebind_is_rejected(self) -> None:
+        self._assert_replacement_rejected(HELPER_DICT_PROJECTED_FUNCTION_GLOBALS_REBIND)
 
     def test_container_transported_function_globals_rebind_is_rejected(self) -> None:
         self._assert_rejected(CONTAINER_TRANSPORTED_FUNCTION_GLOBALS_REBIND)
