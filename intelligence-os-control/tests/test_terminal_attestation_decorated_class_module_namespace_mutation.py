@@ -155,6 +155,24 @@ def _rebind():
 ''' + ATTESTOR
 
 
+GLOBALS_UPDATE_REBIND = PREFIX + r'''
+def _rebind():
+    globals().update({"_Mutator": _replacement})
+''' + ATTESTOR
+
+
+GLOBALS_SUBSCRIPT_REBIND = PREFIX + r'''
+def _rebind():
+    globals()["_Mutator"] = _replacement
+''' + ATTESTOR
+
+
+GLOBALS_OPERATOR_SETITEM_REBIND = PREFIX + r'''
+def _rebind():
+    operator.setitem(globals(), "_Mutator", _replacement)
+''' + ATTESTOR
+
+
 class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -197,6 +215,15 @@ class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.Tes
 
     def test_operator_ior_namespace_rebind_is_rejected(self) -> None:
         self._assert_class_replacement_rejected(OPERATOR_IOR_REBIND)
+
+    def test_globals_update_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(GLOBALS_UPDATE_REBIND)
+
+    def test_globals_subscript_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(GLOBALS_SUBSCRIPT_REBIND)
+
+    def test_globals_operator_setitem_rebind_is_rejected(self) -> None:
+        self._assert_class_replacement_rejected(GLOBALS_OPERATOR_SETITEM_REBIND)
 
 
 if __name__ == "__main__":
