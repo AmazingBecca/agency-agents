@@ -159,6 +159,70 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                     return resolved(value.func) == "sys.modules.get" and bool(value.args) and isinstance(value.args[0], ast.Name) and value.args[0].id == "__name__"
                 return False
 
+            helper_namespace_cache: dict[str, bool] = {}
+
+            def helper_returns_namespace(name: str, depth: int = 0, seen_helpers: set[str] | None = None) -> bool:
+                if depth > 8:
+                    return True
+                if name in helper_namespace_cache:
+                    return helper_namespace_cache[name]
+                definitions = functions.get(name, [])
+                if len(definitions) != 1:
+                    return False
+                seen_helpers = set() if seen_helpers is None else set(seen_helpers)
+                if name in seen_helpers:
+                    return False
+                definition = definitions[0]
+                helper_nodes = list(_base._function_scope_nodes(definition))
+                helper_assigns = _assignments(helper_nodes)
+                helper_imports = _base._scope_import_aliases(tree, definition)
+                helper_strings = _base._local_string_bindings(definition)
+                next_helpers = seen_helpers | {name}
+                helper_namespace_cache[name] = False
+
+                def helper_resolved(value: ast.AST) -> str | None:
+                    return _base._resolve_alias(_base._dotted_name(value), helper_imports)
+
+                def helper_value_is_namespace(value: ast.AST, level: int = 0, seen_names: set[str] | None = None) -> bool:
+                    if level > 8:
+                        return True
+                    seen_names = set() if seen_names is None else set(seen_names)
+                    if isinstance(value, ast.Name):
+                        if value.id in seen_names:
+                            return False
+                        candidates = helper_assigns.get(value.id, [])
+                        if not candidates:
+                            return False
+                        nxt = seen_names | {value.id}
+                        return any(helper_value_is_namespace(candidate, level + 1, nxt) for candidate in candidates)
+                    if isinstance(value, ast.Attribute) and value.attr == "__globals__":
+                        return True
+                    if isinstance(value, ast.NamedExpr):
+                        return helper_value_is_namespace(value.value, level + 1, seen_names)
+                    if isinstance(value, ast.IfExp):
+                        return helper_value_is_namespace(value.body, level + 1, seen_names) or helper_value_is_namespace(value.orelse, level + 1, seen_names)
+                    if isinstance(value, ast.BoolOp):
+                        return any(helper_value_is_namespace(item, level + 1, seen_names) for item in value.values)
+                    if isinstance(value, ast.Call):
+                        call_name = helper_resolved(value.func)
+                        if call_name in {"globals", "builtins.globals"} and not value.args and not value.keywords:
+                            return True
+                        if call_name in functions and call_name not in next_helpers:
+                            if helper_returns_namespace(call_name, depth + 1, next_helpers):
+                                return True
+                        if call_name in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
+                            attrs = _base._string_values(value.args[1], helper_strings)
+                            if attrs is None or "__globals__" in attrs:
+                                return True
+                    return False
+
+                for helper_node in helper_nodes:
+                    if isinstance(helper_node, ast.Return) and helper_node.value is not None:
+                        if helper_value_is_namespace(helper_node.value):
+                            helper_namespace_cache[name] = True
+                            return True
+                return False
+
             def namespace(value: ast.AST, depth: int = 0, seen: set[str] | None = None) -> bool:
                 if depth > 8:
                     return False
@@ -181,6 +245,9 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                     if callee_is(value.func, {"getattr", "builtins.getattr"}, depth + 1, seen) and len(value.args) >= 2:
                         attrs = _base._string_values(value.args[1], strings)
                         if attrs is None or "__globals__" in attrs:
+                            return True
+                    for helper_name in functions:
+                        if helper_returns_namespace(helper_name, depth + 1) and callee_is(value.func, {helper_name}, depth + 1, seen):
                             return True
                 return False
 
