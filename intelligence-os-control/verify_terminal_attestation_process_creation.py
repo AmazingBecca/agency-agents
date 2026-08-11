@@ -20,21 +20,6 @@ _MAPPING_TRANSPORT_METHODS = {
     "get",
     "__getitem__",
 }
-_DYNAMIC_CLASS_METHODS = {"__call__", "__new__"}
-_CONTAINER_RETURNERS = {
-    "list",
-    "tuple",
-    "set",
-    "frozenset",
-    "dict",
-    "next",
-    "builtins.list",
-    "builtins.tuple",
-    "builtins.set",
-    "builtins.frozenset",
-    "builtins.dict",
-    "builtins.next",
-}
 
 
 def __getattr__(name: str):
@@ -42,7 +27,7 @@ def __getattr__(name: str):
 
 
 def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
-    """Fail closed on wrapped or dynamically reconstructed mapping transport."""
+    """Fail closed on wrapped/aliased mapping transport in attestor-reachable flow."""
     findings: list[dict[str, object]] = []
 
     for source in _base.control_flow._source_files(root):
@@ -64,388 +49,393 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
             if isinstance(node, ast.ClassDef):
                 class_definitions.setdefault(node.name, []).append(node)
 
-        dynamic_classes = {
+        callable_classes = {
             name
             for name, definitions in class_definitions.items()
             if len(definitions) == 1
             and (
-                bool(definitions[0].decorator_list)
-                or any(
+                any(
                     isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and item.name in _DYNAMIC_CLASS_METHODS
+                    and item.name in {"__call__", "__new__"}
                     for item in definitions[0].body
                 )
                 or any(keyword.arg == "metaclass" for keyword in definitions[0].keywords)
             )
         }
-
-        # A class can become dynamically callable after definition. Treat writes to
-        # __call__ or __new__ as authority-bearing even when wrapped by staticmethod,
-        # classmethod, or another descriptor.
+        # Decorators can replace the class object entirely, and post-definition
+        # writes can install constructor/call authority after the class body was
+        # reviewed. Treat either form as dynamically callable when invoked from
+        # attestor-reachable code.
+        for name, definitions in class_definitions.items():
+            if len(definitions) == 1 and definitions[0].decorator_list:
+                callable_classes.add(name)
         for node in tree.body:
             targets: list[ast.AST] = []
             if isinstance(node, ast.Assign):
                 targets.extend(node.targets)
             elif isinstance(node, ast.AnnAssign):
                 targets.append(node.target)
-            elif isinstance(node, ast.AugAssign):
-                targets.append(node.target)
             for target in targets:
-                if not isinstance(target, ast.Attribute):
-                    continue
-                if target.attr not in _DYNAMIC_CLASS_METHODS:
-                    continue
-                if isinstance(target.value, ast.Name) and target.value.id in class_definitions:
-                    dynamic_classes.add(target.value.id)
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr in {"__call__", "__new__"}
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in class_definitions
+                ):
+                    callable_classes.add(target.value.id)
 
-        # Subclasses inherit constructor/call authority. Keep the closure bounded by
-        # the finite reviewed top-level class graph.
+        # A direct __call__, a custom __new__, an explicit metaclass, a class
+        # decorator, or a later constructor/call rebinding can make constructor
+        # results dynamically callable. Subclasses inherit the same authority.
         changed = True
         while changed:
             changed = False
             for name, definitions in class_definitions.items():
-                if name in dynamic_classes or len(definitions) != 1:
+                if name in callable_classes or len(definitions) != 1:
                     continue
                 bases = {
                     _base._dotted_name(base)
                     for base in definitions[0].bases
                     if _base._dotted_name(base)
                 }
-                if bases & dynamic_classes:
-                    dynamic_classes.add(name)
+                if bases & callable_classes:
+                    callable_classes.add(name)
                     changed = True
-
-        def assignment_map(function: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, list[ast.AST]]:
-            assignments: dict[str, list[ast.AST]] = {}
-
-            def remember(target: ast.AST, value: ast.AST) -> None:
-                if isinstance(target, ast.Name):
-                    assignments.setdefault(target.id, []).append(value)
-                    return
-                if isinstance(target, ast.Starred):
-                    remember(target.value, value)
-                    return
-                if isinstance(target, (ast.Tuple, ast.List)):
-                    if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(value.elts):
-                        for left, right in zip(target.elts, value.elts):
-                            remember(left, right)
-                    else:
-                        for left in target.elts:
-                            remember(left, value)
-
-            for node in _base._function_scope_nodes(function):
-                if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        remember(target, node.value)
-                elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                    remember(node.target, node.value)
-                elif isinstance(node, ast.NamedExpr):
-                    remember(node.target, node.value)
-            return assignments
-
-        factory_cache: dict[str, set[str]] = {}
 
         for function in _base._reachable_functions(tree, attestor, functions):
             import_aliases = _base._scope_import_aliases(tree, function)
             scope_nodes = list(_base._function_scope_nodes(function))
-            assignments = assignment_map(function)
+            assignments: dict[str, list[ast.AST]] = {}
+            for node in scope_nodes:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            assignments.setdefault(target.id, []).append(node.value)
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                    assignments.setdefault(node.target.id, []).append(node.value)
+                elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+                    assignments.setdefault(node.target.id, []).append(node.value)
 
-            def resolved_name(value: ast.AST) -> str | None:
-                dotted = _base._dotted_name(value)
-                return _base._resolve_alias(dotted, import_aliases)
-
-            def static_strings(
-                value: ast.AST,
-                assignment_candidates: dict[str, list[ast.AST]],
-                seen: set[str] | None = None,
-            ) -> set[str]:
+            def static_strings(value: ast.AST, seen: set[str] | None = None) -> set[str]:
                 seen = set() if seen is None else set(seen)
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     return {value.value}
                 if isinstance(value, ast.Name):
                     if value.id in seen:
                         return set()
-                    candidates = assignment_candidates.get(value.id, [])
-                    if not candidates:
+                    values = assignments.get(value.id, [])
+                    if not values:
                         return set()
-                    next_seen = set(seen)
-                    next_seen.add(value.id)
-                    recovered: set[str] = set()
-                    for candidate in candidates:
-                        recovered.update(static_strings(candidate, assignment_candidates, next_seen))
-                        if len(recovered) >= 32:
-                            return set(sorted(recovered)[:32])
-                    return recovered
+                    seen.add(value.id)
+                    result: set[str] = set()
+                    for candidate in values:
+                        result.update(static_strings(candidate, seen))
+                        if len(result) >= 32:
+                            return set(sorted(result)[:32])
+                    return result
                 if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-                    left = static_strings(value.left, assignment_candidates, seen)
-                    right = static_strings(value.right, assignment_candidates, seen)
-                    return {
-                        prefix + suffix
-                        for prefix in left
-                        for suffix in right
-                        if len(prefix) + len(suffix) <= 128
-                    }
+                    left = static_strings(value.left, seen)
+                    right = static_strings(value.right, seen)
+                    return {a + b for a in left for b in right if len(a) + len(b) <= 128}
                 if isinstance(value, ast.JoinedStr):
                     parts: list[set[str]] = []
                     for item in value.values:
                         if isinstance(item, ast.Constant) and isinstance(item.value, str):
                             parts.append({item.value})
                         elif isinstance(item, ast.FormattedValue):
-                            parts.append(static_strings(item.value, assignment_candidates, seen))
+                            parts.append(static_strings(item.value, seen))
                         else:
                             return set()
                     combined = {""}
                     for part in parts:
                         if not part:
                             return set()
-                        combined = {
-                            prefix + suffix
-                            for prefix in combined
-                            for suffix in part
-                            if len(prefix) + len(suffix) <= 128
-                        }
+                        combined = {a + b for a in combined for b in part if len(a) + len(b) <= 128}
                         if len(combined) > 32:
                             combined = set(sorted(combined)[:32])
                     return combined
                 return set()
 
-            def factory_dynamic_classes(
+            def resolved_name(value: ast.AST) -> str | None:
+                dotted = _base._dotted_name(value)
+                return _base._resolve_alias(dotted, import_aliases)
+
+            def projection_candidates(
+                value: ast.Subscript,
+                assignment_map: dict[str, list[ast.AST]],
+                seen: set[str] | None = None,
+            ) -> list[ast.AST]:
+                """Recover bounded literal container members that carry callable identity."""
+                seen = set() if seen is None else set(seen)
+
+                def containers(node: ast.AST) -> list[ast.AST]:
+                    if isinstance(node, ast.Name):
+                        if node.id in seen:
+                            return []
+                        candidates = assignment_map.get(node.id, [])
+                        if not candidates:
+                            return [node]
+                        next_seen = set(seen)
+                        next_seen.add(node.id)
+                        resolved: list[ast.AST] = []
+                        for candidate in candidates:
+                            if isinstance(candidate, ast.Name):
+                                if candidate.id in next_seen:
+                                    continue
+                                nested = assignment_map.get(candidate.id, [])
+                                if nested:
+                                    deeper_seen = set(next_seen)
+                                    deeper_seen.add(candidate.id)
+                                    for item in nested:
+                                        if isinstance(item, ast.Subscript):
+                                            resolved.extend(projection_candidates(item, assignment_map, deeper_seen))
+                                        else:
+                                            resolved.append(item)
+                                    continue
+                            resolved.append(candidate)
+                            if len(resolved) >= 64:
+                                return resolved[:64]
+                        return resolved
+                    if isinstance(node, ast.Subscript):
+                        return projection_candidates(node, assignment_map, seen)
+                    return [node]
+
+                matches: list[ast.AST] = []
+                for container in containers(value.value):
+                    if isinstance(container, (ast.List, ast.Tuple)):
+                        if not (
+                            isinstance(value.slice, ast.Constant)
+                            and isinstance(value.slice.value, int)
+                            and not isinstance(value.slice.value, bool)
+                        ):
+                            continue
+                        index = value.slice.value
+                        if index < 0:
+                            index += len(container.elts)
+                        if 0 <= index < len(container.elts):
+                            matches.append(container.elts[index])
+                    elif isinstance(container, ast.Dict):
+                        wanted = (
+                            value.slice.value
+                            if isinstance(value.slice, ast.Constant)
+                            and isinstance(value.slice.value, (str, bytes, int, float, bool, type(None)))
+                            else object()
+                        )
+                        for key, item in zip(container.keys, container.values):
+                            if not isinstance(key, ast.Constant):
+                                continue
+                            if key.value == wanted:
+                                matches.append(item)
+                    if len(matches) >= 64:
+                        return matches[:64]
+                return matches
+
+            def callable_candidates(value: ast.AST, seen: set[str] | None = None) -> list[ast.AST]:
+                seen = set() if seen is None else set(seen)
+                if isinstance(value, ast.Name):
+                    if value.id in seen:
+                        return []
+                    candidates = assignments.get(value.id, [])
+                    if not candidates:
+                        return [value]
+                    seen.add(value.id)
+                    resolved: list[ast.AST] = []
+                    for candidate in candidates:
+                        resolved.extend(callable_candidates(candidate, seen))
+                        if len(resolved) >= 64:
+                            return resolved[:64]
+                    return resolved
+                if isinstance(value, ast.Subscript):
+                    projected = projection_candidates(value, assignments, seen)
+                    if not projected:
+                        return [value]
+                    resolved: list[ast.AST] = []
+                    for candidate in projected:
+                        resolved.extend(callable_candidates(candidate, seen))
+                        if len(resolved) >= 64:
+                            return resolved[:64]
+                    return resolved
+                return [value]
+
+            def dangerous_static_method(value: ast.AST) -> list[str]:
+                return sorted(static_strings(value) & _MAPPING_TRANSPORT_METHODS)
+
+            def factory_callable_classes(
                 name: str,
                 depth: int = 0,
                 seen_factories: set[str] | None = None,
             ) -> set[str]:
-                if name in factory_cache:
-                    return set(factory_cache[name])
-                if depth > 8:
-                    return {"unresolved-factory-depth"}
+                if depth > 6:
+                    return set()
                 seen_factories = set() if seen_factories is None else set(seen_factories)
                 if name in seen_factories:
                     return set()
+                seen_factories.add(name)
                 definitions = functions.get(name, [])
                 if len(definitions) != 1:
                     return set()
-                next_seen = set(seen_factories)
-                next_seen.add(name)
                 definition = definitions[0]
-                local_assignments = assignment_map(definition)
-                local_aliases = _base._scope_import_aliases(tree, definition)
+                local_assignments: dict[str, list[ast.AST]] = {}
+                for node in _base._function_scope_nodes(definition):
+                    if isinstance(node, ast.Assign):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                local_assignments.setdefault(target.id, []).append(node.value)
+                    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                        local_assignments.setdefault(node.target.id, []).append(node.value)
+                    elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+                        local_assignments.setdefault(node.target.id, []).append(node.value)
 
-                def local_resolved(value: ast.AST) -> str | None:
-                    return _base._resolve_alias(_base._dotted_name(value), local_aliases)
-
-                def recover(
-                    value: ast.AST,
-                    seen_names: set[str] | None = None,
-                    inner_depth: int = 0,
-                ) -> set[str]:
-                    if inner_depth > 12:
-                        return {"unresolved-expression-depth"}
+                def recover(value: ast.AST, seen_names: set[str] | None = None) -> set[str]:
                     seen_names = set() if seen_names is None else set(seen_names)
+                    if isinstance(value, ast.Call):
+                        constructor = _base._dotted_name(value.func)
+                        if constructor in callable_classes:
+                            return {constructor}
+                        if constructor in functions:
+                            return factory_callable_classes(
+                                constructor,
+                                depth + 1,
+                                seen_factories,
+                            )
+                        return set()
                     if isinstance(value, ast.Name):
-                        if value.id in dynamic_classes:
+                        if value.id in callable_classes:
                             return {value.id}
                         if value.id in seen_names:
                             return set()
                         candidates = local_assignments.get(value.id, [])
                         if not candidates:
                             return set()
-                        next_names = set(seen_names)
-                        next_names.add(value.id)
+                        next_seen = set(seen_names)
+                        next_seen.add(value.id)
                         recovered: set[str] = set()
                         for candidate in candidates:
-                            recovered.update(recover(candidate, next_names, inner_depth + 1))
+                            recovered.update(recover(candidate, next_seen))
                             if len(recovered) >= 32:
                                 return set(sorted(recovered)[:32])
                         return recovered
-                    if isinstance(value, ast.Attribute):
-                        if value.attr in _MAPPING_TRANSPORT_METHODS:
-                            return {f"bound:{value.attr}"}
-                        return set()
-                    if isinstance(value, ast.Call):
-                        wrapper = local_resolved(value.func)
-                        if wrapper in dynamic_classes:
-                            return {wrapper}
-                        if wrapper in functions:
-                            return factory_dynamic_classes(wrapper, depth + 1, next_seen)
-                        if wrapper in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
-                            methods = static_strings(value.args[1], local_assignments)
-                            dangerous = methods & _MAPPING_TRANSPORT_METHODS
-                            if dangerous:
-                                return {"reflected:" + "/".join(sorted(dangerous))}
-                        if wrapper == "operator.attrgetter" and value.args:
-                            dangerous = static_strings(value.args[0], local_assignments) & _MAPPING_TRANSPORT_METHODS
-                            if dangerous:
-                                return {"attrgetter:" + "/".join(sorted(dangerous))}
-                        if wrapper == "operator.methodcaller" and value.args:
-                            dangerous = static_strings(value.args[0], local_assignments) & _MAPPING_TRANSPORT_METHODS
-                            if dangerous:
-                                return {"methodcaller:" + "/".join(sorted(dangerous))}
-                        if wrapper == "functools.partial" and value.args:
-                            recovered = recover(value.args[0], seen_names, inner_depth + 1)
-                            if recovered:
-                                return {"partial:" + item for item in recovered}
-                        if wrapper in _CONTAINER_RETURNERS:
-                            recovered: set[str] = set()
-                            for argument in value.args:
-                                recovered.update(recover(argument, seen_names, inner_depth + 1))
-                            for keyword in value.keywords:
-                                recovered.update(recover(keyword.value, seen_names, inner_depth + 1))
-                            return recovered
-                        return set()
                     if isinstance(value, ast.Subscript):
-                        return recover(value.value, seen_names, inner_depth + 1)
-                    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
                         recovered: set[str] = set()
-                        for item in value.elts:
-                            recovered.update(recover(item, seen_names, inner_depth + 1))
-                        return recovered
-                    if isinstance(value, ast.Dict):
-                        recovered: set[str] = set()
-                        for item in value.values:
-                            recovered.update(recover(item, seen_names, inner_depth + 1))
-                        return recovered
-                    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                        return recover(value.elt, seen_names, inner_depth + 1)
-                    if isinstance(value, ast.DictComp):
-                        return recover(value.value, seen_names, inner_depth + 1)
-                    if isinstance(value, ast.IfExp):
-                        return recover(value.body, seen_names, inner_depth + 1) | recover(
-                            value.orelse, seen_names, inner_depth + 1
-                        )
-                    if isinstance(value, ast.Lambda):
-                        recovered: set[str] = set()
-                        for wrapped in ast.walk(value.body):
-                            if isinstance(wrapped, ast.Attribute) and wrapped.attr in _MAPPING_TRANSPORT_METHODS:
-                                recovered.add(f"lambda-bound:{wrapped.attr}")
-                            elif isinstance(wrapped, ast.Call):
-                                recovered.update(recover(wrapped.func, seen_names, inner_depth + 1))
+                        for candidate in projection_candidates(value, local_assignments):
+                            recovered.update(recover(candidate, seen_names))
+                            if len(recovered) >= 32:
+                                return set(sorted(recovered)[:32])
                         return recovered
                     return set()
 
                 recovered: set[str] = set()
                 for node in ast.walk(definition):
-                    if isinstance(node, ast.Return) and node.value is not None:
-                        recovered.update(recover(node.value))
-                        if len(recovered) >= 32:
-                            recovered = set(sorted(recovered)[:32])
-                            break
-                factory_cache[name] = set(recovered)
+                    if not isinstance(node, ast.Return) or node.value is None:
+                        continue
+                    recovered.update(recover(node.value))
+                    if len(recovered) >= 32:
+                        return set(sorted(recovered)[:32])
                 return recovered
 
-            def expression_dynamic(
-                value: ast.AST,
-                seen_names: set[str] | None = None,
-                depth: int = 0,
-            ) -> set[str]:
-                if depth > 12:
-                    return {"unresolved-expression-depth"}
-                seen_names = set() if seen_names is None else set(seen_names)
-                if isinstance(value, ast.Name):
-                    if value.id in dynamic_classes:
-                        return {f"class:{value.id}"}
-                    if value.id in seen_names:
-                        return set()
-                    candidates = assignments.get(value.id, [])
-                    if not candidates:
-                        resolved = resolved_name(value)
-                        if resolved in {"operator.getitem", "operator.setitem"}:
-                            return {resolved}
-                        return set()
-                    next_seen = set(seen_names)
-                    next_seen.add(value.id)
-                    recovered: set[str] = set()
-                    for candidate in candidates:
-                        recovered.update(expression_dynamic(candidate, next_seen, depth + 1))
-                        if len(recovered) >= 32:
-                            return set(sorted(recovered)[:32])
-                    return recovered
-                if isinstance(value, ast.Attribute):
-                    if value.attr in _MAPPING_TRANSPORT_METHODS:
-                        receiver = _base._dotted_name(value.value)
-                        return {f"bound:{value.attr}:{receiver or '<dynamic>'}"}
-                    resolved = resolved_name(value)
-                    if resolved in {"operator.getitem", "operator.setitem"}:
-                        return {resolved}
-                    return set()
+            def transport_target(value: ast.AST, depth: int = 0) -> str | None:
+                if depth > 8:
+                    return "unresolved-wrapped-mapping-transport"
+                resolved = resolved_name(value)
+                if resolved in {"operator.getitem", "operator.setitem"}:
+                    return resolved
+                if isinstance(value, ast.Attribute) and value.attr in _MAPPING_TRANSPORT_METHODS:
+                    receiver = _base._dotted_name(value.value)
+                    return f"bound:{value.attr}:{receiver or '<dynamic>'}"
                 if isinstance(value, ast.Call):
                     wrapper = resolved_name(value.func)
-                    if wrapper in dynamic_classes:
-                        return {f"custom-callable-object:{wrapper}"}
+                    if wrapper in callable_classes:
+                        return f"custom-callable-object:{wrapper}"
                     if wrapper in functions:
-                        produced = factory_dynamic_classes(wrapper)
+                        produced = factory_callable_classes(wrapper)
                         if produced:
-                            return {"factory:" + item for item in produced}
+                            return "factory-custom-callable-object:" + ",".join(sorted(produced))
+                    if wrapper in {
+                        "next",
+                        "builtins.next",
+                        "list",
+                        "builtins.list",
+                        "tuple",
+                        "builtins.tuple",
+                        "set",
+                        "builtins.set",
+                        "frozenset",
+                        "builtins.frozenset",
+                        "dict",
+                        "builtins.dict",
+                    }:
+                        nested_classes: set[str] = set()
+                        for nested in ast.walk(value):
+                            if nested is value or not isinstance(nested, ast.Call):
+                                continue
+                            nested_name = _base._resolve_alias(
+                                _base._dotted_name(nested.func), import_aliases
+                            )
+                            if nested_name in callable_classes:
+                                nested_classes.add(nested_name)
+                            elif nested_name in functions:
+                                nested_classes.update(factory_callable_classes(nested_name))
+                            if len(nested_classes) >= 32:
+                                break
+                        if nested_classes:
+                            return "container-custom-callable-object:" + ",".join(
+                                sorted(nested_classes)[:32]
+                            )
                     if wrapper in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
-                        dangerous = static_strings(value.args[1], assignments) & _MAPPING_TRANSPORT_METHODS
+                        dangerous = dangerous_static_method(value.args[1])
                         if dangerous:
                             receiver = _base._dotted_name(value.args[0])
-                            return {
-                                "reflected:"
-                                + "/".join(sorted(dangerous))
-                                + ":"
-                                + (receiver or "<dynamic>")
-                            }
+                            return f"reflected:{'/'.join(dangerous)}:{receiver or '<dynamic>'}"
                     if wrapper == "operator.attrgetter" and value.args:
-                        dangerous = static_strings(value.args[0], assignments) & _MAPPING_TRANSPORT_METHODS
+                        dangerous = dangerous_static_method(value.args[0])
                         if dangerous:
-                            return {"attrgetter:" + "/".join(sorted(dangerous))}
+                            return "attrgetter:" + "/".join(dangerous)
                     if wrapper == "operator.methodcaller" and value.args:
-                        dangerous = static_strings(value.args[0], assignments) & _MAPPING_TRANSPORT_METHODS
+                        dangerous = dangerous_static_method(value.args[0])
                         if dangerous:
-                            return {"methodcaller:" + "/".join(sorted(dangerous))}
+                            return "methodcaller:" + "/".join(dangerous)
                     if wrapper == "functools.partial" and value.args:
-                        if (
-                            resolved_name(value.args[0]) in {"getattr", "builtins.getattr"}
-                            and len(value.args) >= 3
-                        ):
-                            dangerous = static_strings(value.args[2], assignments) & _MAPPING_TRANSPORT_METHODS
+                        partial_target = resolved_name(value.args[0])
+                        if partial_target in {"getattr", "builtins.getattr"} and len(value.args) >= 3:
+                            dangerous = dangerous_static_method(value.args[2])
                             if dangerous:
-                                return {"partial-reflected:" + "/".join(sorted(dangerous))}
-                        inner = expression_dynamic(value.args[0], seen_names, depth + 1)
-                        if inner:
-                            return {"partial:" + item for item in inner}
-                    if wrapper in _CONTAINER_RETURNERS:
-                        recovered: set[str] = set()
-                        for argument in value.args:
-                            recovered.update(expression_dynamic(argument, seen_names, depth + 1))
-                        for keyword in value.keywords:
-                            recovered.update(expression_dynamic(keyword.value, seen_names, depth + 1))
-                        return recovered
-                    return set()
-                if isinstance(value, ast.Subscript):
-                    return expression_dynamic(value.value, seen_names, depth + 1)
-                if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-                    recovered: set[str] = set()
-                    for item in value.elts:
-                        recovered.update(expression_dynamic(item, seen_names, depth + 1))
-                    return recovered
-                if isinstance(value, ast.Dict):
-                    recovered: set[str] = set()
-                    for item in value.values:
-                        recovered.update(expression_dynamic(item, seen_names, depth + 1))
-                    return recovered
-                if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                    return expression_dynamic(value.elt, seen_names, depth + 1)
-                if isinstance(value, ast.DictComp):
-                    return expression_dynamic(value.value, seen_names, depth + 1)
-                if isinstance(value, ast.IfExp):
-                    return expression_dynamic(value.body, seen_names, depth + 1) | expression_dynamic(
-                        value.orelse, seen_names, depth + 1
-                    )
+                                receiver = _base._dotted_name(value.args[1])
+                                return (
+                                    "partial-reflected:"
+                                    + "/".join(dangerous)
+                                    + ":"
+                                    + (receiver or "<dynamic>")
+                                )
+                        inner_targets = {
+                            target
+                            for candidate in callable_candidates(value.args[0])
+                            if (target := transport_target(candidate, depth + 1)) is not None
+                        }
+                        if inner_targets:
+                            return "partial:" + ",".join(sorted(inner_targets))
                 if isinstance(value, ast.Lambda):
-                    recovered: set[str] = set()
+                    inner_targets: set[str] = set()
                     for wrapped in ast.walk(value.body):
-                        if isinstance(wrapped, ast.Attribute) and wrapped.attr in _MAPPING_TRANSPORT_METHODS:
-                            recovered.add(f"lambda-bound:{wrapped.attr}")
-                        elif isinstance(wrapped, ast.Call):
-                            recovered.update(expression_dynamic(wrapped.func, seen_names, depth + 1))
-                    return recovered
-                return set()
+                        if isinstance(wrapped, ast.Call):
+                            for candidate in callable_candidates(wrapped.func):
+                                target = transport_target(candidate, depth + 1)
+                                if target is not None:
+                                    inner_targets.add(target)
+                        elif isinstance(wrapped, ast.Attribute) and wrapped.attr in _MAPPING_TRANSPORT_METHODS:
+                            receiver = _base._dotted_name(wrapped.value)
+                            inner_targets.add(f"bound:{wrapped.attr}:{receiver or '<dynamic>'}")
+                    if inner_targets:
+                        return "lambda:" + ",".join(sorted(inner_targets))
+                return None
 
             for node in scope_nodes:
                 if not isinstance(node, ast.Call):
                     continue
-                targets = expression_dynamic(node.func)
+                targets = {
+                    target
+                    for candidate in callable_candidates(node.func)
+                    if (target := transport_target(candidate)) is not None
+                }
                 if not targets:
                     continue
                 findings.append(
@@ -456,8 +446,7 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
                         "kind": "alternate-process-creation-call",
                         "detail": (
                             "attestor-reachable mapping transport is invoked through "
-                            "aliased, wrapped, factory, container, or dynamic class authority: "
-                            + ",".join(sorted(targets))
+                            "aliased/bound/wrapped callable authority: " + ",".join(sorted(targets))
                         ),
                     }
                 )
