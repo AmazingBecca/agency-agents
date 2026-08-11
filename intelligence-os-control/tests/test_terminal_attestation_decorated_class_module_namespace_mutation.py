@@ -58,10 +58,11 @@ def _replacement(carrier):
 '''
 
 
-SUFFIX = r'''
+ATTESTOR = r'''
 
 
-def _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
+def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
+    _rebind()
     candidate = subprocess.Popen([sys.executable, "-I", __file__, "--worker"], close_fds=True)
     options = {}
     carrier = {}
@@ -84,24 +85,14 @@ MODULE_DUNDER_SETATTR_REBIND = PREFIX + r'''
 def _rebind():
     module = sys.modules[__name__]
     module.__setattr__("_Mutator", _replacement)
-
-
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
-    _rebind()
-    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
-''' + SUFFIX
+''' + ATTESTOR
 
 
 MODULETYPE_SETATTR_REBIND = PREFIX + r'''
 def _rebind():
     module = sys.modules[__name__]
     types.ModuleType.__setattr__(module, "_Mutator", _replacement)
-
-
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
-    _rebind()
-    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
-''' + SUFFIX
+''' + ATTESTOR
 
 
 REFLECTED_SETATTR_REBIND = PREFIX + r'''
@@ -109,48 +100,28 @@ def _rebind():
     module = sys.modules[__name__]
     setter = getattr(module, "__setattr__")
     setter("_Mutator", _replacement)
-
-
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
-    _rebind()
-    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
-''' + SUFFIX
+''' + ATTESTOR
 
 
 PARTIAL_SETATTR_REBIND = PREFIX + r'''
 def _rebind():
     setter = functools.partial(setattr, sys.modules[__name__], "_Mutator")
     setter(_replacement)
-
-
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
-    _rebind()
-    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
-''' + SUFFIX
+''' + ATTESTOR
 
 
 NAMESPACE_UPDATE_REBIND = PREFIX + r'''
 def _rebind():
     namespace = sys.modules[__name__].__dict__
     namespace.update({"_Mutator": _replacement})
-
-
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
-    _rebind()
-    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
-''' + SUFFIX
+''' + ATTESTOR
 
 
 NAMESPACE_IOR_REBIND = PREFIX + r'''
 def _rebind():
     namespace = sys.modules[__name__].__dict__
     namespace |= {"_Mutator": _replacement}
-
-
-def _run_attestor(project_root, pattern, challenge_fd, receipt_fd, ready_fd):
-    _rebind()
-    return _exercise(project_root, pattern, challenge_fd, receipt_fd, ready_fd)
-''' + SUFFIX
+''' + ATTESTOR
 
 
 class TerminalAttestationDecoratedClassModuleNamespaceMutationTests(unittest.TestCase):
