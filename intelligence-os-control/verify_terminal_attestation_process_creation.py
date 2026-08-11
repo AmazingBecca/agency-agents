@@ -83,7 +83,6 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 def _match_binding_names(pattern: ast.AST) -> set[str]:
-    """Return names captured by one structural-pattern-matching pattern."""
     names: set[str] = set()
     if isinstance(pattern, ast.MatchAs):
         if pattern.name:
@@ -111,12 +110,7 @@ def _match_binding_names(pattern: ast.AST) -> set[str]:
 
 
 def _module_scope_nodes(tree: ast.Module) -> list[ast.AST]:
-    """Return executable module-scope nodes without entering nested scopes.
-
-    Branch, loop, try/except, with, and match bodies still execute in module
-    scope and can therefore replace a reviewed class binding. Function/class
-    bodies and comprehension scopes cannot directly rebind that module name.
-    """
+    """Walk executable module scope without crossing lexical scope barriers."""
     nodes: list[ast.AST] = []
     stack: list[ast.AST] = list(reversed(tree.body))
     while stack:
@@ -172,15 +166,30 @@ def _module_binding_names(node: ast.AST) -> set[str]:
     return names
 
 
-def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, object]]:
-    """Reject attestor calls through runtime-replaceable class identity.
+def _reachable_global_class_rebinds(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    class_names: set[str],
+) -> set[str]:
+    """Return reviewed class names rebound globally by one reachable helper.
 
-    A decorated class is not the reviewed class object after definition. The same
-    is true when a reviewed class name is rebound at module scope. Track that
-    authority through bounded local aliases, helper returns, conditional values,
-    literal/container transport, generator/comprehension transport, and calls
-    whose callee already carries the dynamic class identity.
+    A function-level ``global`` declaration makes assignments in that function
+    mutate module identity at runtime. Source position is irrelevant: a helper
+    defined before a reviewed class can still replace it when called later by
+    the attestor. Only attestor-reachable functions are considered so dormant
+    helpers do not poison an otherwise secure runner.
     """
+    scope_nodes = list(_base._function_scope_nodes(function))
+    declared: set[str] = set()
+    rebound: set[str] = set()
+    for node in scope_nodes:
+        if isinstance(node, ast.Global):
+            declared.update(node.names)
+        rebound.update(_module_binding_names(node))
+    return class_names & declared & rebound
+
+
+def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, object]]:
+    """Reject attestor calls through runtime-replaceable reviewed classes."""
     findings: list[dict[str, object]] = []
 
     for source in _base.control_flow._source_files(root):
@@ -195,6 +204,9 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
             node for node in tree.body if isinstance(node, ast.ClassDef)
         ]
         class_names = {node.name for node in class_definitions}
+        if not class_names:
+            continue
+
         first_class_line: dict[str, int] = {}
         for node in class_definitions:
             first_class_line[node.name] = min(
@@ -206,12 +218,9 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
             node.name for node in class_definitions if node.decorator_list
         }
 
-        # Module control-flow blocks do not create a local scope. A reviewed
-        # class can therefore be replaced inside if/try/loop/with blocks or by
-        # destructuring just as effectively as by a plain top-level assignment.
-        # Treat every later module-scope binding of that reviewed class name as
-        # runtime-replaceable, while ignoring pre-definition bindings that the
-        # reviewed class statement overwrites.
+        # Control-flow blocks execute in module scope. Any later binding of a
+        # reviewed class name can replace the reviewed object, including match
+        # captures, destructuring, loop/with/except aliases, and imports.
         for node in _module_scope_nodes(tree):
             line = getattr(node, "lineno", 0)
             for name in _module_binding_names(node):
@@ -219,16 +228,27 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
                 if first_line is not None and line > first_line:
                     dynamic_classes.add(name)
 
-        if not dynamic_classes:
-            continue
-
         functions = _base._top_level_functions(tree)
         attestors = functions.get(_ATTESTOR_NAME, [])
         if len(attestors) != 1:
             continue
         attestor = attestors[0]
-        import_aliases = _base._scope_import_aliases(tree, attestor)
+        reachable_functions = list(
+            _base._reachable_functions(tree, attestor, functions)
+        )
 
+        # A reachable helper can replace module identity without a module-scope
+        # assignment by declaring the class global and assigning to it at call
+        # time. Treat those writes as equivalent runtime replacement authority.
+        for function in reachable_functions:
+            dynamic_classes.update(
+                _reachable_global_class_rebinds(function, class_names)
+            )
+
+        if not dynamic_classes:
+            continue
+
+        import_aliases = _base._scope_import_aliases(tree, attestor)
         factory_cache: dict[str, bool] = {}
 
         def resolved_name(value: ast.AST) -> str | None:
@@ -453,7 +473,7 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
 
             return False
 
-        for function in _base._reachable_functions(tree, attestor, functions):
+        for function in reachable_functions:
             scope_nodes = list(_base._function_scope_nodes(function))
             assignments = _simple_assignments(scope_nodes)
             for node in scope_nodes:
