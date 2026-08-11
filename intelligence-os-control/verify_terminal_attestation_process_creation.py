@@ -158,13 +158,99 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                     return {(str, item) for item in possibilities}
                 return set()
 
+            def sequence_elements(container: ast.AST) -> list[ast.AST] | None:
+                """Recover bounded positional elements from literal/builtin sequences."""
+                if isinstance(container, (ast.List, ast.Tuple)):
+                    return list(container.elts)
+                if not isinstance(container, ast.Call):
+                    return None
+                call_name = _base._resolve_alias(
+                    _base._dotted_name(container.func), import_aliases
+                )
+                if call_name not in {"list", "tuple"} or len(container.args) != 1 or container.keywords:
+                    return None
+                candidates = resolve_sequence_candidates(container.args[0])
+                recovered: list[ast.AST] = []
+                for candidate in candidates:
+                    if not isinstance(candidate, (ast.List, ast.Tuple)):
+                        return None
+                    recovered.extend(candidate.elts)
+                    if len(recovered) > 64:
+                        return None
+                return recovered
+
+            def mapping_items(container: ast.AST) -> list[tuple[ast.AST, ast.AST]]:
+                """Recover bounded key/value pairs from literal and builtin-dict construction."""
+                if isinstance(container, ast.Dict):
+                    return [
+                        (key, value)
+                        for key, value in zip(container.keys, container.values)
+                        if key is not None
+                    ]
+                if not isinstance(container, ast.Call):
+                    return []
+                call_name = _base._resolve_alias(
+                    _base._dotted_name(container.func), import_aliases
+                )
+                if call_name != "dict":
+                    return []
+
+                items: list[tuple[ast.AST, ast.AST]] = []
+                for keyword in container.keywords:
+                    if keyword.arg is None:
+                        for candidate in resolve_sequence_candidates(keyword.value):
+                            items.extend(mapping_items(candidate))
+                            if len(items) > 64:
+                                return items[:64]
+                    else:
+                        items.append((ast.Constant(value=keyword.arg), keyword.value))
+                        if len(items) > 64:
+                            return items[:64]
+
+                if not container.args:
+                    return items
+                if len(container.args) != 1:
+                    return items
+
+                for candidate in resolve_sequence_candidates(container.args[0]):
+                    direct = mapping_items(candidate)
+                    if direct:
+                        items.extend(direct)
+                        if len(items) > 64:
+                            return items[:64]
+                        continue
+                    elements = sequence_elements(candidate)
+                    if elements is None:
+                        continue
+                    for element in elements:
+                        pair_candidates = resolve_sequence_candidates(element)
+                        for pair in pair_candidates:
+                            pair_elements = sequence_elements(pair)
+                            if pair_elements is None or len(pair_elements) != 2:
+                                continue
+                            items.append((pair_elements[0], pair_elements[1]))
+                            if len(items) > 64:
+                                return items[:64]
+                return items
+
+            def projection_containers(value: ast.AST) -> list[ast.AST]:
+                """Resolve names and nested static projections to their possible containers."""
+                if isinstance(value, ast.Name):
+                    return resolve_sequence_candidates(value)
+                if isinstance(value, ast.Subscript):
+                    return projected_members(value)
+                if isinstance(value, ast.Call):
+                    return projected_call_members(value)
+                return [value]
+
             def projected_members(value: ast.Subscript) -> list[ast.AST]:
-                containers = resolve_sequence_candidates(value.value)
+                containers = projection_containers(value.value)
                 index_node = value.slice
                 matches: list[ast.AST] = []
 
                 for container in containers:
-                    if isinstance(container, (ast.List, ast.Tuple)):
+                    elements = sequence_elements(container)
+                    if elements is not None:
                         if not (
                             isinstance(index_node, ast.Constant)
                             and isinstance(index_node.value, int)
@@ -173,20 +259,37 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                             continue
                         index = index_node.value
                         if index < 0:
-                            index += len(container.elts)
-                        if 0 <= index < len(container.elts):
-                            matches.append(container.elts[index])
+                            index += len(elements)
+                        if 0 <= index < len(elements):
+                            matches.append(elements[index])
                         continue
 
-                    if isinstance(container, ast.Dict):
-                        wanted = static_key_values(index_node)
-                        if not wanted:
-                            continue
-                        for key, item in zip(container.keys, container.values):
-                            if key is None:
-                                continue
-                            if wanted.intersection(static_key_values(key)):
-                                matches.append(item)
+                    wanted = static_key_values(index_node)
+                    if not wanted:
+                        continue
+                    for key, item in mapping_items(container):
+                        if wanted.intersection(static_key_values(key)):
+                            matches.append(item)
+                return matches[:64]
+
+            def projected_call_members(value: ast.Call) -> list[ast.AST]:
+                if not isinstance(value.func, ast.Attribute):
+                    return []
+                if value.func.attr not in {"get", "__getitem__"}:
+                    return []
+                if len(value.args) != 1 or value.keywords:
+                    return []
+                wanted = static_key_values(value.args[0])
+                if not wanted:
+                    return []
+
+                matches: list[ast.AST] = []
+                for container in projection_containers(value.func.value):
+                    for key, item in mapping_items(container):
+                        if wanted.intersection(static_key_values(key)):
+                            matches.append(item)
+                            if len(matches) >= 64:
+                                return matches
                 return matches
 
             def connect(left: ast.AST, right: ast.AST) -> None:
@@ -195,6 +298,10 @@ def _container_alias_authority_findings(root: pathlib.Path) -> list[dict[str, ob
                     return
                 if isinstance(left, ast.Name) and isinstance(right, ast.Subscript):
                     for member in projected_members(right):
+                        connect(left, member)
+                    return
+                if isinstance(left, ast.Name) and isinstance(right, ast.Call):
+                    for member in projected_call_members(right):
                         connect(left, member)
                     return
                 if not (
