@@ -82,8 +82,12 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                     return any(namespace(v, depth + 1, nxt) for v in assigns.get(value.id, []))
                 if isinstance(value, ast.Attribute) and value.attr == "__dict__":
                     return module(value.value, depth + 1, seen)
-                if isinstance(value, ast.Call) and resolved(value.func) in {"vars", "builtins.vars"} and value.args:
-                    return module(value.args[0], depth + 1, seen)
+                if isinstance(value, ast.Call):
+                    call = resolved(value.func)
+                    if call in {"globals", "builtins.globals"} and not value.args and not value.keywords:
+                        return True
+                    if call in {"vars", "builtins.vars"} and value.args:
+                        return module(value.args[0], depth + 1, seen)
                 return False
 
             def names(value: ast.AST) -> set[str]:
@@ -161,7 +165,17 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                 if affected:
                     findings.append({"path": relative, "function": function.name, "line": getattr(node, "lineno", 0), "kind": "alternate-process-creation-call", "detail": f"attestor-reachable {mechanism} can replace reviewed class identity: {','.join(sorted(affected))}"})
 
+            def assignment_targets(node: ast.AST) -> list[ast.AST]:
+                if isinstance(node, ast.Assign):
+                    return list(node.targets)
+                if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                    return [node.target]
+                return []
+
             for node in nodes:
+                for target in assignment_targets(node):
+                    if isinstance(target, ast.Subscript) and namespace(target.value):
+                        add(node, names(target.slice), "module namespace subscript write")
                 if isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr) and namespace(node.target):
                     add(node, map_names(node.value), "module namespace |=")
                     continue
@@ -185,6 +199,12 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                     for kw in node.keywords:
                         affected.update(map_names(kw.value) if kw.arg is None else ({kw.arg} & class_names))
                     add(node, affected or set(class_names), "module namespace update")
+                    continue
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "__setitem__" and namespace(node.func.value) and node.args:
+                    add(node, names(node.args[0]), "module namespace __setitem__")
+                    continue
+                if call == "operator.setitem" and len(node.args) >= 2 and namespace(node.args[0]):
+                    add(node, names(node.args[1]), "operator.setitem module namespace write")
                     continue
                 if call == "operator.ior" and len(node.args) >= 2 and namespace(node.args[0]):
                     add(node, map_names(node.args[1]), "operator.ior module namespace update")
