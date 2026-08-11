@@ -119,6 +119,9 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
                     return resolved
                 return [value]
 
+            def dangerous_static_method(value: ast.AST) -> list[str]:
+                return sorted(static_strings(value) & _MAPPING_TRANSPORT_METHODS)
+
             def transport_target(value: ast.AST, depth: int = 0) -> str | None:
                 if depth > 8:
                     return "unresolved-wrapped-mapping-transport"
@@ -131,12 +134,30 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
                 if isinstance(value, ast.Call):
                     wrapper = resolved_name(value.func)
                     if wrapper in {"getattr", "builtins.getattr"} and len(value.args) >= 2:
-                        names = static_strings(value.args[1])
-                        dangerous = sorted(names & _MAPPING_TRANSPORT_METHODS)
+                        dangerous = dangerous_static_method(value.args[1])
                         if dangerous:
                             receiver = _base._dotted_name(value.args[0])
                             return f"reflected:{'/'.join(dangerous)}:{receiver or '<dynamic>'}"
+                    if wrapper == "operator.attrgetter" and value.args:
+                        dangerous = dangerous_static_method(value.args[0])
+                        if dangerous:
+                            return "attrgetter:" + "/".join(dangerous)
+                    if wrapper == "operator.methodcaller" and value.args:
+                        dangerous = dangerous_static_method(value.args[0])
+                        if dangerous:
+                            return "methodcaller:" + "/".join(dangerous)
                     if wrapper == "functools.partial" and value.args:
+                        partial_target = resolved_name(value.args[0])
+                        if partial_target in {"getattr", "builtins.getattr"} and len(value.args) >= 3:
+                            dangerous = dangerous_static_method(value.args[2])
+                            if dangerous:
+                                receiver = _base._dotted_name(value.args[1])
+                                return (
+                                    "partial-reflected:"
+                                    + "/".join(dangerous)
+                                    + ":"
+                                    + (receiver or "<dynamic>")
+                                )
                         inner_targets = {
                             target
                             for candidate in callable_candidates(value.args[0])
