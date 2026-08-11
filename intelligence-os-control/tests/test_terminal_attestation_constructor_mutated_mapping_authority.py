@@ -139,6 +139,17 @@ ALIAS_CHAIN_BEFORE_UPDATE_ATTACK = PREFIX + r"""
     second.update({"resolver": _reflection_factory()})
 """ + SUFFIX
 
+TUPLE_ALIAS_BEFORE_UPDATE_ATTACK = PREFIX + r"""
+    options = {}
+    (alias,) = (options,)
+    alias.update({"resolver": _reflection_factory()})
+""" + SUFFIX
+
+CHAINED_ASSIGNMENT_ALIAS_ATTACK = PREFIX + r"""
+    alias = options = {}
+    alias["resolver"] = _reflection_factory()
+""" + SUFFIX
+
 
 class TerminalAttestationConstructorMutatedMappingAuthorityTests(unittest.TestCase):
     def _verify(self, source: str) -> dict[str, object]:
@@ -184,6 +195,12 @@ class TerminalAttestationConstructorMutatedMappingAuthorityTests(unittest.TestCa
 
     def test_alias_chain_before_update_cannot_hide_mapping_authority(self) -> None:
         self._assert_rejected(ALIAS_CHAIN_BEFORE_UPDATE_ATTACK)
+
+    def test_tuple_unpack_alias_before_update_cannot_hide_mapping_authority(self) -> None:
+        self._assert_rejected(TUPLE_ALIAS_BEFORE_UPDATE_ATTACK)
+
+    def test_chained_assignment_alias_cannot_hide_mapping_authority(self) -> None:
+        self._assert_rejected(CHAINED_ASSIGNMENT_ALIAS_ATTACK)
 
 
 if __name__ == "__main__":
