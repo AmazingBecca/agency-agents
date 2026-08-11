@@ -53,15 +53,19 @@ def _bound_mapping_method_authority_findings(root: pathlib.Path) -> list[dict[st
             name
             for name, definitions in class_definitions.items()
             if len(definitions) == 1
-            and any(
-                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and item.name == "__call__"
-                for item in definitions[0].body
+            and (
+                any(
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name in {"__call__", "__new__"}
+                    for item in definitions[0].body
+                )
+                or any(keyword.arg == "metaclass" for keyword in definitions[0].keywords)
             )
         }
-        # A subclass inherits callable authority even when it does not redeclare
-        # __call__. Propagate that authority through the reviewed top-level class
-        # graph before analyzing attestor call sites.
+        # A direct __call__, a custom __new__, or an explicit metaclass can make
+        # constructor results dynamically callable. Subclasses inherit the same
+        # authority even when they do not redeclare it, so propagate the taint
+        # through the reviewed top-level class graph before analyzing call sites.
         changed = True
         while changed:
             changed = False
