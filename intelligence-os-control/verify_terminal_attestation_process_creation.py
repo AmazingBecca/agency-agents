@@ -166,26 +166,178 @@ def _module_binding_names(node: ast.AST) -> set[str]:
     return names
 
 
-def _reachable_global_class_rebinds(
+def _reachable_dynamic_class_rebinds(
+    tree: ast.Module,
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     class_names: set[str],
 ) -> set[str]:
-    """Return reviewed class names rebound globally by one reachable helper.
+    """Return reviewed class names replaceable by one reachable helper.
 
-    A function-level ``global`` declaration makes assignments in that function
-    mutate module identity at runtime. Source position is irrelevant: a helper
-    defined before a reviewed class can still replace it when called later by
-    the attestor. Only attestor-reachable functions are considered so dormant
-    helpers do not poison an otherwise secure runner.
+    In addition to ordinary ``global`` assignment, Python can replace a module
+    binding through the live module object itself. Treat statically recoverable
+    writes through ``setattr(sys.modules[__name__], ...)`` and the module
+    ``__dict__`` as equivalent authority. Unknown names on a proven current-
+    module write fail closed to every reviewed class.
     """
     scope_nodes = list(_base._function_scope_nodes(function))
+    assignments = _simple_assignments(scope_nodes)
+    import_aliases = _base._scope_import_aliases(tree, function)
+    string_bindings = _base._local_string_bindings(function)
+
     declared: set[str] = set()
     rebound: set[str] = set()
     for node in scope_nodes:
         if isinstance(node, ast.Global):
             declared.update(node.names)
         rebound.update(_module_binding_names(node))
-    return class_names & declared & rebound
+    dynamic = class_names & declared & rebound
+
+    def resolved(value: ast.AST) -> str | None:
+        return _base._resolve_alias(_base._dotted_name(value), import_aliases)
+
+    def current_module(
+        value: ast.AST,
+        *,
+        depth: int = 0,
+        seen: set[str] | None = None,
+    ) -> bool:
+        if depth > 8:
+            return False
+        seen = set() if seen is None else set(seen)
+        if isinstance(value, ast.Name):
+            if value.id in seen:
+                return False
+            candidates = assignments.get(value.id, [])
+            if not candidates:
+                return False
+            next_seen = set(seen)
+            next_seen.add(value.id)
+            return any(
+                current_module(candidate, depth=depth + 1, seen=next_seen)
+                for candidate in candidates
+            )
+        if isinstance(value, ast.Subscript):
+            container = resolved(value.value)
+            return (
+                container == "sys.modules"
+                and isinstance(value.slice, ast.Name)
+                and value.slice.id == "__name__"
+            )
+        if isinstance(value, ast.Call):
+            call_name = resolved(value.func)
+            return (
+                call_name == "sys.modules.get"
+                and bool(value.args)
+                and isinstance(value.args[0], ast.Name)
+                and value.args[0].id == "__name__"
+            )
+        return False
+
+    def current_module_namespace(
+        value: ast.AST,
+        *,
+        depth: int = 0,
+        seen: set[str] | None = None,
+    ) -> bool:
+        if depth > 8:
+            return False
+        seen = set() if seen is None else set(seen)
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == "__dict__"
+            and current_module(value.value, depth=depth + 1, seen=seen)
+        ):
+            return True
+        if isinstance(value, ast.Name):
+            if value.id in seen:
+                return False
+            candidates = assignments.get(value.id, [])
+            if not candidates:
+                return False
+            next_seen = set(seen)
+            next_seen.add(value.id)
+            return any(
+                current_module_namespace(candidate, depth=depth + 1, seen=next_seen)
+                for candidate in candidates
+            )
+        return False
+
+    def callable_is_setattr(
+        value: ast.AST,
+        *,
+        depth: int = 0,
+        seen: set[str] | None = None,
+    ) -> bool:
+        if depth > 8:
+            return False
+        name = resolved(value)
+        if name in {"setattr", "builtins.setattr"}:
+            return True
+        if not isinstance(value, ast.Name):
+            return False
+        seen = set() if seen is None else set(seen)
+        if value.id in seen:
+            return False
+        candidates = assignments.get(value.id, [])
+        if not candidates:
+            return False
+        next_seen = set(seen)
+        next_seen.add(value.id)
+        return any(
+            callable_is_setattr(candidate, depth=depth + 1, seen=next_seen)
+            for candidate in candidates
+        )
+
+    def written_class_names(name_node: ast.AST) -> set[str]:
+        names = _base._string_values(name_node, string_bindings)
+        if names is None:
+            return set(class_names)
+        return class_names & names
+
+    def assignment_targets(node: ast.AST) -> list[ast.AST]:
+        if isinstance(node, ast.Assign):
+            return list(node.targets)
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            return [node.target]
+        return []
+
+    for node in scope_nodes:
+        for target in assignment_targets(node):
+            if (
+                isinstance(target, ast.Subscript)
+                and current_module_namespace(target.value)
+            ):
+                dynamic.update(written_class_names(target.slice))
+
+        if not isinstance(node, ast.Call):
+            continue
+
+        if (
+            callable_is_setattr(node.func)
+            and len(node.args) >= 2
+            and current_module(node.args[0])
+        ):
+            dynamic.update(written_class_names(node.args[1]))
+            continue
+
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "__setitem__"
+            and current_module_namespace(node.func.value)
+            and node.args
+        ):
+            dynamic.update(written_class_names(node.args[0]))
+            continue
+
+        call_name = resolved(node.func)
+        if (
+            call_name == "operator.setitem"
+            and len(node.args) >= 2
+            and current_module_namespace(node.args[0])
+        ):
+            dynamic.update(written_class_names(node.args[1]))
+
+    return dynamic
 
 
 def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, object]]:
@@ -237,12 +389,11 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
             _base._reachable_functions(tree, attestor, functions)
         )
 
-        # A reachable helper can replace module identity without a module-scope
-        # assignment by declaring the class global and assigning to it at call
-        # time. Treat those writes as equivalent runtime replacement authority.
+        # Reachable helpers can replace module identity either with ``global``
+        # assignment or through the current module object/namespace mapping.
         for function in reachable_functions:
             dynamic_classes.update(
-                _reachable_global_class_rebinds(function, class_names)
+                _reachable_dynamic_class_rebinds(tree, function, class_names)
             )
 
         if not dynamic_classes:
