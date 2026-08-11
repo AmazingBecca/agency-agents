@@ -230,6 +230,11 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                             helper_projection_is_namespace(candidate, key, level + 1, nxt)
                             for candidate in candidates
                         )
+                    if isinstance(container, ast.Call):
+                        call_name = helper_resolved(container.func)
+                        if call_name in functions and call_name not in next_helpers:
+                            return helper_returns_namespace(call_name, depth + 1, next_helpers)
+                        return False
                     if isinstance(container, (ast.Tuple, ast.List)):
                         if isinstance(key, ast.Constant) and isinstance(key.value, int):
                             index = key.value
@@ -280,6 +285,13 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                             return False
                         nxt = seen_names | {value.id}
                         return any(helper_value_is_namespace(candidate, level + 1, nxt) for candidate in candidates)
+                    if isinstance(value, (ast.Tuple, ast.List)):
+                        return any(helper_value_is_namespace(item, level + 1, seen_names) for item in value.elts)
+                    if isinstance(value, ast.Dict):
+                        return any(
+                            item is not None and helper_value_is_namespace(item, level + 1, seen_names)
+                            for item in value.values
+                        )
                     if isinstance(value, ast.Attribute) and value.attr == "__globals__":
                         return True
                     if isinstance(value, ast.Subscript):
@@ -319,6 +331,8 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                         return False
                     nxt = seen | {value.id}
                     return any(namespace(v, depth + 1, nxt) for v in assigns.get(value.id, []))
+                if isinstance(value, ast.Subscript):
+                    return namespace(value.value, depth + 1, seen)
                 if isinstance(value, ast.Attribute):
                     if value.attr == "__globals__":
                         return True
@@ -334,7 +348,7 @@ def _namespace_rebind_findings(root: pathlib.Path) -> list[dict[str, object]]:
                         if attrs is None or "__globals__" in attrs:
                             return True
                     for helper_name in functions:
-                        if helper_returns_namespace(helper_name, depth + 1) and callee_is(value.func, {helper_name}, depth + 1, seen):
+                        if callee_is(value.func, {helper_name}, depth + 1, seen) and helper_returns_namespace(helper_name, depth + 1):
                             return True
                 return False
 
