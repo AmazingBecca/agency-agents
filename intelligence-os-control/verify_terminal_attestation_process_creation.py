@@ -82,6 +82,34 @@ def _assigned_names(target: ast.AST) -> set[str]:
     return set()
 
 
+def _match_binding_names(pattern: ast.AST) -> set[str]:
+    """Return names captured by one structural-pattern-matching pattern."""
+    names: set[str] = set()
+    if isinstance(pattern, ast.MatchAs):
+        if pattern.name:
+            names.add(pattern.name)
+        if pattern.pattern is not None:
+            names.update(_match_binding_names(pattern.pattern))
+    elif isinstance(pattern, ast.MatchStar):
+        if pattern.name:
+            names.add(pattern.name)
+    elif isinstance(pattern, ast.MatchMapping):
+        if pattern.rest:
+            names.add(pattern.rest)
+        for child in pattern.patterns:
+            names.update(_match_binding_names(child))
+    elif isinstance(pattern, ast.MatchSequence):
+        for child in pattern.patterns:
+            names.update(_match_binding_names(child))
+    elif isinstance(pattern, ast.MatchClass):
+        for child in [*pattern.patterns, *pattern.kwd_patterns]:
+            names.update(_match_binding_names(child))
+    elif isinstance(pattern, ast.MatchOr):
+        for child in pattern.patterns:
+            names.update(_match_binding_names(child))
+    return names
+
+
 def _module_scope_nodes(tree: ast.Module) -> list[ast.AST]:
     """Return executable module-scope nodes without entering nested scopes.
 
@@ -129,6 +157,18 @@ def _module_binding_names(node: ast.AST) -> set[str]:
                 names.add(alias.asname or alias.name)
     elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         names.add(node.name)
+    elif isinstance(
+        node,
+        (
+            ast.MatchAs,
+            ast.MatchStar,
+            ast.MatchMapping,
+            ast.MatchSequence,
+            ast.MatchClass,
+            ast.MatchOr,
+        ),
+    ):
+        names.update(_match_binding_names(node))
     return names
 
 
@@ -330,10 +370,6 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
                     seen_functions=seen_functions,
                 ):
                     return True
-                # The comprehension target can rename authority from its iterable
-                # (for example: ``item for item in (_Mutator,)``). Conservatively
-                # retain authority from every iterable rather than treating the
-                # target name as a fresh untainted local.
                 return any(
                     expression_carries_dynamic(
                         generator.iter,
@@ -372,9 +408,6 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
                 )
 
             if isinstance(value, ast.Subscript):
-                # A projection from a dynamic carrier can recover the class
-                # object. False negatives are worse here than conservative
-                # rejection because the result is later invoked as authority.
                 return expression_carries_dynamic(
                     value.value,
                     assignments,
@@ -395,8 +428,6 @@ def _decorated_class_replacement_findings(root: pathlib.Path) -> list[dict[str, 
                     ):
                         return True
 
-                # Calling a transported dynamic class can itself produce the
-                # callable object later invoked by the attestor.
                 if expression_carries_dynamic(
                     value.func,
                     assignments,
