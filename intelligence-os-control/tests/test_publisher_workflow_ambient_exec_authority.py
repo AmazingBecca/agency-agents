@@ -13,6 +13,12 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
     def _publish_job_prefix(self) -> str:
         return WORKFLOW.split("  publish:\n", 1)[1].split("    steps:\n", 1)[0]
 
+    def _source_fetch_step(self) -> str:
+        return WORKFLOW.split(
+            "      - name: Fetch exact public publisher source without caller credentials\n",
+            1,
+        )[1].split("      - uses: actions/setup-python@", 1)[0]
+
     def test_job_neutralizes_shell_and_dynamic_loader_startup_authority(self) -> None:
         job = self._publish_job_prefix()
         for name in (
@@ -47,11 +53,25 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
                 f"publisher job must pin {name} before git init/fetch/checkout",
             )
 
+    def test_git_init_cannot_inherit_template_hook_or_repository_redirection_authority(self) -> None:
+        fetch = self._source_fetch_step()
+        git_init = fetch.index("git init .")
+        before_init = fetch[:git_init]
+        self.assertIn(
+            "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY "
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_TEMPLATE_DIR",
+            before_init,
+        )
+        self.assertIn(
+            'template_dir="$RUNNER_TEMP/intelligence-os-empty-git-template"',
+            before_init,
+        )
+        self.assertIn('mkdir -m 0700 "$template_dir"', before_init)
+        self.assertIn('export GIT_TEMPLATE_DIR="$template_dir"', before_init)
+        self.assertIn("test ! -e .git/hooks", fetch[git_init:])
+
     def test_credential_scrub_still_precedes_git_repository_creation(self) -> None:
-        fetch = WORKFLOW.split(
-            "      - name: Fetch exact public publisher source without caller credentials\n",
-            1,
-        )[1].split("      - uses: actions/setup-python@", 1)[0]
+        fetch = self._source_fetch_step()
         self.assertLess(fetch.index("unset GITHUB_TOKEN GH_TOKEN"), fetch.index("git init ."))
         self.assertIn("-c credential.helper= -c http.extraHeader= fetch", fetch)
 
