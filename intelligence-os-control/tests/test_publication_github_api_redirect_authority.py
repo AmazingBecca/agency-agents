@@ -47,6 +47,26 @@ class PublicationGithubApiRedirectAuthorityTests(unittest.TestCase):
             ):
                 verifier._archive_location(location)
 
+    def test_archive_location_rejects_ambiguous_path_forms(self) -> None:
+        origin = "https://productionresultssa1.blob.core.windows.net"
+        attacks = (
+            f"{origin}//actions-results/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results\\artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%2fartifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%5cartifact.zip?sig=synthetic",
+            f"{origin}/actions-results/../artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%2e%2e/artifact.zip?sig=synthetic",
+        )
+        for location in attacks:
+            with self.subTest(location=location), self.assertRaisesRegex(
+                verifier.GithubApiAuthorityVerificationError,
+                "outside trusted HTTPS storage policy",
+            ):
+                verifier._archive_location(location)
+
+    def test_canonical_archive_location_remains_accepted(self) -> None:
+        self.assertEqual(verifier._archive_location(TRUSTED_LOCATION), TRUSTED_LOCATION)
+
     def test_artifact_redirect_rejects_ambiguous_multiple_location_headers(self) -> None:
         headers = email.message.Message()
         headers["Location"] = TRUSTED_LOCATION
