@@ -116,6 +116,44 @@ def _open_no_redirect(request: urllib.request.Request):
     return opener.open(request, timeout=20)
 
 
+def _canonical_api_url(value: Any, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or value != value.strip()
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise GithubApiAuthorityVerificationError(f"{label} API URL is outside policy")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise GithubApiAuthorityVerificationError(
+            f"{label} API URL is outside policy"
+        ) from exc
+    path_lower = parsed.path.lower()
+    path_segments = parsed.path.split("/")
+    decoded_segments = [urllib.parse.unquote(segment) for segment in path_segments]
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.github.com"
+        or parsed.hostname != "api.github.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or not parsed.path.startswith("/")
+        or parsed.path.startswith("//")
+        or "\\" in parsed.path
+        or "%2f" in path_lower
+        or "%5c" in path_lower
+        or any(segment in (".", "..") for segment in decoded_segments)
+        or parsed.fragment
+    ):
+        raise GithubApiAuthorityVerificationError(f"{label} API URL is outside policy")
+    return value
+
+
 def _content_length(headers: Any, label: str) -> int | None:
     try:
         values = headers.get_all("Content-Length", [])
@@ -208,8 +246,7 @@ def _read_bounded_response(response: Any, maximum: int, label: str) -> bytes:
 
 
 def _api_get(url: str, token: str, maximum: int, label: str) -> bytes:
-    if not url.startswith(f"{API_ORIGIN}/"):
-        raise GithubApiAuthorityVerificationError(f"{label} API URL is outside policy")
+    url = _canonical_api_url(url, label)
     request = urllib.request.Request(url, headers=_api_headers(token), method="GET")
     try:
         with _open_no_redirect(request) as response:
@@ -267,7 +304,8 @@ def _redirect_location(headers: Any) -> str:
 
 
 def _download_artifact(api_url: str, token: str) -> bytes:
-    if not api_url.startswith(f"{API_ORIGIN}/") or not api_url.endswith("/zip"):
+    api_url = _canonical_api_url(api_url, "artifact")
+    if not api_url.endswith("/zip"):
         raise GithubApiAuthorityVerificationError("artifact API download URL is outside policy")
     request = urllib.request.Request(api_url, headers=_api_headers(token), method="GET")
     try:
