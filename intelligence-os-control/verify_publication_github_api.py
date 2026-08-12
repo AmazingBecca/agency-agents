@@ -97,13 +97,15 @@ def _build_https_context() -> ssl.SSLContext:
             "trusted GitHub HTTPS CA bundle is outside authority policy"
         )
     try:
-        context = ssl.create_default_context(cafile=TRUSTED_CA_FILE)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cafile=TRUSTED_CA_FILE)
     except (OSError, ssl.SSLError) as exc:
         raise GithubApiAuthorityVerificationError(
             "trusted GitHub HTTPS context could not be created"
         ) from exc
     context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
+    context.keylog_filename = None
     return context
 
 
