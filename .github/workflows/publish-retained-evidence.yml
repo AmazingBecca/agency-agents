@@ -92,6 +92,18 @@ jobs:
           git_bin=/usr/bin/git
           test -x "$git_bin"
           test "$(stat -c '%u:%g:%a' "$git_bin")" = "0:0:755"
+          git_exec_path="$("$git_bin" --exec-path)"
+          git_exec_path="$(realpath -e -- "$git_exec_path")"
+          test -d "$git_exec_path"
+          test "$(stat -c '%u:%g' "$git_exec_path")" = "0:0"
+          git_exec_mode="$(stat -c '%a' "$git_exec_path")"
+          (( (8#$git_exec_mode & 0022) == 0 ))
+          remote_https="$(realpath -e -- "$git_exec_path/git-remote-https")"
+          case "$remote_https" in "$git_exec_path"/*) ;; *) exit 1 ;; esac
+          test -x "$remote_https"
+          test "$(stat -c '%u:%g' "$remote_https")" = "0:0"
+          remote_https_mode="$(stat -c '%a' "$remote_https")"
+          (( (8#$remote_https_mode & 0022) == 0 ))
           template_dir="$RUNNER_TEMP/intelligence-os-empty-git-template"
           test ! -e "$template_dir"
           mkdir -m 0700 "$template_dir"
