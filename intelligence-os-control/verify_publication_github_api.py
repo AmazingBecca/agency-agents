@@ -164,7 +164,12 @@ def _api_get(url: str, token: str, maximum: int, label: str) -> bytes:
 
 
 def _archive_location(value: Any) -> str:
-    if not isinstance(value, str) or not value.isascii():
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or value != value.strip()
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value)
+    ):
         raise GithubApiAuthorityVerificationError("artifact redirect location is malformed")
     parsed = urllib.parse.urlsplit(value)
     hostname = parsed.hostname
@@ -176,6 +181,7 @@ def _archive_location(value: Any) -> str:
         or parsed.port not in (None, 443)
         or not parsed.path
         or not parsed.query
+        or parsed.fragment
         or hostname == "api.github.com"
         or not any(hostname.endswith(suffix) for suffix in ALLOWED_ARCHIVE_HOST_SUFFIXES)
     ):
@@ -183,6 +189,18 @@ def _archive_location(value: Any) -> str:
             "artifact redirect location is outside trusted HTTPS storage policy"
         )
     return value
+
+
+def _redirect_location(headers: Any) -> str:
+    try:
+        values = headers.get_all("Location", [])
+    except AttributeError as exc:
+        raise GithubApiAuthorityVerificationError(
+            "artifact redirect location is ambiguous"
+        ) from exc
+    if not isinstance(values, list) or len(values) != 1:
+        raise GithubApiAuthorityVerificationError("artifact redirect location is ambiguous")
+    return _archive_location(values[0])
 
 
 def _download_artifact(api_url: str, token: str) -> bytes:
@@ -196,7 +214,7 @@ def _download_artifact(api_url: str, token: str) -> bytes:
             raise GithubApiAuthorityVerificationError(
                 f"artifact API request failed with status {exc.code}"
             ) from exc
-        location = _archive_location(exc.headers.get("Location"))
+        location = _redirect_location(exc.headers)
     except urllib.error.URLError as exc:
         raise GithubApiAuthorityVerificationError("artifact API request failed") from exc
     else:
