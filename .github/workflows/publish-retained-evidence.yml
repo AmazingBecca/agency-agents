@@ -78,7 +78,14 @@ jobs:
           test "$CONTROL_WORKFLOW_REPOSITORY" = 'AmazingBecca/agency-agents'
           [[ "$CONTROL_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
           unset GITHUB_TOKEN GH_TOKEN
+          unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_TEMPLATE_DIR
+          template_dir="$RUNNER_TEMP/intelligence-os-empty-git-template"
+          test ! -e "$template_dir"
+          mkdir -m 0700 "$template_dir"
+          test -z "$(find "$template_dir" -mindepth 1 -maxdepth 1 -print -quit)"
+          export GIT_TEMPLATE_DIR="$template_dir"
           git init .
+          test ! -e .git/hooks
           git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"
           git checkout --detach FETCH_HEAD
