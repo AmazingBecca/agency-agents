@@ -19,6 +19,9 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
             1,
         )[1].split("      - uses: actions/setup-python@", 1)[0]
 
+    def _git_init_index(self, fetch: str) -> int:
+        return fetch.index('"$git_bin" init .')
+
     def test_job_neutralizes_shell_and_dynamic_loader_startup_authority(self) -> None:
         job = self._publish_job_prefix()
         for name in (
@@ -55,7 +58,7 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
 
     def test_git_init_cannot_inherit_template_hook_or_repository_redirection_authority(self) -> None:
         fetch = self._source_fetch_step()
-        git_init = fetch.index("git init .")
+        git_init = self._git_init_index(fetch)
         before_init = fetch[:git_init]
         self.assertIn(
             "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY "
@@ -72,7 +75,11 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
 
     def test_git_fetch_cannot_inherit_exec_or_prompt_helper_authority(self) -> None:
         fetch = self._source_fetch_step()
-        before_init = fetch[: fetch.index("git init .")]
+        before_init = fetch[: self._git_init_index(fetch)]
+        self.assertIn(
+            "export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+            before_init,
+        )
         self.assertIn(
             "unset GIT_EXEC_PATH GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND",
             before_init,
@@ -96,7 +103,7 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
 
     def test_credential_scrub_still_precedes_git_repository_creation(self) -> None:
         fetch = self._source_fetch_step()
-        self.assertLess(fetch.index("unset GITHUB_TOKEN GH_TOKEN"), fetch.index("git init ."))
+        self.assertLess(fetch.index("unset GITHUB_TOKEN GH_TOKEN"), self._git_init_index(fetch))
         self.assertIn("-c credential.helper= -c http.extraHeader= fetch", fetch)
 
 
