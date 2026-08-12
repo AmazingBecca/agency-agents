@@ -116,17 +116,41 @@ def _open_no_redirect(request: urllib.request.Request):
     return opener.open(request, timeout=20)
 
 
+def _content_length(headers: Any, label: str) -> int | None:
+    try:
+        values = headers.get_all("Content-Length", [])
+    except AttributeError as exc:
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Content-Length authority is unavailable"
+        ) from exc
+    if not isinstance(values, list):
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Content-Length is ambiguous"
+        )
+    if not values:
+        return None
+    if len(values) != 1:
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Content-Length is ambiguous"
+        )
+    value = values[0]
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Content-Length is malformed"
+        )
+    return int(value)
+
+
 def _read_bounded_response(response: Any, maximum: int, label: str) -> bytes:
-    length = response.headers.get("Content-Length")
-    if length is not None:
-        try:
-            declared = int(length)
-        except ValueError as exc:
-            raise GithubApiAuthorityVerificationError(
-                f"{label} Content-Length is malformed"
-            ) from exc
-        if declared < 1 or declared > maximum:
-            raise GithubApiAuthorityVerificationError(f"{label} size is outside policy")
+    declared = _content_length(response.headers, label)
+    if declared is not None and (declared < 1 or declared > maximum):
+        raise GithubApiAuthorityVerificationError(f"{label} size is outside policy")
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -139,7 +163,7 @@ def _read_bounded_response(response: Any, maximum: int, label: str) -> bytes:
             raise GithubApiAuthorityVerificationError(f"{label} size is outside policy")
     if total < 1:
         raise GithubApiAuthorityVerificationError(f"{label} is empty")
-    if length is not None and total != int(length):
+    if declared is not None and total != declared:
         raise GithubApiAuthorityVerificationError(f"{label} byte count changed in transit")
     return b"".join(chunks)
 
