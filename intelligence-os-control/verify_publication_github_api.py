@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
+import stat
 import sys
 import urllib.error
 import urllib.parse
@@ -25,6 +27,7 @@ USER_AGENT = "amazingbecca-intelligence-os-control/1"
 MAX_ARTIFACT_LIST_BYTES = 512 * 1024
 MAX_TOKEN_BYTES = 4096
 MAX_ARTIFACTS_PER_RUN = 100
+TRUSTED_CA_FILE = "/etc/ssl/certs/ca-certificates.crt"
 ALLOWED_ARCHIVE_HOST_SUFFIXES = (
     ".blob.core.windows.net",
     ".githubusercontent.com",
@@ -74,8 +77,42 @@ def _anonymous_headers() -> dict[str, str]:
     return {"User-Agent": USER_AGENT}
 
 
+def _build_https_context() -> ssl.SSLContext:
+    ca_path = Path(TRUSTED_CA_FILE)
+    try:
+        resolved = ca_path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as exc:
+        raise GithubApiAuthorityVerificationError(
+            "trusted GitHub HTTPS CA bundle is unavailable"
+        ) from exc
+    if (
+        str(resolved) != TRUSTED_CA_FILE
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise GithubApiAuthorityVerificationError(
+            "trusted GitHub HTTPS CA bundle is outside authority policy"
+        )
+    try:
+        context = ssl.create_default_context(cafile=TRUSTED_CA_FILE)
+    except (OSError, ssl.SSLError) as exc:
+        raise GithubApiAuthorityVerificationError(
+            "trusted GitHub HTTPS context could not be created"
+        ) from exc
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
 def _open_no_redirect(request: urllib.request.Request):
-    opener = urllib.request.build_opener(_NoRedirect())
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=_build_https_context()),
+        _NoRedirect(),
+    )
     return opener.open(request, timeout=20)
 
 
