@@ -41,6 +41,19 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONNOUSERSITE: '1'
       GIT_TERMINAL_PROMPT: '0'
+      BASH_ENV: ''
+      ENV: ''
+      LD_PRELOAD: ''
+      LD_AUDIT: ''
+      LD_LIBRARY_PATH: ''
+      PYTHONHOME: ''
+      PYTHONPATH: ''
+      PYTHONSTARTUP: ''
+      GIT_CONFIG_NOSYSTEM: '1'
+      GIT_CONFIG_GLOBAL: '/dev/null'
+      GIT_CONFIG_SYSTEM: '/dev/null'
+      GIT_CONFIG_COUNT: '0'
+      GIT_CONFIG_PARAMETERS: ''
     steps:
       - name: Bind protected publisher identity before source fetch
         shell: bash
