@@ -271,15 +271,28 @@ def _archive_location(value: Any) -> str:
         or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value)
     ):
         raise GithubApiAuthorityVerificationError("artifact redirect location is malformed")
-    parsed = urllib.parse.urlsplit(value)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise GithubApiAuthorityVerificationError(
+            "artifact redirect location is outside trusted HTTPS storage policy"
+        ) from exc
     hostname = parsed.hostname
+    path_lower = parsed.path.lower()
+    decoded_segments = [urllib.parse.unquote(segment) for segment in parsed.path.split("/")]
     if (
         parsed.scheme != "https"
         or hostname is None
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.port not in (None, 443)
-        or not parsed.path
+        or port not in (None, 443)
+        or not parsed.path.startswith("/")
+        or parsed.path.startswith("//")
+        or "\\" in parsed.path
+        or "%2f" in path_lower
+        or "%5c" in path_lower
+        or any(segment in (".", "..") for segment in decoded_segments)
         or not parsed.query
         or parsed.fragment
         or hostname == "api.github.com"
