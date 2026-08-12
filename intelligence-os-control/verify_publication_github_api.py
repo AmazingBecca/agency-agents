@@ -147,8 +147,42 @@ def _content_length(headers: Any, label: str) -> int | None:
     return int(value)
 
 
+def _transfer_encoding(headers: Any, label: str) -> str | None:
+    try:
+        values = headers.get_all("Transfer-Encoding", [])
+    except AttributeError as exc:
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Transfer-Encoding authority is unavailable"
+        ) from exc
+    if not isinstance(values, list):
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Transfer-Encoding is ambiguous"
+        )
+    if not values:
+        return None
+    if len(values) != 1:
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Transfer-Encoding is ambiguous"
+        )
+    value = values[0]
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or not value.isascii()
+        or any(ord(character) < 0x21 or ord(character) == 0x7F for character in value)
+    ):
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Transfer-Encoding is malformed"
+        )
+    return value.lower()
+
+
 def _read_bounded_response(response: Any, maximum: int, label: str) -> bytes:
     declared = _content_length(response.headers, label)
+    transfer_encoding = _transfer_encoding(response.headers, label)
+    if declared is not None and transfer_encoding is not None:
+        raise GithubApiAuthorityVerificationError(f"{label} response framing is ambiguous")
     if declared is not None and (declared < 1 or declared > maximum):
         raise GithubApiAuthorityVerificationError(f"{label} size is outside policy")
     chunks: list[bytes] = []
