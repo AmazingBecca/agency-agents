@@ -85,6 +85,20 @@ class PublisherWorkflowContractTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", WORKFLOW)
         self.assertIn("timeout-minutes: 5", WORKFLOW)
 
+    def test_publisher_python_runtime_is_exact_and_sealed(self) -> None:
+        self.assertIn(
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            WORKFLOW,
+        )
+        self.assertIn("python-version: '3.12.13'", WORKFLOW)
+        self.assertIn("check-latest: false", WORKFLOW)
+        self.assertIn("Seal immutable publisher Python runtime", WORKFLOW)
+        self.assertIn("CONTROL_PYTHON=", WORKFLOW)
+        self.assertIn('"$CONTROL_PYTHON" -I -m py_compile', WORKFLOW)
+        self.assertIn('"$CONTROL_PYTHON" -I intelligence-os-control/publish_retained_evidence.py', WORKFLOW)
+        self.assertIn('"$CONTROL_PYTHON" -I intelligence-os-control/publication_attestation.py', WORKFLOW)
+        self.assertNotRegex(WORKFLOW, r"(?m)^\s+python -I ")
+
     def test_publisher_derives_control_and_caller_authority_from_contexts(self) -> None:
         for context in (
             "job.workflow_repository",
@@ -106,8 +120,8 @@ class PublisherWorkflowContractTests(unittest.TestCase):
             '$CONTROL_WORKFLOW_FILE_PATH@$CONTROL_WORKFLOW_SHA"',
             WORKFLOW,
         )
-        self.assertIn("python -I intelligence-os-control/publish_retained_evidence.py", WORKFLOW)
-        self.assertIn("python -I intelligence-os-control/publication_attestation.py", WORKFLOW)
+        self.assertIn("intelligence-os-control/publish_retained_evidence.py", WORKFLOW)
+        self.assertIn("intelligence-os-control/publication_attestation.py", WORKFLOW)
 
     def test_only_explicit_nonpromotion_diagnostic_is_uploaded(self) -> None:
         self.assertEqual(WORKFLOW.count("actions/upload-artifact@"), 1)
