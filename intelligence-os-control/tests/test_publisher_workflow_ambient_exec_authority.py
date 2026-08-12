@@ -22,6 +22,13 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
     def _git_init_index(self, fetch: str) -> int:
         return fetch.index('"$git_bin" init .')
 
+    def _hardened_fetch_prefix(self) -> str:
+        return (
+            '"$git_bin" -c http.proxy= -c http.sslVerify=true '
+            '-c protocol.allow=never -c protocol.https.allow=always '
+            '-c credential.helper= -c http.extraHeader= fetch'
+        )
+
     def test_job_neutralizes_shell_and_dynamic_loader_startup_authority(self) -> None:
         job = self._publish_job_prefix()
         for name in (
@@ -94,7 +101,7 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
         for command in (
             '"$git_bin" init .',
             '"$git_bin" remote add origin',
-            '"$git_bin" -c credential.helper= -c http.extraHeader= fetch',
+            self._hardened_fetch_prefix(),
             '"$git_bin" checkout --detach FETCH_HEAD',
             '"$git_bin" rev-parse HEAD',
             '"$git_bin" remote get-url origin',
@@ -130,6 +137,7 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
         fetch = self._source_fetch_step()
         self.assertLess(fetch.index("unset GITHUB_TOKEN GH_TOKEN"), self._git_init_index(fetch))
         self.assertIn("-c credential.helper= -c http.extraHeader= fetch", fetch)
+        self.assertIn(self._hardened_fetch_prefix(), fetch)
 
 
 if __name__ == "__main__":
