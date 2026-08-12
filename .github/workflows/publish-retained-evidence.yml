@@ -71,7 +71,35 @@ jobs:
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"
           test "$(git remote get-url origin)" = 'https://github.com/AmazingBecca/agency-agents.git'
-          python -m py_compile \
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.13'
+          check-latest: false
+      - name: Seal immutable publisher Python runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$pythonLocation" = /opt/hostedtoolcache/Python/3.12.13/* ]]
+          test "$(stat -c '%u:%g:%a' /usr)" = "0:0:755"
+          test "$(stat -c '%u:%g:%a' /usr/local)" = "0:0:755"
+          test "$(stat -c '%u:%g:%a' /usr/local/lib)" = "0:0:755"
+          runtime_root="/usr/local/lib/amazingbecca-publisher-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$runtime_root"
+          sudo mv -- "$pythonLocation" "$runtime_root"
+          sudo chown -R root:root "$runtime_root"
+          sudo chmod -R a-w "$runtime_root"
+          control_python="$runtime_root/bin/python3.12"
+          test -x "$control_python"
+          test "$(stat -c '%u:%g:%a' "$control_python")" = "0:0:555"
+          test "$(stat -c '%u:%g:%a' "$runtime_root")" = "0:0:555"
+          LD_LIBRARY_PATH="$runtime_root/lib" "$control_python" -I -c 'import pathlib,sys; p=pathlib.Path(sys.executable).resolve(strict=True); assert str(p).startswith("/usr/local/lib/amazingbecca-publisher-python-"); assert pathlib.Path(sys.base_prefix).resolve(strict=True) == p.parent.parent'
+          printf 'CONTROL_PYTHON=%s\n' "$control_python" >> "$GITHUB_ENV"
+          printf 'LD_LIBRARY_PATH=%s\n' "$runtime_root/lib" >> "$GITHUB_ENV"
+      - name: Compile exact publisher sources with sealed runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$CONTROL_PYTHON" -I -m py_compile \
             intelligence-os-control/publish_retained_evidence.py \
             intelligence-os-control/publication_attestation.py
       - name: Materialize independently verified receipt
@@ -96,7 +124,7 @@ jobs:
           umask 077
           output="$RUNNER_TEMP/intelligence-os-wheelhouse-verification.json"
           test ! -e "$output"
-          receipt_sha256="$(python -I intelligence-os-control/publish_retained_evidence.py \
+          receipt_sha256="$("$CONTROL_PYTHON" -I intelligence-os-control/publish_retained_evidence.py \
             --output "$output" \
             --repository "$PUBLISH_REPOSITORY" \
             --reviewed-head "$PUBLISH_REVIEWED_HEAD" \
@@ -133,7 +161,7 @@ jobs:
           receipt="$RUNNER_TEMP/intelligence-os-wheelhouse-verification.json"
           output="$RUNNER_TEMP/intelligence-os-retained-evidence-publication.json"
           test ! -e "$output"
-          publication_sha256="$(python -I intelligence-os-control/publication_attestation.py \
+          publication_sha256="$("$CONTROL_PYTHON" -I intelligence-os-control/publication_attestation.py \
             --receipt "$receipt" \
             --output "$output" \
             --expected-receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
@@ -160,7 +188,7 @@ jobs:
           publication="$RUNNER_TEMP/intelligence-os-retained-evidence-publication.json"
           output="$RUNNER_TEMP/intelligence-os-retained-evidence-diagnostic.json"
           test ! -e "$output"
-          python -I - "$publication" "$output" "$EXPECTED_PUBLICATION_SHA256" <<'PY'
+          "$CONTROL_PYTHON" -I - "$publication" "$output" "$EXPECTED_PUBLICATION_SHA256" <<'PY'
           import base64
           import hashlib
           import json
@@ -217,7 +245,7 @@ jobs:
           test "$(stat -c '%a' "$output")" = 600
           diagnostic_sha256="$(sha256sum "$output" | cut -d' ' -f1)"
           [[ "$diagnostic_sha256" =~ ^[0-9a-f]{64}$ ]]
-          python -I - "$output" <<'PY'
+          "$CONTROL_PYTHON" -I - "$output" <<'PY'
           import json
           import pathlib
           import sys
