@@ -70,6 +70,30 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
         self.assertIn('export GIT_TEMPLATE_DIR="$template_dir"', before_init)
         self.assertIn("test ! -e .git/hooks", fetch[git_init:])
 
+    def test_git_fetch_cannot_inherit_exec_or_prompt_helper_authority(self) -> None:
+        fetch = self._source_fetch_step()
+        before_init = fetch[: fetch.index("git init .")]
+        self.assertIn(
+            "unset GIT_EXEC_PATH GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND",
+            before_init,
+        )
+        self.assertIn("export GIT_ASKPASS=/bin/false", before_init)
+        self.assertIn("export SSH_ASKPASS=/bin/false", before_init)
+        self.assertIn("git_bin=/usr/bin/git", before_init)
+        self.assertIn(
+            'test "$(stat -c \'%u:%g:%a\' "$git_bin")" = "0:0:755"',
+            before_init,
+        )
+        for command in (
+            '"$git_bin" init .',
+            '"$git_bin" remote add origin',
+            '"$git_bin" -c credential.helper= -c http.extraHeader= fetch',
+            '"$git_bin" checkout --detach FETCH_HEAD',
+            '"$git_bin" rev-parse HEAD',
+            '"$git_bin" remote get-url origin',
+        ):
+            self.assertIn(command, fetch)
+
     def test_credential_scrub_still_precedes_git_repository_creation(self) -> None:
         fetch = self._source_fetch_step()
         self.assertLess(fetch.index("unset GITHUB_TOKEN GH_TOKEN"), fetch.index("git init ."))
