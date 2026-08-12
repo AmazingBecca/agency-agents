@@ -108,6 +108,27 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
         ):
             self.assertIn(command, fetch)
 
+    def test_git_https_remote_helper_is_root_owned_and_not_runner_writable(self) -> None:
+        fetch = self._source_fetch_step()
+        before_init = fetch[: self._git_init_index(fetch)]
+        self.assertIn('git_exec_path="$("$git_bin" --exec-path)"', before_init)
+        self.assertIn('git_exec_path="$(realpath -e -- "$git_exec_path")"', before_init)
+        self.assertIn('test "$(stat -c \'%u:%g\' "$git_exec_path")" = "0:0"', before_init)
+        self.assertIn('git_exec_mode="$(stat -c \'%a\' "$git_exec_path")"', before_init)
+        self.assertIn('(( (8#$git_exec_mode & 0022) == 0 ))', before_init)
+        self.assertIn(
+            'remote_https="$(realpath -e -- "$git_exec_path/git-remote-https")"',
+            before_init,
+        )
+        self.assertIn(
+            'case "$remote_https" in "$git_exec_path"/*) ;; *) exit 1 ;; esac',
+            before_init,
+        )
+        self.assertIn('test "$(stat -c \'%u:%g\' "$remote_https")" = "0:0"', before_init)
+        self.assertIn('remote_https_mode="$(stat -c \'%a\' "$remote_https")"', before_init)
+        self.assertIn('(( (8#$remote_https_mode & 0022) == 0 ))', before_init)
+        self.assertIn('test -x "$remote_https"', before_init)
+
     def test_git_fetch_neutralizes_tls_proxy_and_protocol_authority(self) -> None:
         fetch = self._source_fetch_step()
         before_init = fetch[: self._git_init_index(fetch)]
