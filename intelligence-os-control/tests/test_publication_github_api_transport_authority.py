@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import ssl
+import tempfile
 import unittest
 import urllib.request
+from pathlib import Path
 from unittest import mock
 
 import verify_publication_github_api as verifier
@@ -69,6 +71,22 @@ class PublicationGithubApiTransportAuthorityTests(unittest.TestCase):
         context = verifier._build_https_context()
         self.assertTrue(context.check_hostname)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_trusted_https_context_ignores_sslkeylogfile_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            keylog = Path(directory) / "attacker-controlled.keys"
+            with mock.patch.dict(
+                os.environ,
+                {"SSLKEYLOGFILE": str(keylog)},
+                clear=False,
+            ):
+                context = verifier._build_https_context()
+
+            self.assertIsNone(context.keylog_filename)
+            self.assertFalse(
+                keylog.exists(),
+                "trusted TLS setup must not create an ambient key-log file",
+            )
 
 
 if __name__ == "__main__":
