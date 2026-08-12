@@ -75,22 +75,29 @@ jobs:
           CONTROL_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -Eeuo pipefail
+          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           test "$CONTROL_WORKFLOW_REPOSITORY" = 'AmazingBecca/agency-agents'
           [[ "$CONTROL_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
           unset GITHUB_TOKEN GH_TOKEN
           unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_TEMPLATE_DIR
+          unset GIT_EXEC_PATH GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND
+          export GIT_ASKPASS=/bin/false
+          export SSH_ASKPASS=/bin/false
+          git_bin=/usr/bin/git
+          test -x "$git_bin"
+          test "$(stat -c '%u:%g:%a' "$git_bin")" = "0:0:755"
           template_dir="$RUNNER_TEMP/intelligence-os-empty-git-template"
           test ! -e "$template_dir"
           mkdir -m 0700 "$template_dir"
           test -z "$(find "$template_dir" -mindepth 1 -maxdepth 1 -print -quit)"
           export GIT_TEMPLATE_DIR="$template_dir"
-          git init .
+          "$git_bin" init .
           test ! -e .git/hooks
-          git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
-          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"
-          git checkout --detach FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"
-          test "$(git remote get-url origin)" = 'https://github.com/AmazingBecca/agency-agents.git'
+          "$git_bin" remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
+          "$git_bin" -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"
+          "$git_bin" checkout --detach FETCH_HEAD
+          test "$("$git_bin" rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"
+          test "$("$git_bin" remote get-url origin)" = 'https://github.com/AmazingBecca/agency-agents.git'
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12.13'
