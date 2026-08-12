@@ -101,6 +101,31 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
         ):
             self.assertIn(command, fetch)
 
+    def test_git_fetch_neutralizes_tls_proxy_and_protocol_authority(self) -> None:
+        fetch = self._source_fetch_step()
+        before_init = fetch[: self._git_init_index(fetch)]
+        self.assertIn(
+            "unset GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_SSL_CAPATH GIT_SSL_CERT GIT_SSL_KEY "
+            "GIT_SSL_CERT_PASSWORD_PROTECTED GIT_SSL_VERSION GIT_SSL_CIPHER_LIST",
+            before_init,
+        )
+        self.assertIn(
+            "unset GIT_PROXY_SSL_CERT GIT_PROXY_SSL_KEY GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED "
+            "GIT_PROXY_SSL_CAINFO GIT_PROXY_SSL_CAPATH GIT_HTTP_PROXY_AUTHMETHOD",
+            before_init,
+        )
+        self.assertIn(
+            "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY",
+            before_init,
+        )
+        self.assertIn("unset CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR", before_init)
+        self.assertIn("export GIT_ALLOW_PROTOCOL=https", before_init)
+        self.assertIn("export GIT_PROTOCOL_FROM_USER=0", before_init)
+        self.assertIn("-c http.proxy=", fetch)
+        self.assertIn("-c http.sslVerify=true", fetch)
+        self.assertIn("-c protocol.allow=never", fetch)
+        self.assertIn("-c protocol.https.allow=always", fetch)
+
     def test_credential_scrub_still_precedes_git_repository_creation(self) -> None:
         fetch = self._source_fetch_step()
         self.assertLess(fetch.index("unset GITHUB_TOKEN GH_TOKEN"), self._git_init_index(fetch))
