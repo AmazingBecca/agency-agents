@@ -42,23 +42,24 @@ class PublisherWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("actions/checkout@", WORKFLOW)
         self.assertIn("GIT_TERMINAL_PROMPT: '0'", WORKFLOW)
         self.assertIn("unset GITHUB_TOKEN GH_TOKEN", WORKFLOW)
-        self.assertIn("git init .", WORKFLOW)
+        self.assertIn("git_bin=/usr/bin/git", WORKFLOW)
+        self.assertIn('"$git_bin" init .', WORKFLOW)
         self.assertIn(
-            "git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'",
+            '"$git_bin" remote add origin \'https://github.com/AmazingBecca/agency-agents.git\'',
             WORKFLOW,
         )
         self.assertIn(
-            'git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"',
+            '"$git_bin" -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$CONTROL_WORKFLOW_SHA"',
             WORKFLOW,
         )
-        self.assertIn("git checkout --detach FETCH_HEAD", WORKFLOW)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"', WORKFLOW)
+        self.assertIn('"$git_bin" checkout --detach FETCH_HEAD', WORKFLOW)
+        self.assertIn('test "$("$git_bin" rev-parse HEAD)" = "$CONTROL_WORKFLOW_SHA"', WORKFLOW)
         self.assertNotIn("${{ github.repository }}", WORKFLOW)
 
     def test_control_identity_is_bound_before_network_fetch(self) -> None:
         bind = WORKFLOW.index("Bind protected publisher identity before source fetch")
         fetch = WORKFLOW.index("Fetch exact public publisher source without caller credentials")
-        network = WORKFLOW.index("git -c credential.helper= -c http.extraHeader= fetch")
+        network = WORKFLOW.index('"$git_bin" -c credential.helper= -c http.extraHeader= fetch')
         self.assertLess(bind, fetch)
         self.assertLess(fetch, network)
         bind_block = WORKFLOW[bind:fetch]
