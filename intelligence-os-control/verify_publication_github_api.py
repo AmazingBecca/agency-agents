@@ -175,7 +175,12 @@ def _transfer_encoding(headers: Any, label: str) -> str | None:
         raise GithubApiAuthorityVerificationError(
             f"{label} Transfer-Encoding is malformed"
         )
-    return value.lower()
+    normalized = value.lower()
+    if normalized != "chunked":
+        raise GithubApiAuthorityVerificationError(
+            f"{label} Transfer-Encoding is outside framing policy"
+        )
+    return normalized
 
 
 def _read_bounded_response(response: Any, maximum: int, label: str) -> bytes:
