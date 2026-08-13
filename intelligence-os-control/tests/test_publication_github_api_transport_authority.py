@@ -88,6 +88,47 @@ class PublicationGithubApiTransportAuthorityTests(unittest.TestCase):
                 "trusted TLS setup must not create an ambient key-log file",
             )
 
+    def test_trusted_https_context_rejects_mutable_or_nonroot_ca_parent_authority(self) -> None:
+        original_stat = Path.stat
+        trusted_parent = Path("/etc/ssl/certs")
+        real_parent = original_stat(trusted_parent)
+        cases = {
+            "group-or-other-writable": mock.Mock(
+                st_mode=real_parent.st_mode | 0o022,
+                st_uid=real_parent.st_uid,
+                st_gid=real_parent.st_gid,
+            ),
+            "nonroot-owner": mock.Mock(
+                st_mode=real_parent.st_mode,
+                st_uid=1000,
+                st_gid=real_parent.st_gid,
+            ),
+            "nonroot-group": mock.Mock(
+                st_mode=real_parent.st_mode,
+                st_uid=real_parent.st_uid,
+                st_gid=1000,
+            ),
+        }
+
+        for label, forged_metadata in cases.items():
+            with self.subTest(label=label):
+                def stat_with_forged_parent(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+                    if path == trusted_parent:
+                        return forged_metadata
+                    return original_stat(path, *args, **kwargs)
+
+                with mock.patch.object(
+                    Path,
+                    "stat",
+                    autospec=True,
+                    side_effect=stat_with_forged_parent,
+                ):
+                    with self.assertRaisesRegex(
+                        verifier.GithubApiAuthorityVerificationError,
+                        "CA parent",
+                    ):
+                        verifier._build_https_context()
+
 
 if __name__ == "__main__":
     unittest.main()
