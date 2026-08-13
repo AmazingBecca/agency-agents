@@ -40,6 +40,8 @@ class PublisherWorkflowAmbientExecutionAuthorityTests(unittest.TestCase):
             "PYTHONHOME",
             "PYTHONPATH",
             "PYTHONSTARTUP",
+            "NODE_OPTIONS",
+            "NODE_PATH",
         ):
             self.assertIn(
                 f"      {name}: ''\n",

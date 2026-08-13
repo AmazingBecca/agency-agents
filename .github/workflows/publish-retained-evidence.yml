@@ -50,6 +50,8 @@ jobs:
       PYTHONHOME: ''
       PYTHONPATH: ''
       PYTHONSTARTUP: ''
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
       GIT_CONFIG_NOSYSTEM: '1'
       GIT_CONFIG_GLOBAL: '/dev/null'
       GIT_CONFIG_SYSTEM: '/dev/null'
