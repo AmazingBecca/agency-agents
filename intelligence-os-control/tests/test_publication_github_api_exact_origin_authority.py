@@ -96,6 +96,20 @@ class PublicationGithubApiExactOriginAuthorityTests(unittest.TestCase):
             "https://api.github.com.evil.invalid/repos/AmazingBecca/agency-agents/actions/runs/1"
         )
 
+    def test_malformed_percent_escapes_are_rejected_before_bearer_request(self) -> None:
+        for suffix in ("%", "%2", "%GG"):
+            with self.subTest(suffix=suffix):
+                self._assert_rejected_before_network(
+                    "https://api.github.com/repos/AmazingBecca/agency-agents/actions/runs/1" + suffix
+                )
+
+    def test_percent_encoded_control_octets_are_rejected_before_bearer_request(self) -> None:
+        for encoded in ("%00", "%0A", "%0D", "%1F", "%7F"):
+            with self.subTest(encoded=encoded):
+                self._assert_rejected_before_network(
+                    "https://api.github.com/repos/AmazingBecca/agency-agents/actions/runs/" + encoded
+                )
+
     def test_canonical_api_url_with_query_remains_accepted(self) -> None:
         with mock.patch.object(
             api_verifier, "_open_no_redirect", return_value=_Response(b"{}")
