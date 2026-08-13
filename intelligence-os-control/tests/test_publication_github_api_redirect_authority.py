@@ -64,6 +64,23 @@ class PublicationGithubApiRedirectAuthorityTests(unittest.TestCase):
             ):
                 verifier._archive_location(location)
 
+    def test_archive_location_rejects_storage_origin_confusion(self) -> None:
+        path = "/actions-results/artifact.zip?sig=synthetic"
+        attacks = (
+            f"https://blob.core.windows.net{path}",
+            f"https://productionresultssa1.blob.core.windows.net.attacker.example{path}",
+            f"https://githubusercontent.com{path}",
+            f"https://raw.githubusercontent.com.attacker.example{path}",
+            f"https://user@productionresultssa1.blob.core.windows.net{path}",
+            f"https://productionresultssa1.blob.core.windows.net:8443{path}",
+        )
+        for location in attacks:
+            with self.subTest(location=location), self.assertRaisesRegex(
+                verifier.GithubApiAuthorityVerificationError,
+                "outside trusted HTTPS storage policy",
+            ):
+                verifier._archive_location(location)
+
     def test_canonical_archive_location_remains_accepted(self) -> None:
         self.assertEqual(verifier._archive_location(TRUSTED_LOCATION), TRUSTED_LOCATION)
 
