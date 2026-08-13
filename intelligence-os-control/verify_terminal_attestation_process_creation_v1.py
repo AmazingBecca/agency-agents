@@ -1,0 +1,516 @@
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import pathlib
+import sys
+
+import verify_terminal_attestation_process_creation_base as _base
+
+
+Finding = _base.Finding
+_SCHEMA = _base._SCHEMA
+_ATTESTOR_NAME = _base._ATTESTOR_NAME
+
+
+def __getattr__(name: str):
+    return getattr(_base, name)
+
+
+def _contains_factory_authority(
+    node: ast.AST,
+    aliases: set[str],
+    containers: set[str],
+    object_attributes: dict[str, set[str]] | None = None,
+) -> bool:
+    attributes = object_attributes or {}
+    for item in ast.walk(node):
+        if isinstance(item, ast.Name) and item.id in aliases | containers:
+            return True
+        if isinstance(item, ast.Attribute):
+            root = _base._dotted_name(item.value)
+            if root in aliases | containers:
+                return True
+            if root and item.attr in attributes.get(root, set()):
+                return True
+        if isinstance(item, ast.Subscript):
+            root = _base._dotted_name(item.value)
+            if root in aliases | containers:
+                return True
+    return False
+
+
+def _constructor_authority_attributes(
+    tree: ast.Module,
+    call: ast.Call,
+    positional_authority: list[bool],
+    keyword_authority: set[str],
+) -> set[str]:
+    """Recover instance fields and accessors carrying tainted constructor authority."""
+    if not isinstance(call.func, ast.Name):
+        return set()
+    classes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == call.func.id
+    ]
+    if len(classes) != 1:
+        return set()
+    class_definition = classes[0]
+    initializers = [
+        node
+        for node in class_definition.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    ]
+    if len(initializers) != 1:
+        return set()
+    initializer = initializers[0]
+    positional_parameters = [*initializer.args.posonlyargs, *initializer.args.args]
+    if not positional_parameters:
+        return set()
+    instance_name = positional_parameters[0].arg
+    bound_parameters = positional_parameters[1:]
+    keyword_parameters = [*bound_parameters, *initializer.args.kwonlyargs]
+    keyword_parameter_names = {parameter.arg for parameter in keyword_parameters}
+    tainted_parameters = {
+        bound_parameters[index].arg
+        for index, tainted in enumerate(positional_authority)
+        if tainted and index < len(bound_parameters)
+    }
+    tainted_parameters.update(keyword_authority & keyword_parameter_names)
+    if not tainted_parameters:
+        return set()
+
+    attributes: set[str] = set()
+    for node in _base._function_scope_nodes(initializer):
+        target: ast.AST | None = None
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        if not (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == instance_name
+            and isinstance(value, ast.Name)
+            and value.id in tainted_parameters
+        ):
+            continue
+        attributes.add(target.attr)
+
+    # A direct field is not the only way constructor-carried authority can
+    # leave an instance. ``@property`` is a descriptor, and ordinary accessors
+    # can return the same backing field even when they accept optional or
+    # required selector arguments. Treat any direct instance accessor chain as
+    # authority-bearing so signature decoration cannot launder helper-produced
+    # reflection authority behind a reviewed constructor.
+    changed = True
+    while changed:
+        changed = False
+        for method in class_definition.body:
+            if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
+                continue
+            method_parameters = [*method.args.posonlyargs, *method.args.args]
+            if not method_parameters:
+                continue
+            method_instance = method_parameters[0].arg
+            returns_authority = any(
+                isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == method_instance
+                and node.value.attr in attributes
+                for node in _base._function_scope_nodes(method)
+            )
+            if returns_authority and method.name not in attributes:
+                attributes.add(method.name)
+                changed = True
+    return attributes
+
+
+def _factory_authority_state(
+    tree: ast.Module,
+    function: ast.FunctionDef,
+    functions: dict[str, list[ast.FunctionDef]],
+) -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """Propagate helper-produced first-class authority through local storage."""
+    unique = {name for name, definitions in functions.items() if len(definitions) == 1}
+    import_aliases = _base._scope_import_aliases(tree, function)
+    aliases: set[str] = set()
+    containers: set[str] = set()
+    object_attributes: dict[str, set[str]] = {}
+    mapping_authority: dict[str, set[str]] = {}
+    assignments: list[tuple[ast.AST, ast.AST]] = []
+
+    for node in _base._function_scope_nodes(function):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            assignments.append((node.targets[0], node.value))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+
+    def helper_result_in(value: ast.AST) -> bool:
+        for item in ast.walk(value):
+            if not isinstance(item, ast.Call):
+                continue
+            call_name = _base._resolve_alias(
+                _base._dotted_name(item.func), import_aliases
+            )
+            if call_name in unique and call_name != _ATTESTOR_NAME:
+                return True
+        return False
+
+    def authority_mapping_keys(value: ast.AST) -> set[str]:
+        if isinstance(value, ast.Name):
+            return set(mapping_authority.get(value.id, set()))
+        if not isinstance(value, ast.Dict):
+            return set()
+        keys: set[str] = set()
+        for mapping_key, mapping_value in zip(value.keys, value.values):
+            if mapping_key is None:
+                keys.update(authority_mapping_keys(mapping_value))
+                continue
+            if not (
+                isinstance(mapping_key, ast.Constant)
+                and isinstance(mapping_key.value, str)
+            ):
+                continue
+            if helper_result_in(mapping_value) or _contains_factory_authority(
+                mapping_value,
+                aliases,
+                containers,
+                object_attributes,
+            ):
+                keys.add(mapping_key.value)
+        return keys
+
+    changed = True
+    while changed:
+        changed = False
+        for target, value in assignments:
+            helper_result = False
+            if isinstance(value, ast.Call):
+                call_name = _base._resolve_alias(
+                    _base._dotted_name(value.func), import_aliases
+                )
+                helper_result = call_name in unique and call_name != _ATTESTOR_NAME
+
+            if isinstance(target, ast.Name):
+                if helper_result or (
+                    isinstance(value, ast.Name) and value.id in aliases
+                ):
+                    if target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+                    continue
+
+                if isinstance(value, ast.Name) and value.id in mapping_authority:
+                    before = set(mapping_authority.get(target.id, set()))
+                    mapping_authority.setdefault(target.id, set()).update(
+                        mapping_authority[value.id]
+                    )
+                    if mapping_authority[target.id] != before:
+                        changed = True
+                    if target.id not in containers:
+                        containers.add(target.id)
+                        changed = True
+                    continue
+
+                if isinstance(value, ast.Name) and value.id in containers:
+                    if target.id not in containers:
+                        containers.add(target.id)
+                        changed = True
+                    continue
+
+                if isinstance(value, ast.Attribute):
+                    root = _base._dotted_name(value.value)
+                    if (
+                        root in aliases | containers
+                        or (root and value.attr in object_attributes.get(root, set()))
+                    ):
+                        if target.id not in aliases:
+                            aliases.add(target.id)
+                            changed = True
+                        continue
+
+                if isinstance(value, ast.Subscript):
+                    root = _base._dotted_name(value.value)
+                    if root in aliases | containers:
+                        if target.id not in aliases:
+                            aliases.add(target.id)
+                            changed = True
+                        continue
+
+                dangerous_mapping_keys = authority_mapping_keys(value)
+                if dangerous_mapping_keys:
+                    before = set(mapping_authority.get(target.id, set()))
+                    mapping_authority.setdefault(target.id, set()).update(
+                        dangerous_mapping_keys
+                    )
+                    if mapping_authority[target.id] != before:
+                        changed = True
+                    if target.id not in containers:
+                        containers.add(target.id)
+                        changed = True
+                    continue
+
+                if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) and (
+                    helper_result_in(value)
+                    or _contains_factory_authority(
+                        value, aliases, containers, object_attributes
+                    )
+                ):
+                    if target.id not in containers:
+                        containers.add(target.id)
+                        changed = True
+                    continue
+
+                if isinstance(value, ast.Call):
+                    func_root = None
+                    func_attr = None
+                    if isinstance(value.func, ast.Attribute):
+                        func_root = _base._dotted_name(value.func.value)
+                        func_attr = value.func.attr
+                    if func_root in aliases | containers and func_attr in {
+                        "get",
+                        "__getitem__",
+                        "__getattribute__",
+                        "__getattr__",
+                        "__call__",
+                    }:
+                        if target.id not in aliases:
+                            aliases.add(target.id)
+                            changed = True
+                        continue
+
+                    positional_authority_values = [
+                        helper_result_in(argument)
+                        or _contains_factory_authority(
+                            argument, aliases, containers, object_attributes
+                        )
+                        for argument in value.args
+                    ]
+                    positional_authority = any(positional_authority_values)
+                    dangerous_keywords: set[str] = set()
+                    for keyword in value.keywords:
+                        if keyword.arg is not None:
+                            if helper_result_in(keyword.value) or _contains_factory_authority(
+                                keyword.value,
+                                aliases,
+                                containers,
+                                object_attributes,
+                            ):
+                                dangerous_keywords.add(keyword.arg)
+                            continue
+                        dangerous_keywords.update(authority_mapping_keys(keyword.value))
+                    if positional_authority:
+                        if target.id not in containers:
+                            containers.add(target.id)
+                            changed = True
+                    if positional_authority or dangerous_keywords:
+                        recovered_attributes = _constructor_authority_attributes(
+                            tree,
+                            value,
+                            positional_authority_values,
+                            dangerous_keywords,
+                        )
+                        if recovered_attributes:
+                            before = set(object_attributes.get(target.id, set()))
+                            object_attributes.setdefault(target.id, set()).update(
+                                recovered_attributes
+                            )
+                            if object_attributes[target.id] != before:
+                                changed = True
+                    if dangerous_keywords:
+                        before = set(object_attributes.get(target.id, set()))
+                        object_attributes.setdefault(target.id, set()).update(dangerous_keywords)
+                        if object_attributes[target.id] != before:
+                            changed = True
+                    if positional_authority or dangerous_keywords:
+                        continue
+
+                if isinstance(value, ast.Name) and value.id in object_attributes:
+                    before = set(object_attributes.get(target.id, set()))
+                    object_attributes.setdefault(target.id, set()).update(
+                        object_attributes[value.id]
+                    )
+                    if object_attributes[target.id] != before:
+                        changed = True
+                    continue
+
+                if helper_result_in(value) or _contains_factory_authority(
+                    value, aliases, containers, object_attributes
+                ):
+                    if target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+                continue
+
+            if isinstance(target, (ast.Tuple, ast.List)):
+                if helper_result_in(value) or _contains_factory_authority(
+                    value, aliases, containers, object_attributes
+                ):
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name) and item.id not in aliases:
+                            aliases.add(item.id)
+                            changed = True
+                continue
+
+            if isinstance(target, ast.Attribute):
+                root = _base._dotted_name(target.value)
+                if root and (
+                    helper_result_in(value)
+                    or _contains_factory_authority(
+                        value, aliases, containers, object_attributes
+                    )
+                ):
+                    before = set(object_attributes.get(root, set()))
+                    object_attributes.setdefault(root, set()).add(target.attr)
+                    if object_attributes[root] != before:
+                        changed = True
+                continue
+
+            if isinstance(target, ast.Subscript):
+                root = _base._dotted_name(target.value)
+                if root and (
+                    helper_result_in(value)
+                    or _contains_factory_authority(
+                        value, aliases, containers, object_attributes
+                    )
+                ):
+                    if root not in containers:
+                        containers.add(root)
+                        changed = True
+
+    return aliases, containers, object_attributes
+
+
+def _factory_authority_dispatch(
+    call: ast.Call,
+    aliases: set[str],
+    containers: set[str],
+    object_attributes: dict[str, set[str]],
+) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name) and func.id in aliases:
+        return func.id
+
+    if isinstance(func, ast.Subscript):
+        root = _base._dotted_name(func.value)
+        if root in aliases | containers:
+            return root
+
+    if isinstance(func, ast.Attribute):
+        root = _base._dotted_name(func.value)
+        if root in aliases | containers and func.attr in {
+            "get",
+            "__getitem__",
+            "__getattribute__",
+            "__getattr__",
+            "__call__",
+        }:
+            return root
+        if root and func.attr in object_attributes.get(root, set()):
+            return f"{root}.{func.attr}"
+    return None
+
+
+def _factory_authority_findings(root: pathlib.Path) -> list[dict[str, object]]:
+    """Reject helper-return values only when they become dynamic dispatch authority.
+
+    Trusted attestor code may legitimately consume a helper's ordinary data
+    result, such as a semantic observation. What is not reviewable is using a
+    helper-produced object itself, or an alias/container/attribute carrying it,
+    as callable or namespace lookup authority. That object can be getattr, a
+    module namespace, functools.partial(getattr, ...), or an equivalent resolver
+    that hides process authority from the base syntax-oriented verifier.
+    """
+    findings: list[dict[str, object]] = []
+    for source in _base.control_flow._source_files(root):
+        relative = source.relative_to(root).as_posix()
+        raw = source.read_bytes()
+        try:
+            tree = ast.parse(raw, filename=str(source))
+        except (SyntaxError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"runner source cannot be parsed: {source}") from exc
+
+        functions = _base._top_level_functions(tree)
+        attestors = functions.get(_ATTESTOR_NAME, [])
+        if len(attestors) != 1:
+            continue
+        attestor = attestors[0]
+
+        for function in _base._reachable_functions(tree, attestor, functions):
+            aliases, containers, object_attributes = _factory_authority_state(
+                tree, function, functions
+            )
+            if not aliases and not containers and not object_attributes:
+                continue
+            for node in _base._function_scope_nodes(function):
+                if not isinstance(node, ast.Call):
+                    continue
+                authority = _factory_authority_dispatch(
+                    node, aliases, containers, object_attributes
+                )
+                if authority is None:
+                    continue
+                findings.append(
+                    {
+                        "path": relative,
+                        "function": function.name,
+                        "line": node.lineno,
+                        "kind": "alternate-process-creation-call",
+                        "detail": (
+                            "attestor-reachable helper return becomes dynamic callable or "
+                            f"namespace dispatch authority through {authority}"
+                        ),
+                    }
+                )
+    return findings
+
+
+def verify(runner_root: pathlib.Path) -> dict[str, object]:
+    root = runner_root.resolve(strict=True)
+    report = dict(_base.verify(root))
+    existing = list(report.get("findings", []))
+    extras = _factory_authority_findings(root)
+
+    unique: dict[tuple[object, ...], dict[str, object]] = {}
+    for item in existing + extras:
+        key = (
+            item.get("path"),
+            item.get("function"),
+            item.get("line"),
+            item.get("kind"),
+            item.get("detail"),
+        )
+        unique[key] = item
+    findings = [
+        unique[key]
+        for key in sorted(unique, key=lambda value: tuple(str(x) for x in value))
+    ]
+
+    report["findings"] = findings
+    report["finding_count"] = len(findings)
+    report["passed"] = bool(report.get("passed")) and not extras
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runner-root", type=pathlib.Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        report = verify(args.runner_root)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    return 0 if report["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

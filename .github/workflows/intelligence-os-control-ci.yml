@@ -1,0 +1,71 @@
+name: Intelligence OS Control CI
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/intelligence-os-control-ci.yml'
+      - '.github/workflows/publish-retained-evidence.yml'
+      - 'intelligence-os-control/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intelligence-os-control-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CONTROL_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  test:
+    if: github.repository == 'AmazingBecca/agency-agents'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      PYTHONWARNINGS: error
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.CONTROL_SOURCE_SHA }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Bind exact control source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$CONTROL_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CONTROL_SOURCE_SHA"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.13'
+          check-latest: false
+      - name: Seal immutable control Python runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$pythonLocation" = /opt/hostedtoolcache/Python/3.12.13/* ]]
+          test "$(stat -c '%u:%g:%a' /usr)" = "0:0:755"
+          test "$(stat -c '%u:%g:%a' /usr/local)" = "0:0:755"
+          test "$(stat -c '%u:%g:%a' /usr/local/lib)" = "0:0:755"
+          runtime_root="/usr/local/lib/amazingbecca-control-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$runtime_root"
+          sudo mv -- "$pythonLocation" "$runtime_root"
+          sudo chown -R root:root "$runtime_root"
+          sudo chmod -R a-w "$runtime_root"
+          control_python="$runtime_root/bin/python3.12"
+          test -x "$control_python"
+          test "$(stat -c '%u:%g:%a' "$control_python")" = "0:0:555"
+          test "$(stat -c '%u:%g:%a' "$runtime_root")" = "0:0:555"
+          LD_LIBRARY_PATH="$runtime_root/lib" "$control_python" -I -c 'import pathlib,sys; p=pathlib.Path(sys.executable).resolve(strict=True); assert str(p).startswith("/usr/local/lib/amazingbecca-control-python-"); assert pathlib.Path(sys.base_prefix).resolve(strict=True) == p.parent.parent'
+          printf 'CONTROL_PYTHON=%s\n' "$control_python" >> "$GITHUB_ENV"
+          printf 'LD_LIBRARY_PATH=%s\n' "$runtime_root/lib" >> "$GITHUB_ENV"
+      - name: Compile trusted publisher sources
+        run: '"$CONTROL_PYTHON" -I -m compileall -q intelligence-os-control'
+      - name: Prove distinct-principal candidate boundary
+        run: '"$CONTROL_PYTHON" -I intelligence-os-control/distinct_principal_boundary.py --sandbox-user nobody'
+      - name: Run trusted publisher regressions
+        run: '"$CONTROL_PYTHON" -I -m unittest discover -s intelligence-os-control/tests -v'
