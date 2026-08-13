@@ -41,6 +41,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONNOUSERSITE: '1'
       GIT_TERMINAL_PROMPT: '0'
+      OPENSSL_CONF: ''
       BASH_ENV: ''
       ENV: ''
       LD_PRELOAD: ''
