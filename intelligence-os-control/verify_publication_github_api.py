@@ -96,6 +96,22 @@ def _build_https_context() -> ssl.SSLContext:
         raise GithubApiAuthorityVerificationError(
             "trusted GitHub HTTPS CA bundle is outside authority policy"
         )
+    for parent in resolved.parents:
+        try:
+            parent_metadata = parent.stat()
+        except OSError as exc:
+            raise GithubApiAuthorityVerificationError(
+                "trusted GitHub HTTPS CA parent authority is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != 0
+            or parent_metadata.st_gid != 0
+            or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+        ):
+            raise GithubApiAuthorityVerificationError(
+                "trusted GitHub HTTPS CA parent is outside authority policy"
+            )
     try:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.load_verify_locations(cafile=TRUSTED_CA_FILE)
