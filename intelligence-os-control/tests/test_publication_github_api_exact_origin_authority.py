@@ -61,6 +61,41 @@ class PublicationGithubApiExactOriginAuthorityTests(unittest.TestCase):
             "https://api.github.com/repos/AmazingBecca/../agency-agents/actions/runs/1"
         )
 
+    def test_percent_encoded_dot_segment_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://api.github.com/repos/AmazingBecca/%2e%2e/agency-agents/actions/runs/1"
+        )
+
+    def test_percent_encoded_slash_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://api.github.com/repos/AmazingBecca%2Fagency-agents/actions/runs/1"
+        )
+
+    def test_percent_encoded_backslash_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://api.github.com/repos/AmazingBecca%5Cagency-agents/actions/runs/1"
+        )
+
+    def test_literal_backslash_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://api.github.com/repos/AmazingBecca\\agency-agents/actions/runs/1"
+        )
+
+    def test_userinfo_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://token@api.github.com/repos/AmazingBecca/agency-agents/actions/runs/1"
+        )
+
+    def test_explicit_port_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://api.github.com:443/repos/AmazingBecca/agency-agents/actions/runs/1"
+        )
+
+    def test_suffix_confusion_host_is_rejected_before_bearer_request(self) -> None:
+        self._assert_rejected_before_network(
+            "https://api.github.com.evil.invalid/repos/AmazingBecca/agency-agents/actions/runs/1"
+        )
+
     def test_canonical_api_url_with_query_remains_accepted(self) -> None:
         with mock.patch.object(
             api_verifier, "_open_no_redirect", return_value=_Response(b"{}")
