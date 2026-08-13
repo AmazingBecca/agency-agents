@@ -64,6 +64,25 @@ class PublicationGithubApiRedirectAuthorityTests(unittest.TestCase):
             ):
                 verifier._archive_location(location)
 
+    def test_archive_location_rejects_malformed_percent_and_encoded_controls(self) -> None:
+        origin = "https://productionresultssa1.blob.core.windows.net"
+        attacks = (
+            f"{origin}/actions-results/%/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%2/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%GG/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%00/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%0A/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/%7F/artifact.zip?sig=synthetic",
+            f"{origin}/actions-results/artifact.zip?sig=%GG",
+            f"{origin}/actions-results/artifact.zip?sig=%00",
+        )
+        for location in attacks:
+            with self.subTest(location=location), self.assertRaisesRegex(
+                verifier.GithubApiAuthorityVerificationError,
+                "malformed|outside trusted HTTPS storage policy",
+            ):
+                verifier._archive_location(location)
+
     def test_archive_location_rejects_storage_origin_confusion(self) -> None:
         path = "/actions-results/artifact.zip?sig=synthetic"
         attacks = (
