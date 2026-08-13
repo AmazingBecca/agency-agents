@@ -150,6 +150,26 @@ def _canonical_api_url(value: Any, label: str) -> str:
         raise GithubApiAuthorityVerificationError(
             f"{label} API URL is outside policy"
         ) from exc
+    for component in (parsed.path, parsed.query):
+        index = 0
+        while True:
+            percent = component.find("%", index)
+            if percent < 0:
+                break
+            escape = component[percent + 1 : percent + 3]
+            if (
+                len(escape) != 2
+                or any(character not in "0123456789abcdefABCDEF" for character in escape)
+            ):
+                raise GithubApiAuthorityVerificationError(
+                    f"{label} API URL is outside policy"
+                )
+            decoded_octet = int(escape, 16)
+            if decoded_octet <= 0x20 or decoded_octet == 0x7F:
+                raise GithubApiAuthorityVerificationError(
+                    f"{label} API URL is outside policy"
+                )
+            index = percent + 3
     path_lower = parsed.path.lower()
     path_segments = parsed.path.split("/")
     decoded_segments = [urllib.parse.unquote(segment) for segment in path_segments]
