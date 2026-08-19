@@ -99,6 +99,22 @@ class AgentNodeContractTests(unittest.TestCase):
         self.assertEqual(result["returncode"], 0)
         self.assertIn("OK", result["stdout"])
 
+    def test_committed_symlink_cannot_escape_snapshot(self):
+        temp, repo, _ = make_repo(PASSING_TEST)
+        self.addCleanup(temp.cleanup)
+        outside = pathlib.Path(temp.name).parent / f"agent-node-outside-{pathlib.Path(temp.name).name}.py"
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        outside.write_text(PASSING_TEST.replace("self.assertTrue(True)", "print('EXTERNAL-SENTINEL'); self.assertTrue(True)"), encoding="utf-8")
+        target = repo / "tests" / "test_safe.py"
+        target.unlink()
+        target.symlink_to(outside)
+        git(repo, "add", "-A", "tests/test_safe.py")
+        git(repo, "commit", "-qm", "symlink escape")
+        head = git(repo, "rev-parse", "HEAD")
+        with mock.patch.object(mod, "ROOT", repo), mock.patch.object(mod, "TEST_ALLOWLIST", ("tests.test_safe",)):
+            with self.assertRaisesRegex(ValueError, "unsupported Git tree entry"):
+                mod.run_tests(head, "tests.test_safe")
+
     def test_git_environment_cannot_redirect_repository_identity(self):
         temp1, repo1, head1 = make_repo(PASSING_TEST)
         temp2, repo2, _ = make_repo(FAILING_TEST)
