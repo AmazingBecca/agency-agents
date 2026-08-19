@@ -1,0 +1,121 @@
+name: Agent Node Candidate Validation
+
+on:
+  push:
+    branches:
+      - hardening/agent-node-exact-worktree-v1
+  pull_request:
+    branches:
+      - infra/agent-node-bootstrap-v1
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch exact candidate source without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          unset GITHUB_TOKEN GH_TOKEN
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Compile and run exact agent-node regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 --version
+          python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_agent_node.py
+          python3 -B -m unittest discover -s agent-node/tests -v
+      - name: Exercise live authenticated loopback node
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          fixture="$RUNNER_TEMP/agent-node-fixture"
+          mkdir -p "$fixture/tests"
+          git -C "$fixture" init -q
+          git -C "$fixture" config user.email 'agent-node-ci@example.invalid'
+          git -C "$fixture" config user.name 'agent-node-ci'
+          printf '' > "$fixture/tests/__init__.py"
+          cat > "$fixture/tests/test_safe.py" <<'PY'
+          import unittest
+          class SafeTest(unittest.TestCase):
+              def test_live(self):
+                  self.assertEqual(2 + 2, 4)
+          PY
+          git -C "$fixture" add tests
+          git -C "$fixture" commit -qm reviewed
+          expected_head="$(git -C "$fixture" rev-parse HEAD)"
+          export AGENT_NODE_REPO_ROOT="$fixture"
+          export AGENT_NODE_BEARER="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          export AGENT_NODE_TEST_ALLOWLIST='tests.test_safe'
+          python3 -B agent-node/agent_node.py > "$RUNNER_TEMP/agent-node.log" 2>&1 &
+          node_pid=$!
+          trap 'kill "$node_pid" 2>/dev/null || true' EXIT
+          python3 - "$expected_head" "$AGENT_NODE_BEARER" <<'PY'
+          import hashlib
+          import json
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          head, token = sys.argv[1:3]
+          base = "http://127.0.0.1:8765"
+          for _ in range(50):
+              try:
+                  with urllib.request.urlopen(base + "/health", timeout=1) as response:
+                      health = json.loads(response.read())
+                  assert health == {"git": True, "ok": True}
+                  break
+              except Exception:
+                  time.sleep(0.1)
+          else:
+              raise SystemExit("agent node did not become ready")
+
+          body = json.dumps({"expected_head": head, "selector": "tests.test_safe"}).encode()
+          unauthorized = urllib.request.Request(
+              base + "/run-tests",
+              data=body,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              urllib.request.urlopen(unauthorized, timeout=5)
+          except urllib.error.HTTPError as exc:
+              assert exc.code == 401
+          else:
+              raise SystemExit("unauthenticated test execution unexpectedly succeeded")
+
+          authorized = urllib.request.Request(
+              base + "/run-tests",
+              data=body,
+              headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(authorized, timeout=30) as response:
+              raw = response.read()
+          result = json.loads(raw)
+          assert result["head"] == head
+          assert len(result["tree"]) == 40
+          assert len(result["runtime_sha256"]) == 64
+          assert result["selector"] == "tests.test_safe"
+          assert result["returncode"] == 0
+          assert hashlib.sha256(result["stdout"].encode()).hexdigest() == result["stdout_sha256"]
+          assert "OK" in result["stdout"]
+          print("LIVE_AGENT_NODE_OK")
+          print("head=" + result["head"])
+          print("tree=" + result["tree"])
+          print("runtime_sha256=" + result["runtime_sha256"])
+          print("stdout_sha256=" + result["stdout_sha256"])
+          PY
