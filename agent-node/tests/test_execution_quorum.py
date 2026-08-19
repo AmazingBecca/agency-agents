@@ -11,6 +11,8 @@ spec.loader.exec_module(mod)
 def receipt(worker: str, env: str, **changes):
     value = {
         "worker_id": worker,
+        "capsule_sha256": "1" * 64,
+        "source_bundle_sha256": "2" * 64,
         "head": "a" * 40,
         "tree": "b" * 40,
         "runtime_sha256": "c" * 64,
@@ -25,11 +27,14 @@ def receipt(worker: str, env: str, **changes):
 
 class QuorumTests(unittest.TestCase):
     def test_two_distinct_workers_and_environments_form_advisory_quorum(self):
-        q = mod.verify_quorum([receipt("w1", "e" * 64), receipt("w2", "f" * 64)], threshold=2)
+        q = mod.verify_quorum([receipt("w1", "e" * 64), receipt("w2", "f" * 64, runtime_sha256="9" * 64)], threshold=2)
+        self.assertEqual(q["schema"], "agent-node-execution-quorum/v2")
         self.assertEqual(q["receipt_count"], 2)
         self.assertTrue(q["advisory_only"])
         self.assertFalse(q["promotion_authorized"])
         self.assertFalse(q["completion_authorized"])
+        self.assertEqual(q["consensus"]["capsule_sha256"], "1" * 64)
+        self.assertEqual(q["consensus"]["source_bundle_sha256"], "2" * 64)
         self.assertEqual(len(q["quorum_sha256"]), 64)
 
     def test_duplicate_worker_fails_closed(self):
@@ -44,11 +49,24 @@ class QuorumTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.QuorumError, "disagree"):
             mod.verify_quorum([receipt("w1", "e" * 64), receipt("w2", "f" * 64, stdout_sha256="9" * 64)], threshold=2)
 
+    def test_capsule_or_source_disagreement_fails_closed(self):
+        for change in ({"capsule_sha256": "9" * 64}, {"source_bundle_sha256": "9" * 64}):
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(mod.QuorumError, "disagree"):
+                    mod.verify_quorum([receipt("w1", "e" * 64), receipt("w2", "f" * 64, **change)], threshold=2)
+
     def test_source_or_selector_disagreement_fails_closed(self):
         for change in ({"head": "9" * 40}, {"tree": "9" * 40}, {"selector": "tests.test_other"}, {"returncode": 1}):
             with self.subTest(change=change):
                 with self.assertRaisesRegex(mod.QuorumError, "disagree"):
                     mod.verify_quorum([receipt("w1", "e" * 64), receipt("w2", "f" * 64, **change)], threshold=2)
+
+    def test_runtime_may_differ_across_environments(self):
+        q = mod.verify_quorum([
+            receipt("w1", "e" * 64, runtime_sha256="3" * 64),
+            receipt("w2", "f" * 64, runtime_sha256="4" * 64),
+        ], threshold=2)
+        self.assertEqual(q["receipt_count"], 2)
 
     def test_threshold_below_two_rejected(self):
         with self.assertRaisesRegex(mod.QuorumError, "threshold"):
