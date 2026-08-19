@@ -113,7 +113,9 @@ def _tree_entries(expected_head: str) -> list[tuple[str, str, str]]:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
             raise ValueError("unsafe Git tree path")
-        if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
+        # V1 intentionally rejects symlinks and submodules. A committed link can point
+        # outside the reviewed tree and make the interpreter execute mutable host bytes.
+        if object_type != "blob" or mode not in {"100644", "100755"}:
             raise ValueError(f"unsupported Git tree entry: {mode} {object_type} {path}")
         if not SHA40.fullmatch(object_sha):
             raise ValueError("invalid Git blob identity")
@@ -139,11 +141,8 @@ def committed_snapshot(expected_head: str):
                 raise ValueError(f"Git blob bytes do not match object identity: {relative}")
             destination = snapshot.joinpath(*pathlib.PurePosixPath(relative).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            if mode == "120000":
-                os.symlink(os.fsdecode(data), destination)
-            else:
-                destination.write_bytes(data)
-                destination.chmod(0o755 if mode == "100755" else 0o644)
+            destination.write_bytes(data)
+            destination.chmod(0o755 if mode == "100755" else 0o644)
         after_head, after_tree = bound_identity(expected_head)
         if (after_head, after_tree) != (head, tree):
             raise ValueError("repository identity changed while snapshotting")
