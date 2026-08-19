@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v2"
+RUNTIME_POLICY = "agent-node-python-runtime-v3"
 RUNTIME_IGNORED_DIRS = frozenset({"site-packages", "dist-packages"})
 
 
@@ -205,10 +205,70 @@ def _runtime_tree_sha256(roots: tuple[pathlib.Path, ...]) -> str:
     return digest
 
 
+def _runtime_archive_sha256() -> str:
+    records: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for value in sys.path:
+        if not value:
+            continue
+        candidate = pathlib.Path(value)
+        if candidate.suffix.lower() != ".zip":
+            continue
+        if not candidate.is_absolute():
+            candidate = pathlib.Path.cwd() / candidate
+        lexical = pathlib.Path(os.path.abspath(candidate))
+        identity_path = os.fspath(lexical)
+        if identity_path in seen:
+            continue
+        seen.add(identity_path)
+        try:
+            metadata = lexical.lstat()
+        except FileNotFoundError:
+            records.append({"path": identity_path, "kind": "missing"})
+            continue
+        except OSError as exc:
+            raise RuntimeError(f"Python runtime archive cannot be inspected: {lexical}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                link_target = os.readlink(lexical)
+                resolved_target = lexical.resolve(strict=True)
+                target_metadata = resolved_target.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"Python runtime archive symlink cannot be resolved: {lexical}") from exc
+            if not stat.S_ISREG(target_metadata.st_mode):
+                raise RuntimeError(f"Python runtime archive symlink target is not a regular file: {lexical}")
+            records.append(
+                {
+                    "path": identity_path,
+                    "kind": "symlink-file",
+                    "link_target": link_target,
+                    "target_size": target_metadata.st_size,
+                    "target_sha256": _stable_regular_file_sha256(resolved_target),
+                }
+            )
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"Python runtime archive is not a regular file: {lexical}")
+        records.append(
+            {
+                "path": identity_path,
+                "kind": "file",
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "size": metadata.st_size,
+                "sha256": _stable_regular_file_sha256(lexical),
+            }
+        )
+    digest = hashlib.sha256(canonical(records)).hexdigest()
+    if not SHA64.fullmatch(digest):
+        raise RuntimeError("Python runtime archive identity is invalid")
+    return digest
+
+
 def python_runtime_identity() -> tuple[str, str]:
     executable = pathlib.Path(sys.executable).resolve(strict=True)
     binary_sha256 = _stable_regular_file_sha256(executable)
     runtime_tree_sha256 = _runtime_tree_sha256(_runtime_roots())
+    runtime_archive_sha256 = _runtime_archive_sha256()
     material = {
         "policy": RUNTIME_POLICY,
         "implementation": sys.implementation.name,
@@ -216,6 +276,7 @@ def python_runtime_identity() -> tuple[str, str]:
         "version": ".".join(str(part) for part in sys.version_info[:3]),
         "binary_sha256": binary_sha256,
         "runtime_tree_sha256": runtime_tree_sha256,
+        "runtime_archive_sha256": runtime_archive_sha256,
         "isolated_flag": "-I",
         "bytecode_flag": "-B",
         "no_site_flag": "-S",
