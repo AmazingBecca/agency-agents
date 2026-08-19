@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import urllib.parse
 import urllib.request
@@ -25,7 +26,9 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v1"
+RUNTIME_POLICY = "agent-node-python-runtime-v2"
+RUNTIME_IGNORED_DIRS = frozenset({"__pycache__", "site-packages", "dist-packages"})
+RUNTIME_IGNORED_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
 def _resolve_git_bin() -> str:
@@ -127,17 +130,79 @@ def _stable_regular_file_sha256(path: pathlib.Path) -> str:
         os.close(fd)
 
 
+def _runtime_roots() -> tuple[pathlib.Path, ...]:
+    roots: list[pathlib.Path] = []
+    for key in ("stdlib", "platstdlib"):
+        value = sysconfig.get_path(key)
+        if not value:
+            continue
+        root = pathlib.Path(value).resolve(strict=True)
+        if not root.is_dir():
+            raise RuntimeError(f"Python runtime root is not a directory: {root}")
+        if root not in roots:
+            roots.append(root)
+    if not roots:
+        raise RuntimeError("Python standard-library runtime roots are unavailable")
+    return tuple(roots)
+
+
+def _runtime_tree_sha256(roots: tuple[pathlib.Path, ...]) -> str:
+    records: list[dict[str, object]] = []
+    for root_index, root_value in enumerate(roots):
+        root = pathlib.Path(root_value).resolve(strict=True)
+        if not root.is_dir():
+            raise RuntimeError(f"Python runtime root is not a directory: {root}")
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+            dirnames[:] = sorted(name for name in dirnames if name not in RUNTIME_IGNORED_DIRS)
+            directory = pathlib.Path(dirpath)
+            for dirname in dirnames:
+                child = directory / dirname
+                if child.is_symlink():
+                    raise RuntimeError(f"Python runtime tree contains a directory symlink: {child}")
+            for filename in sorted(filenames):
+                path = directory / filename
+                if path.suffix in RUNTIME_IGNORED_SUFFIXES:
+                    continue
+                if path.is_symlink():
+                    raise RuntimeError(f"Python runtime tree contains a file symlink: {path}")
+                try:
+                    metadata = path.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise RuntimeError(f"Python runtime tree entry cannot be inspected: {path}") from exc
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise RuntimeError(f"Python runtime tree entry is not a regular file: {path}")
+                relative = path.relative_to(root).as_posix()
+                records.append(
+                    {
+                        "root": root_index,
+                        "path": relative,
+                        "mode": stat.S_IMODE(metadata.st_mode),
+                        "size": metadata.st_size,
+                        "sha256": _stable_regular_file_sha256(path),
+                    }
+                )
+    if not records:
+        raise RuntimeError("Python runtime tree contains no bindable files")
+    digest = hashlib.sha256(canonical(records)).hexdigest()
+    if not SHA64.fullmatch(digest):
+        raise RuntimeError("Python runtime tree identity is invalid")
+    return digest
+
+
 def python_runtime_identity() -> tuple[str, str]:
     executable = pathlib.Path(sys.executable).resolve(strict=True)
     binary_sha256 = _stable_regular_file_sha256(executable)
+    runtime_tree_sha256 = _runtime_tree_sha256(_runtime_roots())
     material = {
         "policy": RUNTIME_POLICY,
         "implementation": sys.implementation.name,
         "cache_tag": sys.implementation.cache_tag or "",
         "version": ".".join(str(part) for part in sys.version_info[:3]),
         "binary_sha256": binary_sha256,
+        "runtime_tree_sha256": runtime_tree_sha256,
         "isolated_flag": "-I",
         "bytecode_flag": "-B",
+        "no_site_flag": "-S",
         "loader_env_scrubbed": True,
     }
     runtime_sha256 = hashlib.sha256(canonical(material)).hexdigest()
@@ -252,7 +317,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
     python_bin, runtime_sha256 = python_runtime_identity()
     with committed_snapshot(expected_head) as (head, tree, snapshot):
         cp = subprocess.run(
-            [python_bin, "-I", "-B", "-c", bootstrap, str(snapshot), selector],
+            [python_bin, "-I", "-B", "-S", "-c", bootstrap, str(snapshot), selector],
             cwd=snapshot,
             text=True,
             stdout=subprocess.PIPE,
