@@ -18,12 +18,14 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+SHA64 = re.compile(r"^[0-9a-f]{64}$")
 ROOT = pathlib.Path(os.environ.get("AGENT_NODE_REPO_ROOT", ".")).resolve()
 TOKEN = os.environ.get("AGENT_NODE_BEARER", "")
 MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:11434/v1/chat/completions")
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
+RUNTIME_POLICY = "agent-node-python-runtime-v1"
 
 
 def _resolve_git_bin() -> str:
@@ -57,7 +59,7 @@ def _git_env() -> dict[str, str]:
         key: value
         for key, value in os.environ.items()
         if not key.startswith("GIT_")
-        and key not in {"LD_PRELOAD", "LD_LIBRARY_PATH"}
+        and not key.startswith("LD_")
         and not key.startswith("DYLD_")
     }
     env.update(
@@ -69,6 +71,79 @@ def _git_env() -> dict[str, str]:
         }
     )
     return env
+
+
+def _python_env() -> dict[str, str]:
+    """Remove interpreter and dynamic-loader injection variables for child Python."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("PYTHON")
+        and not key.startswith("LD_")
+        and not key.startswith("DYLD_")
+        and key not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__"}
+    }
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _stable_regular_file_sha256(path: pathlib.Path) -> str:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("secure runtime identity requires O_NOFOLLOW")
+    resolved = path.resolve(strict=True)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(resolved, flags)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError("Python runtime is not a regular file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(fd)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if identity_before != identity_after:
+            raise RuntimeError("Python runtime changed during identity read")
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def python_runtime_identity() -> tuple[str, str]:
+    executable = pathlib.Path(sys.executable).resolve(strict=True)
+    binary_sha256 = _stable_regular_file_sha256(executable)
+    material = {
+        "policy": RUNTIME_POLICY,
+        "implementation": sys.implementation.name,
+        "cache_tag": sys.implementation.cache_tag or "",
+        "version": ".".join(str(part) for part in sys.version_info[:3]),
+        "binary_sha256": binary_sha256,
+        "isolated_flag": "-I",
+        "bytecode_flag": "-B",
+        "loader_env_scrubbed": True,
+    }
+    runtime_sha256 = hashlib.sha256(canonical(material)).hexdigest()
+    if not SHA64.fullmatch(runtime_sha256):
+        raise RuntimeError("Python runtime identity is invalid")
+    return str(executable), runtime_sha256
 
 
 def git_bytes(*args: str) -> bytes:
@@ -113,8 +188,6 @@ def _tree_entries(expected_head: str) -> list[tuple[str, str, str]]:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
             raise ValueError("unsafe Git tree path")
-        # V1 intentionally rejects symlinks and submodules. A committed link can point
-        # outside the reviewed tree and make the interpreter execute mutable host bytes.
         if object_type != "blob" or mode not in {"100644", "100755"}:
             raise ValueError(f"unsupported Git tree entry: {mode} {object_type} {path}")
         if not SHA40.fullmatch(object_sha):
@@ -171,19 +244,25 @@ def run_tests(expected_head: str, selector: str) -> dict:
         "result=unittest.TextTestRunner(verbosity=2).run(suite);"
         "raise SystemExit(0 if result.wasSuccessful() else 1)"
     )
+    python_bin, runtime_sha256 = python_runtime_identity()
     with committed_snapshot(expected_head) as (head, tree, snapshot):
         cp = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", bootstrap, str(snapshot), selector],
+            [python_bin, "-I", "-B", "-c", bootstrap, str(snapshot), selector],
             cwd=snapshot,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=900,
+            env=_python_env(),
         )
         returned_output = cp.stdout[-TEST_OUTPUT_LIMIT:]
+    after_python_bin, after_runtime_sha256 = python_runtime_identity()
+    if after_python_bin != python_bin or after_runtime_sha256 != runtime_sha256:
+        raise RuntimeError("Python runtime identity changed during test execution")
     return {
         "head": head,
         "tree": tree,
+        "runtime_sha256": runtime_sha256,
         "selector": selector,
         "returncode": cp.returncode,
         "stdout_sha256": hashlib.sha256(returned_output.encode()).hexdigest(),
@@ -193,6 +272,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
 
 def second_opinion(expected_head: str, compact_evidence: str) -> dict:
     head, tree = bound_identity(expected_head)
+    _python_bin, runtime_sha256 = python_runtime_identity()
     if not MODEL_NAME:
         raise ValueError("AGENT_NODE_MODEL is not configured")
     parsed = urllib.parse.urlparse(MODEL_ENDPOINT)
@@ -216,9 +296,19 @@ def second_opinion(expected_head: str, compact_evidence: str) -> dict:
         raw = response.read()
     decoded = json.loads(raw)
     after_head, after_tree = bound_identity(expected_head)
+    _after_python_bin, after_runtime_sha256 = python_runtime_identity()
     if (after_head, after_tree) != (head, tree):
         raise ValueError("repository identity changed during second-opinion execution")
-    return {"head": head, "tree": tree, "model": MODEL_NAME, "response": decoded, "response_sha256": hashlib.sha256(raw).hexdigest()}
+    if after_runtime_sha256 != runtime_sha256:
+        raise RuntimeError("Python runtime identity changed during second-opinion execution")
+    return {
+        "head": head,
+        "tree": tree,
+        "runtime_sha256": runtime_sha256,
+        "model": MODEL_NAME,
+        "response": decoded,
+        "response_sha256": hashlib.sha256(raw).hexdigest(),
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
