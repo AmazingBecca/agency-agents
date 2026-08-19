@@ -57,6 +57,34 @@ class AgentNodeContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.bound_identity("main")
 
+    def test_python_runtime_identity_binds_real_interpreter(self):
+        executable, runtime_sha256 = mod.python_runtime_identity()
+        self.assertTrue(pathlib.Path(executable).is_absolute())
+        self.assertRegex(runtime_sha256, r"^[0-9a-f]{64}$")
+
+    def test_python_environment_scrubs_injection_variables(self):
+        injected = {
+            "PYTHONPATH": "/tmp/evil",
+            "PYTHONHOME": "/tmp/evil-home",
+            "LD_PRELOAD": "/tmp/evil.so",
+            "LD_AUDIT": "/tmp/audit.so",
+            "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+            "VIRTUAL_ENV": "/tmp/venv",
+            "__PYVENV_LAUNCHER__": "/tmp/python",
+            "SAFE_SENTINEL": "keep",
+        }
+        with mock.patch.dict(os.environ, injected, clear=False):
+            env = mod._python_env()
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertNotIn("LD_PRELOAD", env)
+        self.assertNotIn("LD_AUDIT", env)
+        self.assertNotIn("DYLD_INSERT_LIBRARIES", env)
+        self.assertNotIn("VIRTUAL_ENV", env)
+        self.assertNotIn("__PYVENV_LAUNCHER__", env)
+        self.assertEqual(env["SAFE_SENTINEL"], "keep")
+        self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
+
     def test_isolated_python_can_execute_allowlisted_committed_test(self):
         temp, repo, head = make_repo(PASSING_TEST)
         self.addCleanup(temp.cleanup)
@@ -66,6 +94,7 @@ class AgentNodeContractTests(unittest.TestCase):
         self.assertIn("OK", result["stdout"])
         self.assertEqual(result["head"], head)
         self.assertRegex(result["tree"], r"^[0-9a-f]{40}$")
+        self.assertRegex(result["runtime_sha256"], r"^[0-9a-f]{64}$")
 
     def test_assume_unchanged_worktree_bytes_cannot_change_execution(self):
         temp, repo, head = make_repo(PASSING_TEST)
@@ -149,7 +178,7 @@ class SafeTest(unittest.TestCase):
         self.assertNotIn("ignored_runtime.py", result["files"])
 
     def test_model_endpoint_is_loopback_only(self):
-        with mock.patch.object(mod, "MODEL_NAME", "qwen"), mock.patch.object(mod, "MODEL_ENDPOINT", "https://example.com/v1/chat/completions"), mock.patch.object(mod, "bound_identity", return_value=("a" * 40, "b" * 40)):
+        with mock.patch.object(mod, "MODEL_NAME", "qwen"), mock.patch.object(mod, "MODEL_ENDPOINT", "https://example.com/v1/chat/completions"), mock.patch.object(mod, "bound_identity", return_value=("a" * 40, "b" * 40)), mock.patch.object(mod, "python_runtime_identity", return_value=("/usr/bin/python3", "c" * 64)):
             with self.assertRaises(ValueError):
                 mod.second_opinion("a" * 40, "evidence")
 
