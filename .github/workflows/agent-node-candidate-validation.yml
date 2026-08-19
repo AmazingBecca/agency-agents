@@ -5,10 +5,12 @@ on:
     branches:
       - hardening/agent-node-exact-worktree-v1
       - hardening/execution-receipt-quorum-v1
+      - hardening/execution-capsule-toolchain-v1
   pull_request:
     branches:
       - infra/agent-node-bootstrap-v1
       - hardening/agent-node-exact-worktree-v1
+      - hardening/execution-receipt-quorum-v1
     types: [opened, synchronize, reopened]
 
 permissions: {}
@@ -16,7 +18,7 @@ permissions: {}
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Fetch exact candidate source without workflow credentials
         shell: bash
@@ -32,14 +34,34 @@ jobs:
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Download pinned deterministic toolchain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --user --disable-pip-version-check 'ruff==0.16.3'
+          npm install --prefix "$RUNNER_TEMP/ast-grep" --no-save '@ast-grep/cli@0.45.1'
+          "$HOME/.local/bin/ruff" --version | grep -Fx 'ruff 0.16.3'
+          "$RUNNER_TEMP/ast-grep/node_modules/.bin/ast-grep" --version | grep -F '0.45.1'
+          "$HOME/.local/bin/ruff" check --select E9,F63,F7,F82 agent-node
+          "$RUNNER_TEMP/ast-grep/node_modules/.bin/ast-grep" --pattern 'subprocess.run($$$ARGS)' --lang python agent-node/agent_node.py >/dev/null
+
       - name: Compile and run exact agent-node regressions
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 --version
-          python3 -B -m py_compile agent-node/agent_node.py agent-node/execution_quorum.py agent-node/tests/test_agent_node.py agent-node/tests/test_execution_quorum.py
+          python3 -B -m py_compile \
+            agent-node/agent_node.py \
+            agent-node/execution_quorum.py \
+            agent-node/execution_capsule.py \
+            agent-node/capsule_service.py \
+            agent-node/tests/test_agent_node.py \
+            agent-node/tests/test_execution_quorum.py \
+            agent-node/tests/test_execution_capsule.py
           python3 -B -m unittest discover -s agent-node/tests -v
-      - name: Exercise live authenticated loopback node
+
+      - name: Exercise live authenticated loopback capsule service
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -58,56 +80,82 @@ jobs:
           git -C "$fixture" add tests
           git -C "$fixture" commit -qm reviewed
           expected_head="$(git -C "$fixture" rev-parse HEAD)"
+          expected_tree="$(git -C "$fixture" rev-parse 'HEAD^{tree}')"
           export AGENT_NODE_REPO_ROOT="$fixture"
+          export AGENT_NODE_REPOSITORY='AmazingBecca/fixture'
           export AGENT_NODE_BEARER="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
           export AGENT_NODE_TEST_ALLOWLIST='tests.test_safe'
-          python3 -B agent-node/agent_node.py > "$RUNNER_TEMP/agent-node.log" 2>&1 &
+          python3 -B agent-node/capsule_service.py > "$RUNNER_TEMP/agent-node.log" 2>&1 &
           node_pid=$!
           trap 'kill "$node_pid" 2>/dev/null || true' EXIT
-          python3 - "$expected_head" "$AGENT_NODE_BEARER" <<'PY'
+          python3 - "$expected_head" "$expected_tree" "$AGENT_NODE_BEARER" <<'PY'
           import hashlib
           import json
+          import pathlib
           import sys
           import time
           import urllib.error
           import urllib.request
 
-          head, token = sys.argv[1:3]
+          head, tree, token = sys.argv[1:4]
+          sys.path.insert(0, str(pathlib.Path('agent-node').resolve()))
+          import capsule_service
+          import execution_capsule
+
           base = "http://127.0.0.1:8765"
           for _ in range(50):
               try:
                   with urllib.request.urlopen(base + "/health", timeout=1) as response:
-                      health = json.loads(response.read())
-                  assert health == {"git": True, "ok": True}
+                      assert json.loads(response.read()) == {"git": True, "ok": True}
                   break
               except Exception:
                   time.sleep(0.1)
           else:
-              raise SystemExit("agent node did not become ready")
+              raise SystemExit("capsule service did not become ready")
 
-          body = json.dumps({"expected_head": head, "selector": "tests.test_safe"}).encode()
-          unauthorized = urllib.request.Request(base + "/run-tests", data=body, headers={"Content-Type": "application/json"}, method="POST")
+          bundle = capsule_service.source_bundle_sha256(head)
+          capsule = execution_capsule.build(
+              capsule_id="public-ci-fixture",
+              repository="AmazingBecca/fixture",
+              head=head,
+              tree=tree,
+              source_bundle_sha256=bundle,
+              operation={"kind": "python_unittest", "selector": "tests.test_safe"},
+              network_access="none",
+              max_seconds=60,
+              max_output_bytes=20000,
+              required_tools=[{"name": "python", "version": ".".join(str(x) for x in sys.version_info[:3])}],
+          )
+          unauthorized = urllib.request.Request(base + "/run-capsule", data=capsule, headers={"Content-Type": "application/json"}, method="POST")
           try:
               urllib.request.urlopen(unauthorized, timeout=5)
           except urllib.error.HTTPError as exc:
               assert exc.code == 401
           else:
-              raise SystemExit("unauthenticated test execution unexpectedly succeeded")
+              raise SystemExit("unauthenticated capsule execution unexpectedly succeeded")
 
-          authorized = urllib.request.Request(base + "/run-tests", data=body, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
+          authorized = urllib.request.Request(
+              base + "/run-capsule",
+              data=capsule,
+              headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+              method="POST",
+          )
           with urllib.request.urlopen(authorized, timeout=30) as response:
-              raw = response.read()
-          result = json.loads(raw)
-          assert result["head"] == head
-          assert len(result["tree"]) == 40
+              result = json.loads(response.read())
+          expected_capsule = execution_capsule.parse(capsule)["capsule_sha256"]
+          assert result["capsule_sha256"] == expected_capsule
+          assert result["source_bundle_sha256"] == bundle
+          assert result["head"] == head and result["tree"] == tree
           assert len(result["runtime_sha256"]) == 64
           assert result["selector"] == "tests.test_safe"
           assert result["returncode"] == 0
           assert hashlib.sha256(result["stdout"].encode()).hexdigest() == result["stdout_sha256"]
-          assert "OK" in result["stdout"]
-          print("LIVE_AGENT_NODE_OK")
-          print("head=" + result["head"])
-          print("tree=" + result["tree"])
+          assert result["advisory_only"] is True
+          assert result["promotion_authorized"] is False
+          assert result["completion_authorized"] is False
+          print("LIVE_EXECUTION_CAPSULE_OK")
+          print("capsule_sha256=" + result["capsule_sha256"])
+          print("source_bundle_sha256=" + result["source_bundle_sha256"])
           print("runtime_sha256=" + result["runtime_sha256"])
           print("stdout_sha256=" + result["stdout_sha256"])
           PY
