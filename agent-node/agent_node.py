@@ -75,6 +75,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
         timeout=900,
     )
     output = cp.stdout
+    returned_output = output[-20000:]
     after_head, after_tree = bound_source(expected_head)
     if (after_head, after_tree) != (head, tree):
         raise ValueError("repository source changed during test execution")
@@ -83,8 +84,8 @@ def run_tests(expected_head: str, selector: str) -> dict:
         "tree": tree,
         "selector": selector,
         "returncode": cp.returncode,
-        "stdout_sha256": hashlib.sha256(output.encode()).hexdigest(),
-        "stdout": output[-20000:],
+        "stdout_sha256": hashlib.sha256(returned_output.encode()).hexdigest(),
+        "stdout": returned_output,
     }
 
 
