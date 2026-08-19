@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v1"
+RUNTIME_POLICY = "agent-node-python-runtime-v2"
 
 
 def _resolve_git_bin() -> str:
@@ -138,6 +138,7 @@ def python_runtime_identity() -> tuple[str, str]:
         "binary_sha256": binary_sha256,
         "isolated_flag": "-I",
         "bytecode_flag": "-B",
+        "site_flag": "-S",
         "loader_env_scrubbed": True,
     }
     runtime_sha256 = hashlib.sha256(canonical(material)).hexdigest()
@@ -176,6 +177,7 @@ def bound_identity(expected: str) -> tuple[str, str]:
 def _tree_entries(expected_head: str) -> list[tuple[str, str, str]]:
     raw = git_bytes("ls-tree", "-r", "-z", "--full-tree", expected_head)
     entries: list[tuple[str, str, str]] = []
+    seen_paths: set[str] = set()
     for record in raw.split(b"\0"):
         if not record:
             continue
@@ -188,11 +190,15 @@ def _tree_entries(expected_head: str) -> list[tuple[str, str, str]]:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
             raise ValueError("unsafe Git tree path")
+        normalized_path = pure.as_posix()
+        if normalized_path in seen_paths:
+            raise ValueError(f"duplicate Git tree path: {normalized_path}")
+        seen_paths.add(normalized_path)
         if object_type != "blob" or mode not in {"100644", "100755"}:
             raise ValueError(f"unsupported Git tree entry: {mode} {object_type} {path}")
         if not SHA40.fullmatch(object_sha):
             raise ValueError("invalid Git blob identity")
-        entries.append((mode, object_sha, path))
+        entries.append((mode, object_sha, normalized_path))
     return entries
 
 
@@ -247,7 +253,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
     python_bin, runtime_sha256 = python_runtime_identity()
     with committed_snapshot(expected_head) as (head, tree, snapshot):
         cp = subprocess.run(
-            [python_bin, "-I", "-B", "-c", bootstrap, str(snapshot), selector],
+            [python_bin, "-I", "-B", "-S", "-c", bootstrap, str(snapshot), selector],
             cwd=snapshot,
             text=True,
             stdout=subprocess.PIPE,
