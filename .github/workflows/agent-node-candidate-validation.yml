@@ -1,0 +1,35 @@
+name: Agent Node Candidate Validation
+
+on:
+  push:
+    branches:
+      - hardening/agent-node-exact-worktree-v1
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch exact pushed source without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          unset GITHUB_TOKEN GH_TOKEN
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Compile and run exact agent-node regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 --version
+          python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_agent_node.py
+          python3 -B -m unittest discover -s agent-node/tests -v
