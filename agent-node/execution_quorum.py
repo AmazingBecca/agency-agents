@@ -5,11 +5,20 @@ import hashlib
 import json
 from typing import Any
 
-SCHEMA = "agent-node-execution-quorum/v1"
+SCHEMA = "agent-node-execution-quorum/v2"
 REQUIRED_RECEIPT_KEYS = {
-    "worker_id", "head", "tree", "runtime_sha256", "selector",
-    "returncode", "stdout_sha256", "environment_sha256"
+    "worker_id",
+    "capsule_sha256",
+    "source_bundle_sha256",
+    "head",
+    "tree",
+    "runtime_sha256",
+    "selector",
+    "returncode",
+    "stdout_sha256",
+    "environment_sha256",
 }
+
 
 class QuorumError(RuntimeError):
     pass
@@ -36,10 +45,18 @@ def verify_quorum(receipts: list[dict[str, Any]], *, threshold: int) -> dict[str
     for receipt in receipts:
         if not isinstance(receipt, dict) or set(receipt) != REQUIRED_RECEIPT_KEYS:
             raise QuorumError("receipt schema drift")
-        if not receipt["worker_id"] or receipt["worker_id"] in workers:
+        if not isinstance(receipt["worker_id"], str) or not receipt["worker_id"].strip() or receipt["worker_id"] in workers:
             raise QuorumError("worker identity must be unique")
         workers.add(receipt["worker_id"])
-        for field, length in (("head", 40), ("tree", 40), ("runtime_sha256", 64), ("stdout_sha256", 64), ("environment_sha256", 64)):
+        for field, length in (
+            ("capsule_sha256", 64),
+            ("source_bundle_sha256", 64),
+            ("head", 40),
+            ("tree", 40),
+            ("runtime_sha256", 64),
+            ("stdout_sha256", 64),
+            ("environment_sha256", 64),
+        ):
             if not _is_hex(receipt[field], length):
                 raise QuorumError(f"invalid {field}")
         if not isinstance(receipt["selector"], str) or not receipt["selector"]:
@@ -50,6 +67,8 @@ def verify_quorum(receipts: list[dict[str, Any]], *, threshold: int) -> dict[str
             raise QuorumError("environment identity must be unique")
         environments.add(receipt["environment_sha256"])
         agreed = {
+            "capsule_sha256": receipt["capsule_sha256"],
+            "source_bundle_sha256": receipt["source_bundle_sha256"],
             "head": receipt["head"],
             "tree": receipt["tree"],
             "selector": receipt["selector"],
