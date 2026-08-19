@@ -39,16 +39,31 @@ def bound_head(expected: str) -> str:
     return head
 
 
+def bound_source(expected: str) -> tuple[str, str]:
+    """Bind execution to an exact commit tree and a completely clean checkout."""
+    head = bound_head(expected)
+    dirty = git("status", "--porcelain=v1", "--untracked-files=all")
+    if dirty:
+        raise ValueError("working tree is not clean")
+    tree = git("rev-parse", "HEAD^{tree}")
+    if not SHA40.fullmatch(tree):
+        raise ValueError("tree identity is invalid")
+    return head, tree
+
+
 def repo_index(expected_head: str) -> dict:
-    head = bound_head(expected_head)
+    head, tree = bound_source(expected_head)
     files = git("ls-files").splitlines()
-    payload = {"repository_root": str(ROOT), "head": head, "files": files}
+    after_head, after_tree = bound_source(expected_head)
+    if (after_head, after_tree) != (head, tree):
+        raise ValueError("repository source changed during indexing")
+    payload = {"repository_root": str(ROOT), "head": head, "tree": tree, "files": files}
     payload["sha256"] = hashlib.sha256(canonical(payload)).hexdigest()
     return payload
 
 
 def run_tests(expected_head: str, selector: str) -> dict:
-    head = bound_head(expected_head)
+    head, tree = bound_source(expected_head)
     if not TEST_ALLOWLIST or selector not in TEST_ALLOWLIST:
         raise ValueError("test selector not allowlisted")
     cp = subprocess.run(
@@ -60,8 +75,12 @@ def run_tests(expected_head: str, selector: str) -> dict:
         timeout=900,
     )
     output = cp.stdout
+    after_head, after_tree = bound_source(expected_head)
+    if (after_head, after_tree) != (head, tree):
+        raise ValueError("repository source changed during test execution")
     return {
         "head": head,
+        "tree": tree,
         "selector": selector,
         "returncode": cp.returncode,
         "stdout_sha256": hashlib.sha256(output.encode()).hexdigest(),
@@ -70,7 +89,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
 
 
 def second_opinion(expected_head: str, compact_evidence: str) -> dict:
-    head = bound_head(expected_head)
+    head, tree = bound_source(expected_head)
     if not MODEL_NAME:
         raise ValueError("AGENT_NODE_MODEL is not configured")
     parsed = urllib.parse.urlparse(MODEL_ENDPOINT)
@@ -93,7 +112,10 @@ def second_opinion(expected_head: str, compact_evidence: str) -> dict:
     with urllib.request.urlopen(request, timeout=180) as response:
         raw = response.read()
     decoded = json.loads(raw)
-    return {"head": head, "model": MODEL_NAME, "response": decoded, "response_sha256": hashlib.sha256(raw).hexdigest()}
+    after_head, after_tree = bound_source(expected_head)
+    if (after_head, after_tree) != (head, tree):
+        raise ValueError("repository source changed during second-opinion execution")
+    return {"head": head, "tree": tree, "model": MODEL_NAME, "response": decoded, "response_sha256": hashlib.sha256(raw).hexdigest()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -116,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._send(200, {"ok": True, "root": str(ROOT), "git": (ROOT / ".git").exists()})
+            self._send(200, {"ok": True, "git": (ROOT / ".git").exists()})
             return
         self._send(404, {"error": "not found"})
 
