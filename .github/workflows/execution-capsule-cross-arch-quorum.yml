@@ -1,0 +1,207 @@
+name: Execution Capsule Cross-Arch Quorum
+
+on:
+  push:
+    branches:
+      - hardening/execution-capsule-toolchain-v1
+  pull_request:
+    branches:
+      - hardening/execution-receipt-quorum-v1
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  execute-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    outputs:
+      receipt: ${{ steps.execute.outputs.receipt }}
+    steps:
+      - name: Fetch exact candidate without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          unset GITHUB_TOKEN GH_TOKEN
+          git init .
+          git remote add origin https://github.com/AmazingBecca/agency-agents.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Execute deterministic capsule on x64
+        id: execute
+        shell: bash
+        env:
+          WORKER_ID: github-public-x64
+        run: |
+          set -Eeuo pipefail
+          export AGENT_NODE_TOOLCHAIN_DIR="$RUNNER_TEMP/tools"
+          bash agent-node/bootstrap_toolchain.sh >/dev/null
+          RUFF="$AGENT_NODE_TOOLCHAIN_DIR/ruff-venv/bin/ruff"
+          AST_GREP="$AGENT_NODE_TOOLCHAIN_DIR/ast-grep/node_modules/.bin/ast-grep"
+          python3 -B agent-node/toolchain_fingerprint.py "$RUFF" "$AST_GREP" > "$RUNNER_TEMP/toolchain.json"
+          fixture="$RUNNER_TEMP/fixture"
+          mkdir -p "$fixture/tests"
+          git -C "$fixture" init -q
+          git -C "$fixture" config user.email agent-node-quorum@example.invalid
+          git -C "$fixture" config user.name agent-node-quorum
+          printf '' > "$fixture/tests/__init__.py"
+          cat > "$fixture/tests/test_safe.py" <<'PY'
+          import unittest
+          class SafeTest(unittest.TestCase):
+              def test_live(self):
+                  self.assertEqual(2 + 2, 4)
+          PY
+          git -C "$fixture" add tests
+          GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git -C "$fixture" commit -qm reviewed
+          export AGENT_NODE_REPO_ROOT="$fixture"
+          export AGENT_NODE_REPOSITORY='AmazingBecca/quorum-fixture'
+          export AGENT_NODE_BEARER="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          export AGENT_NODE_TEST_ALLOWLIST='tests.test_safe'
+          python3 -B agent-node/capsule_service.py > "$RUNNER_TEMP/node.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          python3 - "$AGENT_NODE_BEARER" "$RUNNER_TEMP/toolchain.json" "$WORKER_ID" "$GITHUB_OUTPUT" <<'PY'
+          import hashlib,json,os,pathlib,sys,time,urllib.request
+          token, toolchain_path, worker_id, output_path = sys.argv[1:5]
+          sys.path.insert(0, str(pathlib.Path('agent-node').resolve()))
+          import capsule_service, execution_capsule
+          base='http://127.0.0.1:8765'
+          for _ in range(50):
+              try:
+                  urllib.request.urlopen(base+'/health', timeout=1).read(); break
+              except Exception: time.sleep(.1)
+          else: raise SystemExit('node not ready')
+          head=capsule_service.agent_node.git('rev-parse','HEAD')
+          tree=capsule_service.agent_node.git('rev-parse','HEAD^{tree}')
+          bundle=capsule_service.source_bundle_sha256(head)
+          pyver='.'.join(str(x) for x in sys.version_info[:3])
+          cap=execution_capsule.build(capsule_id='cross-arch-v1',repository='AmazingBecca/quorum-fixture',head=head,tree=tree,source_bundle_sha256=bundle,operation={'kind':'python_unittest','selector':'tests.test_safe'},network_access='none',max_seconds=60,max_output_bytes=20000,required_tools=[{'name':'python','version':pyver}])
+          req=urllib.request.Request(base+'/run-capsule',data=cap,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'},method='POST')
+          result=json.loads(urllib.request.urlopen(req,timeout=30).read())
+          toolchain=json.load(open(toolchain_path,encoding='utf-8'))
+          env_material={'runner_os':os.environ.get('RUNNER_OS',''),'runner_arch':os.environ.get('RUNNER_ARCH',''),'image_os':os.environ.get('ImageOS',''),'image_version':os.environ.get('ImageVersion',''),'runtime_sha256':result['runtime_sha256'],'toolchain_sha256':toolchain['toolchain_sha256']}
+          env_sha=hashlib.sha256((json.dumps(env_material,sort_keys=True,separators=(',',':'))+'\n').encode()).hexdigest()
+          receipt={'worker_id':worker_id,'capsule_sha256':result['capsule_sha256'],'source_bundle_sha256':result['source_bundle_sha256'],'head':result['head'],'tree':result['tree'],'runtime_sha256':result['runtime_sha256'],'selector':result['selector'],'returncode':result['returncode'],'stdout_sha256':result['stdout_sha256'],'environment_sha256':env_sha}
+          with open(output_path,'a',encoding='utf-8') as f: f.write('receipt='+json.dumps(receipt,sort_keys=True,separators=(',',':'))+'\n')
+          print('X64_CAPSULE_OK', json.dumps(receipt,sort_keys=True))
+          PY
+
+  execute-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 8
+    outputs:
+      receipt: ${{ steps.execute.outputs.receipt }}
+    steps:
+      - name: Fetch exact candidate without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          unset GITHUB_TOKEN GH_TOKEN
+          git init .
+          git remote add origin https://github.com/AmazingBecca/agency-agents.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Execute deterministic capsule on ARM64
+        id: execute
+        shell: bash
+        env:
+          WORKER_ID: github-public-arm64
+        run: |
+          set -Eeuo pipefail
+          export AGENT_NODE_TOOLCHAIN_DIR="$RUNNER_TEMP/tools"
+          bash agent-node/bootstrap_toolchain.sh >/dev/null
+          RUFF="$AGENT_NODE_TOOLCHAIN_DIR/ruff-venv/bin/ruff"
+          AST_GREP="$AGENT_NODE_TOOLCHAIN_DIR/ast-grep/node_modules/.bin/ast-grep"
+          python3 -B agent-node/toolchain_fingerprint.py "$RUFF" "$AST_GREP" > "$RUNNER_TEMP/toolchain.json"
+          fixture="$RUNNER_TEMP/fixture"
+          mkdir -p "$fixture/tests"
+          git -C "$fixture" init -q
+          git -C "$fixture" config user.email agent-node-quorum@example.invalid
+          git -C "$fixture" config user.name agent-node-quorum
+          printf '' > "$fixture/tests/__init__.py"
+          cat > "$fixture/tests/test_safe.py" <<'PY'
+          import unittest
+          class SafeTest(unittest.TestCase):
+              def test_live(self):
+                  self.assertEqual(2 + 2, 4)
+          PY
+          git -C "$fixture" add tests
+          GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git -C "$fixture" commit -qm reviewed
+          export AGENT_NODE_REPO_ROOT="$fixture"
+          export AGENT_NODE_REPOSITORY='AmazingBecca/quorum-fixture'
+          export AGENT_NODE_BEARER="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          export AGENT_NODE_TEST_ALLOWLIST='tests.test_safe'
+          python3 -B agent-node/capsule_service.py > "$RUNNER_TEMP/node.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          python3 - "$AGENT_NODE_BEARER" "$RUNNER_TEMP/toolchain.json" "$WORKER_ID" "$GITHUB_OUTPUT" <<'PY'
+          import hashlib,json,os,pathlib,sys,time,urllib.request
+          token, toolchain_path, worker_id, output_path = sys.argv[1:5]
+          sys.path.insert(0, str(pathlib.Path('agent-node').resolve()))
+          import capsule_service, execution_capsule
+          base='http://127.0.0.1:8765'
+          for _ in range(50):
+              try:
+                  urllib.request.urlopen(base+'/health', timeout=1).read(); break
+              except Exception: time.sleep(.1)
+          else: raise SystemExit('node not ready')
+          head=capsule_service.agent_node.git('rev-parse','HEAD')
+          tree=capsule_service.agent_node.git('rev-parse','HEAD^{tree}')
+          bundle=capsule_service.source_bundle_sha256(head)
+          pyver='.'.join(str(x) for x in sys.version_info[:3])
+          cap=execution_capsule.build(capsule_id='cross-arch-v1',repository='AmazingBecca/quorum-fixture',head=head,tree=tree,source_bundle_sha256=bundle,operation={'kind':'python_unittest','selector':'tests.test_safe'},network_access='none',max_seconds=60,max_output_bytes=20000,required_tools=[{'name':'python','version':pyver}])
+          req=urllib.request.Request(base+'/run-capsule',data=cap,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'},method='POST')
+          result=json.loads(urllib.request.urlopen(req,timeout=30).read())
+          toolchain=json.load(open(toolchain_path,encoding='utf-8'))
+          env_material={'runner_os':os.environ.get('RUNNER_OS',''),'runner_arch':os.environ.get('RUNNER_ARCH',''),'image_os':os.environ.get('ImageOS',''),'image_version':os.environ.get('ImageVersion',''),'runtime_sha256':result['runtime_sha256'],'toolchain_sha256':toolchain['toolchain_sha256']}
+          env_sha=hashlib.sha256((json.dumps(env_material,sort_keys=True,separators=(',',':'))+'\n').encode()).hexdigest()
+          receipt={'worker_id':worker_id,'capsule_sha256':result['capsule_sha256'],'source_bundle_sha256':result['source_bundle_sha256'],'head':result['head'],'tree':result['tree'],'runtime_sha256':result['runtime_sha256'],'selector':result['selector'],'returncode':result['returncode'],'stdout_sha256':result['stdout_sha256'],'environment_sha256':env_sha}
+          with open(output_path,'a',encoding='utf-8') as f: f.write('receipt='+json.dumps(receipt,sort_keys=True,separators=(',',':'))+'\n')
+          print('ARM64_CAPSULE_OK', json.dumps(receipt,sort_keys=True))
+          PY
+
+  verify-quorum:
+    needs: [execute-x64, execute-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Fetch exact quorum verifier without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          unset GITHUB_TOKEN GH_TOKEN
+          git init .
+          git remote add origin https://github.com/AmazingBecca/agency-agents.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Require heterogeneous execution agreement
+        shell: bash
+        env:
+          X64_RECEIPT: ${{ needs.execute-x64.outputs.receipt }}
+          ARM64_RECEIPT: ${{ needs.execute-arm64.outputs.receipt }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib,sys,os
+          sys.path.insert(0,str(pathlib.Path('agent-node').resolve()))
+          import execution_quorum
+          receipts=[json.loads(os.environ['X64_RECEIPT']),json.loads(os.environ['ARM64_RECEIPT'])]
+          q=execution_quorum.verify_quorum(receipts,threshold=2)
+          assert len(set(q['environment_ids'])) == 2
+          assert q['consensus']['capsule_sha256'] == receipts[0]['capsule_sha256'] == receipts[1]['capsule_sha256']
+          assert q['consensus']['source_bundle_sha256'] == receipts[0]['source_bundle_sha256'] == receipts[1]['source_bundle_sha256']
+          print('LIVE_CROSS_ARCH_QUORUM_OK')
+          print('quorum_sha256=' + q['quorum_sha256'])
+          print('capsule_sha256=' + q['consensus']['capsule_sha256'])
+          print('source_bundle_sha256=' + q['consensus']['source_bundle_sha256'])
+          print('environment_ids=' + ','.join(q['environment_ids']))
+          PY
