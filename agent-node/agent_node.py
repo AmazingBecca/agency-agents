@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v2"
+RUNTIME_POLICY = "agent-node-python-runtime-v1"
 
 
 def _resolve_git_bin() -> str:
@@ -138,7 +138,6 @@ def python_runtime_identity() -> tuple[str, str]:
         "binary_sha256": binary_sha256,
         "isolated_flag": "-I",
         "bytecode_flag": "-B",
-        "site_flag": "-S",
         "loader_env_scrubbed": True,
     }
     runtime_sha256 = hashlib.sha256(canonical(material)).hexdigest()
@@ -253,7 +252,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
     python_bin, runtime_sha256 = python_runtime_identity()
     with committed_snapshot(expected_head) as (head, tree, snapshot):
         cp = subprocess.run(
-            [python_bin, "-I", "-B", "-S", "-c", bootstrap, str(snapshot), selector],
+            [python_bin, "-I", "-B", "-c", bootstrap, str(snapshot), selector],
             cwd=snapshot,
             text=True,
             stdout=subprocess.PIPE,
