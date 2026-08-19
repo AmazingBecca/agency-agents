@@ -67,7 +67,7 @@ def run_tests(expected_head: str, selector: str) -> dict:
     if not TEST_ALLOWLIST or selector not in TEST_ALLOWLIST:
         raise ValueError("test selector not allowlisted")
     cp = subprocess.run(
-        [sys.executable, "-I", "-m", "unittest", selector, "-v"],
+        [sys.executable, "-I", "-B", "-m", "unittest", selector, "-v"],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
