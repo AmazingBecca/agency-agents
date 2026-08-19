@@ -4,10 +4,14 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import sys
 import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def load(name: str, path: pathlib.Path):
     spec = importlib.util.spec_from_file_location(name, path)
