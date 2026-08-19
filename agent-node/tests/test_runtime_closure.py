@@ -31,20 +31,42 @@ class RuntimeClosureTests(unittest.TestCase):
         self.assertRegex(after, r"^[0-9a-f]{64}$")
         self.assertNotEqual(before, after)
 
-    def test_runtime_tree_digest_ignores_disabled_site_and_bytecode_caches(self):
+    def test_runtime_tree_digest_ignores_disabled_site_but_binds_bytecode(self):
         self.assertTrue(hasattr(mod, "_runtime_tree_sha256"), "runtime tree digest helper is required")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
             (root / "json.py").write_text("VALUE = 1\n", encoding="utf-8")
-            before = mod._runtime_tree_sha256((root,))
-            (root / "__pycache__").mkdir()
-            (root / "__pycache__" / "json.cpython-test.pyc").write_bytes(b"ignored-cache")
+            baseline = mod._runtime_tree_sha256((root,))
+
             (root / "site-packages").mkdir()
             (root / "site-packages" / "evil.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
             (root / "dist-packages").mkdir()
             (root / "dist-packages" / "evil.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
+            after_disabled_site = mod._runtime_tree_sha256((root,))
+            self.assertEqual(baseline, after_disabled_site)
+
+            (root / "__pycache__").mkdir()
+            cached = root / "__pycache__" / "json.cpython-test.pyc"
+            cached.write_bytes(b"bound-cache-v1")
+            with_bytecode = mod._runtime_tree_sha256((root,))
+            cached.write_bytes(b"bound-cache-v2")
+            mutated_bytecode = mod._runtime_tree_sha256((root,))
+
+        self.assertNotEqual(after_disabled_site, with_bytecode)
+        self.assertNotEqual(with_bytecode, mutated_bytecode)
+
+    def test_runtime_tree_digest_binds_file_symlink_and_target_bytes(self):
+        self.assertTrue(hasattr(mod, "_runtime_tree_sha256"), "runtime tree digest helper is required")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            target = root / "real_config.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            link = root / "runtime_config.py"
+            link.symlink_to(target.name)
+            before = mod._runtime_tree_sha256((root,))
+            target.write_text("VALUE = 2\n", encoding="utf-8")
             after = mod._runtime_tree_sha256((root,))
-        self.assertEqual(before, after)
+        self.assertNotEqual(before, after)
 
     def test_runtime_identity_includes_runtime_tree_digest(self):
         self.assertTrue(hasattr(mod, "_runtime_roots"), "runtime root discovery is required")
