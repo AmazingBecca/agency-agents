@@ -35,16 +35,27 @@ jobs:
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
-      - name: Download pinned deterministic toolchain
+      - name: Bootstrap and fingerprint pinned deterministic toolchain
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 -m pip install --user --disable-pip-version-check 'ruff==0.16.3'
-          npm install --prefix "$RUNNER_TEMP/ast-grep" --no-save '@ast-grep/cli@0.45.1'
-          "$HOME/.local/bin/ruff" --version | grep -Fx 'ruff 0.16.3'
-          "$RUNNER_TEMP/ast-grep/node_modules/.bin/ast-grep" --version | grep -F '0.45.1'
-          "$HOME/.local/bin/ruff" check --select E9,F63,F7,F82 agent-node
-          "$RUNNER_TEMP/ast-grep/node_modules/.bin/ast-grep" --pattern 'subprocess.run($$$ARGS)' --lang python agent-node/agent_node.py >/dev/null
+          export AGENT_NODE_TOOLCHAIN_DIR="$RUNNER_TEMP/amazingbecca-tools"
+          bash agent-node/bootstrap_toolchain.sh
+          RUFF="$AGENT_NODE_TOOLCHAIN_DIR/ruff-venv/bin/ruff"
+          AST_GREP="$AGENT_NODE_TOOLCHAIN_DIR/ast-grep/node_modules/.bin/ast-grep"
+          "$RUFF" check --select E9,F63,F7,F82 agent-node
+          "$AST_GREP" --pattern 'subprocess.run($$$ARGS)' --lang python agent-node/agent_node.py >/dev/null
+          python3 -B agent-node/toolchain_fingerprint.py "$RUFF" "$AST_GREP" | tee "$RUNNER_TEMP/toolchain-fingerprint.json"
+          python3 - "$RUNNER_TEMP/toolchain-fingerprint.json" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert value['schema']=='amazingbecca-toolchain-fingerprint/v1'
+          assert len(value['toolchain_sha256'])==64
+          assert [x['name'] for x in value['tools']]==['ast-grep','ruff']
+          assert value['tools'][0]['version'].endswith('0.45.1')
+          assert value['tools'][1]['version']=='ruff 0.16.3'
+          print('TOOLCHAIN_FINGERPRINT_OK=' + value['toolchain_sha256'])
+          PY
 
       - name: Compile and run exact agent-node regressions
         shell: bash
@@ -56,6 +67,7 @@ jobs:
             agent-node/execution_quorum.py \
             agent-node/execution_capsule.py \
             agent-node/capsule_service.py \
+            agent-node/toolchain_fingerprint.py \
             agent-node/tests/test_agent_node.py \
             agent-node/tests/test_execution_quorum.py \
             agent-node/tests/test_execution_capsule.py
