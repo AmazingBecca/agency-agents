@@ -51,9 +51,18 @@ class AgentNodeAdversarialPathTests(unittest.TestCase):
             b"100644 test_safe.py\0" + bytes.fromhex(passing_blob)
             + b"100644 test_safe.py\0" + bytes.fromhex(failing_blob)
         )
-        tree = git(repo, "hash-object", "-t", "tree", "-w", "--stdin", input_bytes=raw_tree)
+        tree = git(
+            repo,
+            "hash-object",
+            "--literally",
+            "-t",
+            "tree",
+            "-w",
+            "--stdin",
+            input_bytes=raw_tree,
+        )
         commit = git(repo, "commit-tree", tree, "-m", "malformed duplicate path")
-        git(repo, "reset", "--hard", "-q", commit)
+        git(repo, "update-ref", "HEAD", commit)
 
         with mock.patch.object(mod, "ROOT", repo):
             with self.assertRaisesRegex(ValueError, "duplicate Git tree path"):
