@@ -17,12 +17,12 @@ spec.loader.exec_module(mod)
 
 class RuntimeZipArchiveTests(unittest.TestCase):
     @staticmethod
-    def _write_archive(path: pathlib.Path, value: str) -> None:
+    def _write_archive(path: pathlib.Path, value: str, *, member: str = "runtime_probe.py") -> None:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
-            archive.writestr("runtime_probe.py", f"VALUE = {value!r}\n")
+            archive.writestr(member, f"VALUE = {value!r}\n")
 
     @staticmethod
-    def _import_from_archive(path: pathlib.Path) -> str:
+    def _import_from_archive(path: pathlib.Path | str) -> str:
         code = (
             "import sys;"
             "sys.path.insert(0, sys.argv[1]);"
@@ -61,6 +61,32 @@ class RuntimeZipArchiveTests(unittest.TestCase):
             before,
             after,
             "runtime identity must bind executable standard-library zip archive bytes",
+        )
+
+    def test_zip_subdirectory_entry_binds_containing_archive(self):
+        """A sys.path entry inside a ZIP must bind the containing archive bytes."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lib = pathlib.Path(temp_dir) / "lib"
+            root = lib / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            root.mkdir(parents=True)
+            (root / "runtime_anchor.py").write_text("VALUE = 'anchor'\n", encoding="utf-8")
+            archive = lib / "runtime.zip"
+            search_entry = f"{archive}/inside"
+
+            self._write_archive(archive, "one", member="inside/runtime_probe.py")
+            self.assertEqual(self._import_from_archive(search_entry), "one")
+            with mock.patch.object(mod, "_runtime_roots", return_value=(root,)), mock.patch.object(
+                mod.sys, "path", [search_entry, str(root)]
+            ):
+                _python, before = mod.python_runtime_identity()
+                self._write_archive(archive, "two", member="inside/runtime_probe.py")
+                self.assertEqual(self._import_from_archive(search_entry), "two")
+                _python, after = mod.python_runtime_identity()
+
+        self.assertNotEqual(
+            before,
+            after,
+            "runtime identity must bind a ZIP container referenced through a sys.path subdirectory",
         )
 
 
