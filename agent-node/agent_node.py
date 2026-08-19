@@ -27,8 +27,7 @@ MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
 RUNTIME_POLICY = "agent-node-python-runtime-v2"
-RUNTIME_IGNORED_DIRS = frozenset({"__pycache__", "site-packages", "dist-packages"})
-RUNTIME_IGNORED_SUFFIXES = frozenset({".pyc", ".pyo"})
+RUNTIME_IGNORED_DIRS = frozenset({"site-packages", "dist-packages"})
 
 
 def _resolve_git_bin() -> str:
@@ -161,21 +160,38 @@ def _runtime_tree_sha256(roots: tuple[pathlib.Path, ...]) -> str:
                     raise RuntimeError(f"Python runtime tree contains a directory symlink: {child}")
             for filename in sorted(filenames):
                 path = directory / filename
-                if path.suffix in RUNTIME_IGNORED_SUFFIXES:
-                    continue
+                relative = path.relative_to(root).as_posix()
                 if path.is_symlink():
-                    raise RuntimeError(f"Python runtime tree contains a file symlink: {path}")
+                    try:
+                        link_target = os.readlink(path)
+                        resolved_target = path.resolve(strict=True)
+                        target_metadata = resolved_target.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise RuntimeError(f"Python runtime symlink cannot be resolved: {path}") from exc
+                    if not stat.S_ISREG(target_metadata.st_mode):
+                        raise RuntimeError(f"Python runtime symlink target is not a regular file: {path}")
+                    records.append(
+                        {
+                            "root": root_index,
+                            "path": relative,
+                            "kind": "symlink-file",
+                            "link_target": link_target,
+                            "target_size": target_metadata.st_size,
+                            "target_sha256": _stable_regular_file_sha256(resolved_target),
+                        }
+                    )
+                    continue
                 try:
                     metadata = path.stat(follow_symlinks=False)
                 except OSError as exc:
                     raise RuntimeError(f"Python runtime tree entry cannot be inspected: {path}") from exc
                 if not stat.S_ISREG(metadata.st_mode):
                     raise RuntimeError(f"Python runtime tree entry is not a regular file: {path}")
-                relative = path.relative_to(root).as_posix()
                 records.append(
                     {
                         "root": root_index,
                         "path": relative,
+                        "kind": "file",
                         "mode": stat.S_IMODE(metadata.st_mode),
                         "size": metadata.st_size,
                         "sha256": _stable_regular_file_sha256(path),
