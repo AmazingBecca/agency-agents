@@ -1,8 +1,10 @@
+import hashlib
 import importlib.util
 import pathlib
 import subprocess
 import tempfile
 import unittest
+import zlib
 from unittest import mock
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "agent_node.py"
@@ -36,6 +38,15 @@ def git(repo: pathlib.Path, *args: str, input_bytes: bytes | None = None) -> str
     return cp.stdout.decode().strip()
 
 
+def write_raw_git_object(repo: pathlib.Path, object_type: str, payload: bytes) -> str:
+    material = object_type.encode("ascii") + b" " + str(len(payload)).encode("ascii") + b"\0" + payload
+    object_id = hashlib.sha1(material).hexdigest()
+    path = repo / ".git" / "objects" / object_id[:2] / object_id[2:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(zlib.compress(material))
+    return object_id
+
+
 class AgentNodeAdversarialPathTests(unittest.TestCase):
     def test_duplicate_git_tree_path_is_rejected_before_materialization(self):
         temp = tempfile.TemporaryDirectory()
@@ -51,9 +62,9 @@ class AgentNodeAdversarialPathTests(unittest.TestCase):
             b"100644 test_safe.py\0" + bytes.fromhex(passing_blob)
             + b"100644 test_safe.py\0" + bytes.fromhex(failing_blob)
         )
-        tree = git(repo, "hash-object", "-t", "tree", "-w", "--stdin", input_bytes=raw_tree)
+        tree = write_raw_git_object(repo, "tree", raw_tree)
         commit = git(repo, "commit-tree", tree, "-m", "malformed duplicate path")
-        git(repo, "reset", "--hard", "-q", commit)
+        git(repo, "update-ref", "HEAD", commit)
 
         with mock.patch.object(mod, "ROOT", repo):
             with self.assertRaisesRegex(ValueError, "duplicate Git tree path"):
