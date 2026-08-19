@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - hardening/agent-node-exact-worktree-v1
+  pull_request:
+    branches:
+      - infra/agent-node-bootstrap-v1
+    types: [opened, synchronize, reopened]
 
 permissions: {}
 
@@ -12,10 +16,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Fetch exact pushed source without workflow credentials
+      - name: Fetch exact candidate source without workflow credentials
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
