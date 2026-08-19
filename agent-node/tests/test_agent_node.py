@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import pathlib
 import unittest
@@ -49,6 +50,20 @@ class AgentNodeContractTests(unittest.TestCase):
              mock.patch.object(mod.subprocess, "run", return_value=completed):
             with self.assertRaisesRegex(ValueError, "changed during test"):
                 mod.run_tests("a" * 40, "tests.test_safe")
+
+    def test_test_stdout_digest_binds_exact_returned_bytes(self):
+        full_output = "prefix-" + ("x" * 25000)
+        completed = mock.Mock(returncode=0, stdout=full_output)
+        with mock.patch.object(mod, "TEST_ALLOWLIST", ("tests.test_safe",)), \
+             mock.patch.object(mod, "bound_source", side_effect=[("a" * 40, "b" * 40), ("a" * 40, "b" * 40)]), \
+             mock.patch.object(mod.subprocess, "run", return_value=completed) as run:
+            result = mod.run_tests("a" * 40, "tests.test_safe")
+        self.assertEqual(len(result["stdout"]), 20000)
+        self.assertEqual(result["stdout"], full_output[-20000:])
+        self.assertEqual(result["stdout_sha256"], hashlib.sha256(result["stdout"].encode()).hexdigest())
+        argv = run.call_args.args[0]
+        self.assertIn("-I", argv)
+        self.assertIn("-B", argv)
 
     def test_model_endpoint_is_loopback_only(self):
         with mock.patch.object(mod, "MODEL_NAME", "qwen"), mock.patch.object(mod, "MODEL_ENDPOINT", "https://example.com/v1/chat/completions"), mock.patch.object(mod, "bound_source", return_value=("a" * 40, "b" * 40)):
