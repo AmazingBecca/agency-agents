@@ -1,0 +1,17 @@
+{
+  "schema": "amazingbecca-toolchain/v1",
+  "tools": [
+    {
+      "name": "ast-grep",
+      "package": "@ast-grep/cli",
+      "source": "npm",
+      "version": "0.45.1"
+    },
+    {
+      "name": "ruff",
+      "package": "ruff",
+      "source": "uv",
+      "version": "0.16.3"
+    }
+  ]
+}
