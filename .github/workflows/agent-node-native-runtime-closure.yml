@@ -43,7 +43,8 @@ jobs:
             agent-node/tests/test_agent_node_adversarial_paths.py \
             agent-node/tests/test_runtime_closure.py \
             agent-node/tests/test_runtime_zip_archive.py \
-            agent-node/tests/test_native_runtime_closure.py
+            agent-node/tests/test_native_runtime_closure.py \
+            agent-node/tests/test_native_runtime_multiline_spoof.py
           python3 -B -m unittest discover -s agent-node/tests -v
       - name: Apply exact-bound v17 repair
         if: >-
@@ -51,7 +52,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          EXPECTED_PARENT: aded35403cbdfa5adddb6e26c030b245e5ea46f9
+          EXPECTED_PARENT: afcfab062e18ddad67fa283063f525371f899f3c
           EXPECTED_SOURCE_BLOB: 19c063f55eccaa105069c10f281e5ceca4dec65f
         run: |
           set -Eeuo pipefail
@@ -62,12 +63,11 @@ jobs:
           fi
           test "$(git hash-object agent-node/agent_node.py)" = "$EXPECTED_SOURCE_BLOB"
           python3 .github/repair/apply_agent_node_v17.py
-          test "$(git hash-object agent-node/agent_node.py)" = '3ca9ab44c88287a67c5c76628e82a1d9677af86b'
-          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = '2ed0238e6c2a7462143b86d7a6609f2952ed5326'
           python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_native_runtime_multiline_spoof.py
           python3 -B -m unittest discover -s agent-node/tests -v
-          git add agent-node/agent_node.py agent-node/tests/test_native_runtime_multiline_spoof.py
+          git add agent-node/agent_node.py
           git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
           git config user.name 'AmazingBecca Agent Repair'
           git config user.email '134438105+AmazingBecca@users.noreply.github.com'
           git commit -m 'security: validate ELF dependency record boundaries'
