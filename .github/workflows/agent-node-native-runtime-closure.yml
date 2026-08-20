@@ -9,8 +9,7 @@ on:
       - hardening/agent-node-runtime-closure-v1
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   validate:
@@ -28,7 +27,7 @@ jobs:
           test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
           git init .
           git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
-          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=2 origin "$EXPECTED_SHA"
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - name: Compile and run exact native-runtime regressions
@@ -46,30 +45,3 @@ jobs:
             agent-node/tests/test_native_runtime_closure.py \
             agent-node/tests/test_native_runtime_multiline_spoof.py
           python3 -B -m unittest discover -s agent-node/tests -v
-      - name: Apply exact-bound v17 repair
-        if: >-
-          ${{ always() && github.event_name == 'pull_request' }}
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          EXPECTED_PARENT: afcfab062e18ddad67fa283063f525371f899f3c
-          EXPECTED_SOURCE_BLOB: 19c063f55eccaa105069c10f281e5ceca4dec65f
-        run: |
-          set -Eeuo pipefail
-          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-          if [ "$(git rev-parse HEAD^)" != "$EXPECTED_PARENT" ]; then
-            echo 'exact-bound repair gate inactive for this head'
-            exit 0
-          fi
-          test "$(git hash-object agent-node/agent_node.py)" = "$EXPECTED_SOURCE_BLOB"
-          python3 .github/repair/apply_agent_node_v17.py
-          python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_native_runtime_multiline_spoof.py
-          python3 -B -m unittest discover -s agent-node/tests -v
-          git add agent-node/agent_node.py
-          git diff --cached --check
-          test -n "$(git diff --cached --name-only)"
-          git config user.name 'AmazingBecca Agent Repair'
-          git config user.email '134438105+AmazingBecca@users.noreply.github.com'
-          git commit -m 'security: validate ELF dependency record boundaries'
-          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
-          git -c credential.helper= -c "http.extraHeader=AUTHORIZATION: basic $auth" push origin HEAD:hardening/agent-node-native-runtime-closure-v1
