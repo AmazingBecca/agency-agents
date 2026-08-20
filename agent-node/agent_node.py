@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v15"
+RUNTIME_POLICY = "agent-node-python-runtime-v16"
 
 
 def _resolve_git_bin() -> str:
@@ -398,6 +398,8 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
     for raw_line in cp.stdout.splitlines():
         line = raw_line[1:] if raw_line.startswith("\t") else raw_line
         if not line:
+            continue
+        if line == "statically linked":
             continue
         if address_suffix.search(line) is None:
             raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
