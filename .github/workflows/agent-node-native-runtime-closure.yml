@@ -126,7 +126,7 @@ jobs:
 
           test "$(git hash-object agent-node/agent_node.py)" = '6d58e0dee61de0f8b0feb6b05684695f2751db37'
           test "$(grep -c '^permissions: {}$' .github/workflows/agent-node-native-runtime-closure.yml)" = 1
-          git add agent-node/agent_node.py agent-node/tests/test_native_runtime_zero_fill_candidate_builder.py .github/workflows/agent-node-native-runtime-closure.yml
+          git add agent-node/agent_node.py .github/workflows/agent-node-native-runtime-closure.yml
           test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' '.github/workflows/agent-node-native-runtime-closure.yml' 'agent-node/agent_node.py' 'agent-node/tests/test_native_runtime_zero_fill_candidate_builder.py' | sort)"
 
           git config user.name 'AmazingBecca Runtime Closure'
