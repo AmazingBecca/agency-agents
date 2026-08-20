@@ -10,6 +10,7 @@ import pathlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v18"
+RUNTIME_POLICY = "agent-node-python-runtime-v19"
 
 
 def _resolve_git_bin() -> str:
@@ -371,9 +372,119 @@ def _runtime_archive_sha256(search_paths: tuple[str, ...] | None = None) -> str:
     return digest
 
 
+def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
+    """Read exact DT_NEEDED strings from ELF bytes so ldd line boundaries are not authority."""
+    resolved = path.resolve(strict=True)
+    data = resolved.read_bytes()
+    if len(data) < 16 or data[:4] != b"\x7fELF":
+        raise RuntimeError(f"native runtime candidate is not a supported ELF file: {path}")
+
+    elf_class = data[4]
+    elf_data = data[5]
+    if elf_data == 1:
+        prefix = "<"
+    elif elf_data == 2:
+        prefix = ">"
+    else:
+        raise RuntimeError(f"unsupported ELF byte order for native runtime candidate: {path}")
+
+    if elf_class == 2:
+        header_format = prefix + "HHIQQQIHHHHHH"
+        program_format = prefix + "IIQQQQQQ"
+        dynamic_format = prefix + "qQ"
+    elif elf_class == 1:
+        header_format = prefix + "HHIIIIIHHHHHH"
+        program_format = prefix + "IIIIIIII"
+        dynamic_format = prefix + "iI"
+    else:
+        raise RuntimeError(f"unsupported ELF class for native runtime candidate: {path}")
+
+    header_size = struct.calcsize(header_format)
+    if 16 + header_size > len(data):
+        raise RuntimeError(f"truncated ELF header for native runtime candidate: {path}")
+    header = struct.unpack_from(header_format, data, 16)
+    program_offset = header[4]
+    program_entry_size = header[8]
+    program_count = header[9]
+    required_program_size = struct.calcsize(program_format)
+    if program_count == 0xFFFF or program_entry_size < required_program_size:
+        raise RuntimeError(f"unsupported ELF program-header layout for native runtime candidate: {path}")
+
+    loads: list[tuple[int, int, int]] = []
+    dynamic_region: tuple[int, int] | None = None
+    for index in range(program_count):
+        offset = program_offset + index * program_entry_size
+        if offset + required_program_size > len(data):
+            raise RuntimeError(f"truncated ELF program headers for native runtime candidate: {path}")
+        values = struct.unpack_from(program_format, data, offset)
+        if elf_class == 2:
+            p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, _memsz, _align = values
+        else:
+            p_type, p_offset, p_vaddr, _paddr, p_filesz, _memsz, _flags, _align = values
+        if p_offset + p_filesz > len(data):
+            raise RuntimeError(f"ELF segment exceeds file bytes for native runtime candidate: {path}")
+        if p_type == 1:
+            loads.append((p_offset, p_vaddr, p_filesz))
+        elif p_type == 2:
+            dynamic_region = (p_offset, p_filesz)
+
+    if dynamic_region is None:
+        return ()
+
+    dynamic_offset, dynamic_size = dynamic_region
+    dynamic_entry_size = struct.calcsize(dynamic_format)
+    if dynamic_size % dynamic_entry_size != 0:
+        raise RuntimeError(f"invalid ELF dynamic table for native runtime candidate: {path}")
+
+    needed_offsets: list[int] = []
+    string_table_vaddr: int | None = None
+    string_table_size: int | None = None
+    for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
+        tag, value = struct.unpack_from(dynamic_format, data, offset)
+        if tag == 0:
+            break
+        if tag == 1:
+            needed_offsets.append(value)
+        elif tag == 5:
+            string_table_vaddr = value
+        elif tag == 10:
+            string_table_size = value
+
+    if not needed_offsets:
+        return ()
+    if string_table_vaddr is None or string_table_size is None:
+        raise RuntimeError(f"ELF dynamic strings are unavailable for native runtime candidate: {path}")
+
+    string_table_offset: int | None = None
+    for p_offset, p_vaddr, p_filesz in loads:
+        if p_vaddr <= string_table_vaddr < p_vaddr + p_filesz:
+            string_table_offset = p_offset + (string_table_vaddr - p_vaddr)
+            break
+    if string_table_offset is None:
+        raise RuntimeError(f"ELF dynamic string table is unmapped for native runtime candidate: {path}")
+    string_table_end = string_table_offset + string_table_size
+    if string_table_end > len(data):
+        raise RuntimeError(f"ELF dynamic string table exceeds file bytes for native runtime candidate: {path}")
+
+    names: list[bytes] = []
+    for needed_offset in needed_offsets:
+        start = string_table_offset + needed_offset
+        if start < string_table_offset or start >= string_table_end:
+            raise RuntimeError(f"ELF DT_NEEDED offset is invalid for native runtime candidate: {path}")
+        end = data.find(b"\0", start, string_table_end)
+        if end < 0:
+            raise RuntimeError(f"ELF DT_NEEDED string is unterminated for native runtime candidate: {path}")
+        names.append(data[start:end])
+    return tuple(names)
+
+
 def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
     if not sys.platform.startswith("linux") or not LDD_BIN:
         raise RuntimeError("native runtime dependency discovery is supported only on Linux")
+    if path.exists():
+        needed_names = _elf_needed_name_bytes(path)
+        if any(b"\n" in name or b"\r" in name for name in needed_names):
+            raise RuntimeError(f"unsupported multiline DT_NEEDED record for native runtime candidate: {path}")
     env = _python_env()
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
