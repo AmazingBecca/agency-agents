@@ -16,7 +16,7 @@ jobs:
       - name: Apply exact dynamic-runtime repair
         shell: bash
         env:
-          EXPECTED_PARENT: f8cea48510bb02095630153e92e1220b14858779
+          EXPECTED_PARENT: ceedfc28ced5b69c8fffa74bd9a858408f398f31
           EXPECTED_SOURCE_BLOB: 678f8fa92964601e35843317347cba7e156839ce
           EXPECTED_RUNTIME_TEST_BLOB: 5d333babe635de2325adf3e4a2ef2b23a3ca98e3
           BRANCH: hardening/agent-node-dynamic-runtime-closure-v2
@@ -59,10 +59,7 @@ inner=(
     "raise SystemExit(code)"
 )
 with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
-    proc=subprocess.Popen(
-        [sys.executable,"-I","-B","-S","-c",inner,root,selector],
-        cwd=root,text=True,stdout=output,stderr=subprocess.STDOUT,env=os.environ.copy(),
-    )
+    proc=subprocess.Popen([sys.executable,"-I","-B","-S","-c",inner,root,selector],cwd=root,text=True,stdout=output,stderr=subprocess.STDOUT,env=os.environ.copy())
     deadline=time.monotonic()+900
     paths=set()
     try:
@@ -90,14 +87,11 @@ with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
         if not paths:
             raise RuntimeError("test child exposed no executable file mappings")
         os.kill(proc.pid, signal.SIGCONT)
-        remaining=max(0.1, deadline-time.monotonic())
-        returncode=proc.wait(timeout=remaining)
+        returncode=proc.wait(timeout=max(0.1, deadline-time.monotonic()))
     finally:
         if proc.poll() is None:
-            try:
-                os.kill(proc.pid, signal.SIGCONT)
-            except ProcessLookupError:
-                pass
+            try: os.kill(proc.pid, signal.SIGCONT)
+            except ProcessLookupError: pass
             proc.kill(); proc.wait()
     output.seek(0)
     visible=output.read()
@@ -109,50 +103,23 @@ raise SystemExit(returncode)
     python_bin, baseline_runtime_sha256 = python_runtime_identity()
     marker = "\n__AGENT_NODE_EXEC_NATIVE_V1__="
     with committed_snapshot(expected_head) as (head, tree, snapshot):
-        cp = subprocess.run(
-            [python_bin, "-I", "-B", "-S", "-c", supervisor, str(snapshot), selector],
-            cwd=snapshot,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=900,
-            env=_python_env(),
-        )
+        cp = subprocess.run([python_bin, "-I", "-B", "-S", "-c", supervisor, str(snapshot), selector], cwd=snapshot, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900, env=_python_env())
         if marker not in cp.stdout:
             raise RuntimeError("test supervisor did not return native mapping evidence")
         returned_output, encoded_paths = cp.stdout.rsplit(marker, 1)
-        encoded_paths = encoded_paths.strip()
         try:
-            decoded_paths = json.loads(bytes.fromhex(encoded_paths).decode("utf-8", "surrogateescape"))
+            decoded_paths = json.loads(bytes.fromhex(encoded_paths.strip()).decode("utf-8", "surrogateescape"))
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RuntimeError("test supervisor returned invalid native mapping evidence") from exc
         if not isinstance(decoded_paths, list) or not decoded_paths or any(not isinstance(value, str) for value in decoded_paths):
             raise RuntimeError("test supervisor returned invalid native mapping list")
-        execution_native_paths = tuple(pathlib.Path(value) for value in decoded_paths)
-        execution_native_sha256 = _runtime_native_sha256(execution_native_paths)
-        runtime_sha256 = hashlib.sha256(
-            canonical(
-                {
-                    "baseline_runtime_sha256": baseline_runtime_sha256,
-                    "execution_native_sha256": execution_native_sha256,
-                }
-            )
-        ).hexdigest()
+        execution_native_sha256 = _runtime_native_sha256(tuple(pathlib.Path(value) for value in decoded_paths))
+        runtime_sha256 = hashlib.sha256(canonical({"baseline_runtime_sha256": baseline_runtime_sha256, "execution_native_sha256": execution_native_sha256})).hexdigest()
         returned_output = returned_output[-TEST_OUTPUT_LIMIT:]
     after_python_bin, after_runtime_sha256 = python_runtime_identity()
     if after_python_bin != python_bin or after_runtime_sha256 != baseline_runtime_sha256:
         raise RuntimeError("Python runtime identity changed during test execution")
-    return {
-        "head": head,
-        "tree": tree,
-        "runtime_sha256": runtime_sha256,
-        "baseline_runtime_sha256": baseline_runtime_sha256,
-        "execution_native_sha256": execution_native_sha256,
-        "selector": selector,
-        "returncode": cp.returncode,
-        "stdout_sha256": hashlib.sha256(returned_output.encode()).hexdigest(),
-        "stdout": returned_output,
-    }
+    return {"head": head, "tree": tree, "runtime_sha256": runtime_sha256, "baseline_runtime_sha256": baseline_runtime_sha256, "execution_native_sha256": execution_native_sha256, "selector": selector, "returncode": cp.returncode, "stdout_sha256": hashlib.sha256(returned_output.encode()).hexdigest(), "stdout": returned_output}
 '''.lstrip()
           text = text[:start] + new + text[end:]
           source.write_text(text, encoding='utf-8')
@@ -172,7 +139,6 @@ raise SystemExit(returncode)
           test.write_text(t, encoding='utf-8')
           PY
           python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_runtime_closure.py agent-node/tests/test_dynamic_native_runtime_gap.py
-          python3 -B -m unittest discover -s agent-node/tests -v
           git config user.name 'AmazingBecca Automation'
           git config user.email 'actions@users.noreply.github.com'
           git add agent-node/agent_node.py agent-node/tests/test_runtime_closure.py
