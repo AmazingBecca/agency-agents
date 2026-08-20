@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v19"
+RUNTIME_POLICY = "agent-node-python-runtime-v20"
 
 
 def _resolve_git_bin() -> str:
@@ -411,7 +411,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         raise RuntimeError(f"unsupported ELF program-header layout for native runtime candidate: {path}")
 
     loads: list[tuple[int, int, int]] = []
-    dynamic_region: tuple[int, int] | None = None
+    dynamic_region: tuple[int, int, int] | None = None
     for index in range(program_count):
         offset = program_offset + index * program_entry_size
         if offset + required_program_size > len(data):
@@ -426,12 +426,24 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         if p_type == 1:
             loads.append((p_offset, p_vaddr, p_filesz))
         elif p_type == 2:
-            dynamic_region = (p_offset, p_filesz)
+            dynamic_region = (p_offset, p_vaddr, p_filesz)
 
     if dynamic_region is None:
         return ()
 
-    dynamic_offset, dynamic_size = dynamic_region
+    dynamic_file_offset, dynamic_vaddr, dynamic_size = dynamic_region
+    mapped_offsets: set[int] = set()
+    for load_offset, load_vaddr, load_filesz in loads:
+        if load_vaddr <= dynamic_vaddr and dynamic_vaddr + dynamic_size <= load_vaddr + load_filesz:
+            mapped_offset = load_offset + (dynamic_vaddr - load_vaddr)
+            if mapped_offset + dynamic_size > len(data):
+                raise RuntimeError(f"ELF PT_DYNAMIC virtual mapping exceeds file bytes for native runtime candidate: {path}")
+            mapped_offsets.add(mapped_offset)
+    if len(mapped_offsets) != 1:
+        raise RuntimeError(f"ELF PT_DYNAMIC virtual address has no unique PT_LOAD mapping for native runtime candidate: {path}")
+    dynamic_offset = next(iter(mapped_offsets))
+    if dynamic_file_offset != dynamic_offset:
+        raise RuntimeError(f"ELF PT_DYNAMIC file offset disagrees with loaded virtual-address mapping for native runtime candidate: {path}")
     dynamic_entry_size = struct.calcsize(dynamic_format)
     if dynamic_size % dynamic_entry_size != 0:
         raise RuntimeError(f"invalid ELF dynamic table for native runtime candidate: {path}")
