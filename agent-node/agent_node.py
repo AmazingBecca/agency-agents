@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v6"
+RUNTIME_POLICY = "agent-node-python-runtime-v7"
 
 
 def _resolve_git_bin() -> str:
@@ -94,14 +94,14 @@ def _git_env() -> dict[str, str]:
 
 
 def _python_env() -> dict[str, str]:
-    """Remove interpreter and dynamic-loader injection variables for child Python."""
+    """Remove interpreter, loader, and shell-startup injection variables for child Python/tools."""
     env = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("PYTHON")
         and not key.startswith("LD_")
         and not key.startswith("DYLD_")
-        and key not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__"}
+        and key not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "BASH_ENV", "ENV"}
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
@@ -387,6 +387,7 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
         raise RuntimeError(f"native runtime dependency discovery failed for {path}: {text.strip()}")
 
     dependencies: set[pathlib.Path] = set()
+    address_suffix = re.compile(r"\s+\(0x[0-9a-fA-F]+\)\s*$")
     for raw_line in cp.stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -394,9 +395,9 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
         candidate = ""
         if "=>" in line:
             _name, rhs = line.split("=>", 1)
-            candidate = rhs.strip().split()[0] if rhs.strip() else ""
+            candidate = address_suffix.sub("", rhs.strip())
         elif line.startswith("/"):
-            candidate = line.split()[0]
+            candidate = address_suffix.sub("", line)
         if not candidate.startswith("/"):
             continue
         dependencies.add(pathlib.Path(candidate))
