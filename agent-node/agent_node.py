@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v21"
+RUNTIME_POLICY = "agent-node-python-runtime-v22"
 
 
 def _resolve_git_bin() -> str:
@@ -471,13 +471,16 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
     if string_table_vaddr is None or string_table_size is None:
         raise RuntimeError(f"ELF dynamic strings are unavailable for native runtime candidate: {path}")
 
-    string_table_offset: int | None = None
+    string_table_offsets: set[int] = set()
     for p_offset, p_vaddr, p_filesz in loads:
-        if p_vaddr <= string_table_vaddr < p_vaddr + p_filesz:
-            string_table_offset = p_offset + (string_table_vaddr - p_vaddr)
-            break
-    if string_table_offset is None:
-        raise RuntimeError(f"ELF dynamic string table is unmapped for native runtime candidate: {path}")
+        if p_vaddr <= string_table_vaddr and string_table_vaddr + string_table_size <= p_vaddr + p_filesz:
+            mapped_offset = p_offset + (string_table_vaddr - p_vaddr)
+            if mapped_offset + string_table_size > len(data):
+                raise RuntimeError(f"ELF dynamic string table mapping exceeds file bytes for native runtime candidate: {path}")
+            string_table_offsets.add(mapped_offset)
+    if len(string_table_offsets) != 1:
+        raise RuntimeError(f"ELF dynamic string table has no unique PT_LOAD mapping for native runtime candidate: {path}")
+    string_table_offset = next(iter(string_table_offsets))
     string_table_end = string_table_offset + string_table_size
     if string_table_end > len(data):
         raise RuntimeError(f"ELF dynamic string table exceeds file bytes for native runtime candidate: {path}")
