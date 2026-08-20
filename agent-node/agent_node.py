@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v20"
+RUNTIME_POLICY = "agent-node-python-runtime-v21"
 
 
 def _resolve_git_bin() -> str:
@@ -451,9 +451,11 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
     needed_offsets: list[int] = []
     string_table_vaddr: int | None = None
     string_table_size: int | None = None
+    saw_dynamic_null = False
     for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
         tag, value = struct.unpack_from(dynamic_format, data, offset)
         if tag == 0:
+            saw_dynamic_null = True
             break
         if tag == 1:
             needed_offsets.append(value)
@@ -462,6 +464,8 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         elif tag == 10:
             string_table_size = value
 
+    if not saw_dynamic_null:
+        raise RuntimeError(f"ELF dynamic table lacks DT_NULL within PT_DYNAMIC file region for native runtime candidate: {path}")
     if not needed_offsets:
         return ()
     if string_table_vaddr is None or string_table_size is None:
