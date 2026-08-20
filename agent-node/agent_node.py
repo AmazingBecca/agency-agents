@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v24"
+RUNTIME_POLICY = "agent-node-python-runtime-v25"
 
 
 def _resolve_git_bin() -> str:
@@ -410,7 +410,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
     if program_count == 0xFFFF or program_entry_size < required_program_size:
         raise RuntimeError(f"unsupported ELF program-header layout for native runtime candidate: {path}")
 
-    loads: list[tuple[int, int, int]] = []
+    loads: list[tuple[int, int, int, int]] = []
     dynamic_region: tuple[int, int, int] | None = None
     for index in range(program_count):
         offset = program_offset + index * program_entry_size
@@ -418,13 +418,15 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
             raise RuntimeError(f"truncated ELF program headers for native runtime candidate: {path}")
         values = struct.unpack_from(program_format, data, offset)
         if elf_class == 2:
-            p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, _memsz, _align = values
+            p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _align = values
         else:
-            p_type, p_offset, p_vaddr, _paddr, p_filesz, _memsz, _flags, _align = values
+            p_type, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _flags, _align = values
         if p_offset + p_filesz > len(data):
             raise RuntimeError(f"ELF segment exceeds file bytes for native runtime candidate: {path}")
+        if p_memsz < p_filesz:
+            raise RuntimeError(f"ELF PT_LOAD memory size is smaller than file size for native runtime candidate: {path}")
         if p_type == 1:
-            loads.append((p_offset, p_vaddr, p_filesz))
+            loads.append((p_offset, p_vaddr, p_filesz, p_memsz))
         elif p_type == 2:
             dynamic_region = (p_offset, p_vaddr, p_filesz)
 
@@ -451,7 +453,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         range_end = range_vaddr + range_size
         authoritative_deltas = {
             load_offset - load_vaddr
-            for load_offset, load_vaddr, load_filesz in loads
+            for load_offset, load_vaddr, load_filesz, load_memsz in loads
             if load_vaddr <= range_vaddr
             and range_end <= load_vaddr + load_filesz
             and load_offset + (range_vaddr - load_vaddr) == mapped_file_offset
@@ -464,7 +466,15 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         range_page_start = range_vaddr & ~page_mask
         range_page_end = (range_end + page_mask) & ~page_mask
 
-        for load_offset, load_vaddr, load_filesz in loads:
+        for load_offset, load_vaddr, load_filesz, load_memsz in loads:
+            if load_memsz > load_filesz:
+                zero_fill_start = load_vaddr + load_filesz
+                zero_fill_end = load_vaddr + load_memsz
+                zero_fill_overlaps = zero_fill_start < range_end and range_vaddr < zero_fill_end
+                if zero_fill_overlaps:
+                    raise RuntimeError(
+                        f"ELF {label} overlaps PT_LOAD zero-fill range for native runtime candidate: {path}"
+                    )
             if load_filesz <= 0:
                 continue
             load_page_start = load_vaddr & ~page_mask
@@ -477,7 +487,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
 
     dynamic_file_offset, dynamic_vaddr, dynamic_size = dynamic_region
     mapped_offsets: set[int] = set()
-    for load_offset, load_vaddr, load_filesz in loads:
+    for load_offset, load_vaddr, load_filesz, load_memsz in loads:
         if load_vaddr <= dynamic_vaddr and dynamic_vaddr + dynamic_size <= load_vaddr + load_filesz:
             mapped_offset = load_offset + (dynamic_vaddr - load_vaddr)
             if mapped_offset + dynamic_size > len(data):
@@ -517,7 +527,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         raise RuntimeError(f"ELF dynamic strings are unavailable for native runtime candidate: {path}")
 
     string_table_offsets: set[int] = set()
-    for p_offset, p_vaddr, p_filesz in loads:
+    for p_offset, p_vaddr, p_filesz, p_memsz in loads:
         if p_vaddr <= string_table_vaddr and string_table_vaddr + string_table_size <= p_vaddr + p_filesz:
             mapped_offset = p_offset + (string_table_vaddr - p_vaddr)
             if mapped_offset + string_table_size > len(data):
