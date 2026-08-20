@@ -1,9 +1,10 @@
 name: Agent Node Dynamic Runtime Patch
 
 on:
-  push:
+  pull_request:
     branches:
-      - hardening/agent-node-dynamic-runtime-closure-v2
+      - hardening/agent-node-native-runtime-closure-v1
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -16,19 +17,20 @@ jobs:
       - name: Apply exact dynamic-runtime repair
         shell: bash
         env:
-          EXPECTED_PARENT: ceedfc28ced5b69c8fffa74bd9a858408f398f31
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
           EXPECTED_SOURCE_BLOB: 678f8fa92964601e35843317347cba7e156839ce
           EXPECTED_RUNTIME_TEST_BLOB: 5d333babe635de2325adf3e4a2ef2b23a3ca98e3
           BRANCH: hardening/agent-node-dynamic-runtime-closure-v2
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-          test "${{ github.ref_name }}" = "$BRANCH"
+          test "${{ github.event.pull_request.head.ref }}" = "$BRANCH"
+          test "${{ github.event.pull_request.head.repo.full_name }}" = 'AmazingBecca/agency-agents'
           git init .
           git remote add origin 'https://x-access-token:${{ github.token }}@github.com/AmazingBecca/agency-agents.git'
-          git fetch --no-tags --depth=2 origin "${{ github.sha }}"
+          git fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
-          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git hash-object agent-node/agent_node.py)" = "$EXPECTED_SOURCE_BLOB"
           test "$(git hash-object agent-node/tests/test_runtime_closure.py)" = "$EXPECTED_RUNTIME_TEST_BLOB"
           python3 - <<'PY'
