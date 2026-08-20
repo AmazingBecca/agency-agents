@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v12"
+RUNTIME_POLICY = "agent-node-python-runtime-v13"
 
 
 def _resolve_git_bin() -> str:
@@ -393,13 +393,13 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
         raise RuntimeError(f"native runtime dependency discovery failed for {path}: {text.strip()}")
 
     dependencies: set[pathlib.Path] = set()
-    address_suffix = re.compile(r"\s+\(0x[0-9a-fA-F]+\)\s*$")
+    address_suffix = re.compile(r" (?=\(0x[0-9a-fA-F]+\)\s*$)")
     mapped_path = re.compile(r" => (?P<path>/.*)$")
     for raw_line in cp.stdout.splitlines():
-        line = raw_line.strip()
+        line = raw_line.lstrip()
         if not line:
             continue
-        body = address_suffix.sub("", line)
+        body = address_suffix.sub("", line, count=1)
         candidate = ""
         if body.startswith("/"):
             candidate = body
