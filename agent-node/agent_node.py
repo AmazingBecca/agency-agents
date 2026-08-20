@@ -393,7 +393,7 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
         raise RuntimeError(f"native runtime dependency discovery failed for {path}: {text.strip()}")
 
     dependencies: set[pathlib.Path] = set()
-    address_suffix = re.compile(r" (?=\(0x[0-9a-fA-F]+\)\s*$)")
+    address_suffix = re.compile(r" \(0x[0-9a-fA-F]+\)\s*$")
     mapped_path = re.compile(r" => (?P<path>/.*)$")
     for raw_line in cp.stdout.splitlines():
         line = raw_line.lstrip()
