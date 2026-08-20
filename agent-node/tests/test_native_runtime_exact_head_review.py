@@ -200,6 +200,33 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
                 "filesystem decoys must not determine whether ambiguous ldd text is treated as a direct dependency",
             )
 
+    def test_ldd_parser_preserves_trailing_whitespace_in_resolved_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            actual = root / "libdep.so "
+            decoy = root / "libdep.so"
+            actual.write_bytes(b"actual trailing-space dependency")
+            decoy.write_bytes(b"trimmed decoy dependency")
+            fake = subprocess.CompletedProcess(
+                args=["/usr/bin/ldd", "/runtime/python"],
+                returncode=0,
+                stdout=f"libdep.so  => {actual} (0x00007f0000000000)\n",
+                stderr="",
+            )
+            with mock.patch.object(mod.subprocess, "run", return_value=fake):
+                paths = mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
+
+        self.assertIn(
+            actual,
+            paths,
+            "ldd parsing must preserve legal trailing whitespace that belongs to the resolved dependency pathname",
+        )
+        self.assertNotIn(
+            decoy,
+            paths,
+            "ldd parsing must not trim a dependency pathname onto a decoy file",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
