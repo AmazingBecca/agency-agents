@@ -43,6 +43,20 @@ class NativeRuntimeMultilineSpoofTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "multiline|dependency"):
                 mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
 
+    def test_empty_first_segment_cannot_hide_multiline_needed_record(self):
+        fake = subprocess.CompletedProcess(
+            args=["/usr/bin/ldd", "/runtime/python"],
+            returncode=0,
+            stdout=(
+                "\t\n"
+                "\t/lib/x86_64-linux-gnu/libc.so.6 (0x00007f0000000000)\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(mod.subprocess, "run", return_value=fake):
+            with self.assertRaisesRegex(RuntimeError, "multiline|dependency"):
+                mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
+
 
 if __name__ == "__main__":
     unittest.main()
