@@ -1,76 +1,41 @@
-name: Agent Node Native Runtime PT_DYNAMIC Repair
+name: Agent Node Native Runtime Closure Validation
 
 on:
   push:
     branches:
       - hardening/agent-node-native-runtime-closure-v1
+  pull_request:
+    branches:
+      - hardening/agent-node-runtime-closure-v1
+    types: [opened, synchronize, reopened]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  repair:
-    if: github.event_name == 'push' && github.ref_name == 'hardening/agent-node-native-runtime-closure-v1'
+  validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Repair and validate exact PT_DYNAMIC boundary
+      - name: Fetch exact candidate source without workflow credentials
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.sha }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-          test "${GITHUB_REPOSITORY}" = 'AmazingBecca/agency-agents'
-          test "${GITHUB_REF_NAME}" = 'hardening/agent-node-native-runtime-closure-v1'
+          unset GITHUB_TOKEN GH_TOKEN
           test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
           git init .
           git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
-          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=2 origin "$EXPECTED_SHA"
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test "$(git hash-object agent-node/agent_node.py)" = '0f05761635d6a2fbd7a195acba04317b415dbf70'
-          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'ed9a4da9643d5ce6a68017437e34aa0d9f4d35c8'
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('agent-node/agent_node.py')
-          text = path.read_text(encoding='utf-8')
-          replacements = [
-              ('RUNTIME_POLICY = "agent-node-python-runtime-v19"',
-               'RUNTIME_POLICY = "agent-node-python-runtime-v20"'),
-              ('    dynamic_region: tuple[int, int] | None = None',
-               '    dynamic_region: tuple[int, int, int] | None = None'),
-              ('        elif p_type == 2:\n            dynamic_region = (p_offset, p_filesz)',
-               '        elif p_type == 2:\n            dynamic_region = (p_offset, p_vaddr, p_filesz)'),
-              ('    dynamic_offset, dynamic_size = dynamic_region\n    dynamic_entry_size = struct.calcsize(dynamic_format)',
-               '''    dynamic_file_offset, dynamic_vaddr, dynamic_size = dynamic_region
-    mapped_offsets: set[int] = set()
-    for load_offset, load_vaddr, load_filesz in loads:
-        if load_vaddr <= dynamic_vaddr and dynamic_vaddr + dynamic_size <= load_vaddr + load_filesz:
-            mapped_offset = load_offset + (dynamic_vaddr - load_vaddr)
-            if mapped_offset + dynamic_size > len(data):
-                raise RuntimeError(f"ELF PT_DYNAMIC virtual mapping exceeds file bytes for native runtime candidate: {path}")
-            mapped_offsets.add(mapped_offset)
-    if len(mapped_offsets) != 1:
-        raise RuntimeError(f"ELF PT_DYNAMIC virtual address has no unique PT_LOAD mapping for native runtime candidate: {path}")
-    dynamic_offset = next(iter(mapped_offsets))
-    if dynamic_file_offset != dynamic_offset:
-        raise RuntimeError(f"ELF PT_DYNAMIC file offset disagrees with loaded virtual-address mapping for native runtime candidate: {path}")
-    dynamic_entry_size = struct.calcsize(dynamic_format)'''),
-          ]
-          for old, new in replacements:
-              if text.count(old) != 1:
-                  raise SystemExit(f'exact replacement boundary missing or duplicated: {old!r}')
-              text = text.replace(old, new, 1)
-          path.write_text(text, encoding='utf-8')
-          PY
-
-          NEW_SOURCE_BLOB="$(git hash-object agent-node/agent_node.py)"
-          test -n "$NEW_SOURCE_BLOB"
-
+      - name: Compile and run exact native-runtime regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 --version
+          cc --version | head -n 1
           python3 -B -m py_compile \
             agent-node/agent_node.py \
             agent-node/tests/test_agent_node.py \
@@ -79,29 +44,6 @@ jobs:
             agent-node/tests/test_runtime_zip_archive.py \
             agent-node/tests/test_native_runtime_closure.py \
             agent-node/tests/test_native_runtime_multiline_spoof.py
+          test "$(git hash-object agent-node/agent_node.py)" = '0f05761635d6a2fbd7a195acba04317b415dbf70'
+          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'ed9a4da9643d5ce6a68017437e34aa0d9f4d35c8'
           python3 -B -m unittest discover -s agent-node/tests -v
-
-          git show "$EXPECTED_SHA^:.github/workflows/agent-node-native-runtime-closure.yml" > .github/workflows/agent-node-native-runtime-closure.yml
-          python3 - "$NEW_SOURCE_BLOB" <<'PY'
-          from pathlib import Path
-          import sys
-
-          new_blob = sys.argv[1]
-          path = Path('.github/workflows/agent-node-native-runtime-closure.yml')
-          text = path.read_text(encoding='utf-8')
-          old = "test \"$(git hash-object agent-node/agent_node.py)\" = '0f05761635d6a2fbd7a195acba04317b415dbf70'"
-          new = f"test \"$(git hash-object agent-node/agent_node.py)\" = '{new_blob}'"
-          if text.count(old) != 1:
-              raise SystemExit('source blob assertion boundary missing or duplicated')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
-          PY
-
-          git config user.name 'AmazingBecca Exact Repair'
-          git config user.email 'actions@users.noreply.github.com'
-          git add agent-node/agent_node.py .github/workflows/agent-node-native-runtime-closure.yml
-          git commit -m 'security: bind PT_DYNAMIC through loaded mapping'
-
-          REMOTE_HEAD="$(git ls-remote 'https://github.com/AmazingBecca/agency-agents.git' refs/heads/hardening/agent-node-native-runtime-closure-v1 | cut -f1)"
-          test "$REMOTE_HEAD" = "$EXPECTED_SHA"
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/AmazingBecca/agency-agents.git"
-          git push origin HEAD:refs/heads/hardening/agent-node-native-runtime-closure-v1
