@@ -3,8 +3,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib.util
+import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -31,7 +33,7 @@ class RuntimeClosureTests(unittest.TestCase):
         self.assertRegex(after, r"^[0-9a-f]{64}$")
         self.assertNotEqual(before, after)
 
-    def test_runtime_tree_digest_ignores_disabled_site_but_binds_bytecode(self):
+    def test_runtime_tree_digest_binds_importable_site_and_bytecode(self):
         self.assertTrue(hasattr(mod, "_runtime_tree_sha256"), "runtime tree digest helper is required")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -39,11 +41,18 @@ class RuntimeClosureTests(unittest.TestCase):
             baseline = mod._runtime_tree_sha256((root,))
 
             (root / "site-packages").mkdir()
-            (root / "site-packages" / "evil.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
+            site_module = root / "site-packages" / "runtime_probe.py"
+            site_module.write_text("VALUE = 1\n", encoding="utf-8")
+            with_site = mod._runtime_tree_sha256((root,))
+            site_module.write_text("VALUE = 2\n", encoding="utf-8")
+            mutated_site = mod._runtime_tree_sha256((root,))
+
             (root / "dist-packages").mkdir()
-            (root / "dist-packages" / "evil.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
-            after_disabled_site = mod._runtime_tree_sha256((root,))
-            self.assertEqual(baseline, after_disabled_site)
+            dist_module = root / "dist-packages" / "runtime_probe.py"
+            dist_module.write_text("VALUE = 1\n", encoding="utf-8")
+            with_dist = mod._runtime_tree_sha256((root,))
+            dist_module.write_text("VALUE = 2\n", encoding="utf-8")
+            mutated_dist = mod._runtime_tree_sha256((root,))
 
             (root / "__pycache__").mkdir()
             cached = root / "__pycache__" / "json.cpython-test.pyc"
@@ -52,7 +61,11 @@ class RuntimeClosureTests(unittest.TestCase):
             cached.write_bytes(b"bound-cache-v2")
             mutated_bytecode = mod._runtime_tree_sha256((root,))
 
-        self.assertNotEqual(after_disabled_site, with_bytecode)
+        self.assertNotEqual(baseline, with_site)
+        self.assertNotEqual(with_site, mutated_site)
+        self.assertNotEqual(mutated_site, with_dist)
+        self.assertNotEqual(with_dist, mutated_dist)
+        self.assertNotEqual(mutated_dist, with_bytecode)
         self.assertNotEqual(with_bytecode, mutated_bytecode)
 
     def test_runtime_tree_digest_binds_file_symlink_and_target_bytes(self):
@@ -68,13 +81,32 @@ class RuntimeClosureTests(unittest.TestCase):
             after = mod._runtime_tree_sha256((root,))
         self.assertNotEqual(before, after)
 
+    def test_isolated_child_search_paths_scrub_parent_python_environment(self):
+        self.assertTrue(
+            hasattr(mod, "_child_runtime_search_paths"),
+            "runtime identity must discover paths under the exact isolated child configuration",
+        )
+        poison = pathlib.Path(tempfile.gettempdir()) / "agent-node-pythonhome-poison"
+        injected = {
+            "PYTHONHOME": str(poison),
+            "PYTHONPATH": str(poison / "path"),
+            "PYTHONUSERBASE": str(poison / "userbase"),
+        }
+        with mock.patch.dict(os.environ, injected, clear=False):
+            paths = mod._child_runtime_search_paths(sys.executable)
+        self.assertTrue(paths)
+        self.assertTrue(all(str(poison) not in value for value in paths))
+
     def test_runtime_identity_includes_runtime_tree_digest(self):
         self.assertTrue(hasattr(mod, "_runtime_roots"), "runtime root discovery is required")
         self.assertTrue(hasattr(mod, "_runtime_tree_sha256"), "runtime tree digest helper is required")
         fake_root = pathlib.Path("/runtime-root")
+        fake_paths = (str(fake_root),)
         with mock.patch.object(mod, "_stable_regular_file_sha256", return_value="a" * 64), \
+             mock.patch.object(mod, "_child_runtime_search_paths", return_value=fake_paths), \
              mock.patch.object(mod, "_runtime_roots", return_value=(fake_root,)), \
-             mock.patch.object(mod, "_runtime_tree_sha256", side_effect=["b" * 64, "c" * 64]):
+             mock.patch.object(mod, "_runtime_tree_sha256", side_effect=["b" * 64, "c" * 64]), \
+             mock.patch.object(mod, "_runtime_archive_sha256", return_value="d" * 64):
             _bin1, first = mod.python_runtime_identity()
             _bin2, second = mod.python_runtime_identity()
         self.assertNotEqual(first, second)
