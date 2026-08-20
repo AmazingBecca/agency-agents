@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v7"
+RUNTIME_POLICY = "agent-node-python-runtime-v8"
 
 
 def _resolve_git_bin() -> str:
@@ -101,6 +101,7 @@ def _python_env() -> dict[str, str]:
         if not key.startswith("PYTHON")
         and not key.startswith("LD_")
         and not key.startswith("DYLD_")
+        and not key.startswith("BASH_FUNC_")
         and key not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "BASH_ENV", "ENV"}
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -393,8 +394,8 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
         if not line:
             continue
         candidate = ""
-        if "=>" in line:
-            _name, rhs = line.split("=>", 1)
+        if " => " in line:
+            _name, rhs = line.rsplit(" => ", 1)
             candidate = address_suffix.sub("", rhs.strip())
         elif line.startswith("/"):
             candidate = address_suffix.sub("", line)
