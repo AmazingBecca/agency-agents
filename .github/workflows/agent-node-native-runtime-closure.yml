@@ -49,5 +49,5 @@ jobs:
           test "$(git hash-object agent-node/agent_node.py)" = 'c45cac7858eec87ef516fa56f9111e41c1106bfa'
           test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'ed9a4da9643d5ce6a68017437e34aa0d9f4d35c8'
           test "$(git hash-object agent-node/tests/test_native_runtime_pt_dynamic_size.py)" = '216ab72cf125c5d7a792c1508f6e1cc585b08c01'
-          test "$(git hash-object agent-node/tests/test_native_runtime_string_table_overlap.py)" = '7679827e4c38d4ccc09c765693fca8043a185d36'
+          test "$(git hash-object agent-node/tests/test_native_runtime_string_table_overlap.py)" = 'b378d05a7137cac3e8c75fafdca2b97cc9a69df1'
           python3 -B -m unittest discover -s agent-node/tests -v
