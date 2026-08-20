@@ -1,9 +1,10 @@
 name: Agent Node Native Runtime Closure V25 Repair
 
 on:
-  push:
+  pull_request:
     branches:
-      - hardening/agent-node-native-runtime-closure-v1
+      - hardening/agent-node-runtime-closure-v1
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -12,15 +13,15 @@ jobs:
   repair:
     if: >-
       github.repository == 'AmazingBecca/agency-agents' &&
-      github.ref == 'refs/heads/hardening/agent-node-native-runtime-closure-v1' &&
-      github.actor == 'AmazingBecca'
+      github.event.pull_request.head.repo.full_name == 'AmazingBecca/agency-agents' &&
+      github.event.pull_request.head.ref == 'hardening/agent-node-native-runtime-closure-v1'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Fetch exact repair head without workflow credentials
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -35,8 +36,8 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          EXPECTED_PARENT: ${{ github.sha }}
-          TARGET_BRANCH: hardening/agent-node-native-runtime-closure-v1
+          EXPECTED_PARENT: ${{ github.event.pull_request.head.sha }}
+          TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
