@@ -82,6 +82,74 @@ class NativeRuntimeStringTableOverlapTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "string table|PT_LOAD|unique|mapping"):
                 mod._elf_needed_name_bytes(candidate)
 
+    def test_page_overlapping_partial_pt_load_mapping_fails_closed(self):
+        """A partial PT_LOAD on a DT_STRTAB page can replace the page after mmap alignment."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate = pathlib.Path(temp_dir) / "libpageoverlap.so"
+            data = bytearray(0x3000)
+
+            ident = bytearray(16)
+            ident[:4] = b"\x7fELF"
+            ident[4] = 2
+            ident[5] = 1
+            ident[6] = 1
+            data[:16] = ident
+
+            header_format = "<HHIQQQIHHHHHH"
+            program_format = "<IIQQQQQQ"
+            dynamic_format = "<qQ"
+            phoff = 64
+            phentsize = struct.calcsize(program_format)
+            phnum = 4
+            struct.pack_into(
+                header_format,
+                data,
+                16,
+                3,
+                62,
+                1,
+                0,
+                phoff,
+                0,
+                0,
+                64,
+                phentsize,
+                phnum,
+                0,
+                0,
+                0,
+            )
+
+            headers = (
+                # Unique PT_LOAD for PT_DYNAMIC.
+                (1, 4, 0x400, 0x400000, 0, 0x200, 0x200, 0x1000),
+                # Whole-range DT_STRTAB mapping. The parser currently trusts this mapping.
+                (1, 4, 0x1000, 0x500000, 0, 0x800, 0x800, 0x1000),
+                # Starts one byte into DT_STRTAB, but mmap page alignment maps file page 0x2000
+                # over virtual page 0x500000 and can therefore replace the whole table page.
+                (1, 4, 0x2001, 0x500001, 0, 0x7FF, 0x7FF, 0x1000),
+                (2, 4, 0x420, 0x400020, 0, 0x40, 0x40, 8),
+            )
+            for index, values in enumerate(headers):
+                struct.pack_into(program_format, data, phoff + index * phentsize, *values)
+
+            dynamic_entries = (
+                (1, 0),
+                (5, 0x500000),
+                (10, 0x100),
+                (0, 0),
+            )
+            dynamic_size = struct.calcsize(dynamic_format)
+            for index, values in enumerate(dynamic_entries):
+                struct.pack_into(dynamic_format, data, 0x420 + index * dynamic_size, *values)
+
+            data[0x1000 : 0x1000 + len(b"benign.so\0")] = b"benign.so\0"
+            data[0x2000 : 0x2000 + len(b"actual.so\0")] = b"actual.so\0"
+            candidate.write_bytes(data)
+
+            with self.assertRaisesRegex(RuntimeError, "string table|PT_LOAD|page|overlap|mapping"):
+                mod._elf_needed_name_bytes(candidate)
+
 
 if __name__ == "__main__":
     unittest.main()
