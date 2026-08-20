@@ -47,11 +47,11 @@ jobs:
           python3 -B -m unittest discover -s agent-node/tests -v
       - name: Apply exact-bound v17 repair
         if: >-
-          ${{ always() && github.event_name == 'push' && github.event.before == '2179cc0d9a5bf593399e62ef7a29237c345e8d2b' }}
+          ${{ always() && github.event_name == 'push' && github.event.before == 'e52362838796fe8f18fb0417c09a81f39df5bdea' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          EXPECTED_PARENT: 2179cc0d9a5bf593399e62ef7a29237c345e8d2b
+          EXPECTED_PARENT: e52362838796fe8f18fb0417c09a81f39df5bdea
           EXPECTED_SOURCE_BLOB: 19c063f55eccaa105069c10f281e5ceca4dec65f
         run: |
           set -Eeuo pipefail
