@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v5"
+RUNTIME_POLICY = "agent-node-python-runtime-v6"
 
 
 def _resolve_git_bin() -> str:
@@ -48,6 +48,26 @@ def _resolve_git_bin() -> str:
 
 
 GIT_BIN = _resolve_git_bin()
+
+
+def _resolve_ldd_bin() -> str:
+    if not sys.platform.startswith("linux"):
+        return ""
+    for candidate in ("/usr/bin/ldd", shutil.which("ldd") or ""):
+        if not candidate:
+            continue
+        path = pathlib.Path(candidate)
+        try:
+            resolved = path.resolve(strict=True)
+            metadata = resolved.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(metadata.st_mode) and os.access(resolved, os.X_OK):
+            return str(resolved)
+    raise RuntimeError("Linux native runtime closure requires an executable ldd")
+
+
+LDD_BIN = _resolve_ldd_bin()
 
 
 def canonical(value: object) -> bytes:
@@ -345,6 +365,158 @@ def _runtime_archive_sha256(search_paths: tuple[str, ...] | None = None) -> str:
     return digest
 
 
+def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
+    if not sys.platform.startswith("linux") or not LDD_BIN:
+        raise RuntimeError("native runtime dependency discovery is supported only on Linux")
+    env = _python_env()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    cp = subprocess.run(
+        [LDD_BIN, os.fspath(path)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=env,
+    )
+    text = cp.stdout + "\n" + cp.stderr
+    if "not found" in text:
+        raise RuntimeError(f"native runtime dependency is unresolved for {path}: {text.strip()}")
+    if cp.returncode not in {0, 1}:
+        raise RuntimeError(f"native runtime dependency discovery failed for {path}: {text.strip()}")
+
+    dependencies: set[pathlib.Path] = set()
+    for raw_line in cp.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        candidate = ""
+        if "=>" in line:
+            _name, rhs = line.split("=>", 1)
+            candidate = rhs.strip().split()[0] if rhs.strip() else ""
+        elif line.startswith("/"):
+            candidate = line.split()[0]
+        if not candidate.startswith("/"):
+            continue
+        dependencies.add(pathlib.Path(candidate))
+    return tuple(sorted(dependencies, key=os.fspath))
+
+
+def _child_native_runtime_paths(executable: str) -> tuple[pathlib.Path, ...]:
+    """Return Linux loader/DSO closure for the exact isolated Python runtime."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("native runtime closure is not implemented for this platform")
+
+    probe = (
+        "import os,sys,unittest;"
+        "paths=set();"
+        "lines=open('/proc/self/maps','r',encoding='utf-8').read().splitlines();"
+        "[(paths.add(parts[5])) for line in lines "
+        "if len((parts:=line.split(None,5)))>=6 and 'x' in parts[1] "
+        "and parts[5].startswith('/') and not parts[5].endswith(' (deleted)')];"
+        "sys.stdout.buffer.write(b'\\0'.join("
+        "p.encode('utf-8','surrogateescape') for p in sorted(paths)))"
+    )
+    cp = subprocess.run(
+        [executable, "-I", "-B", "-S", "-c", probe],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=_python_env(),
+    )
+    discovered: set[pathlib.Path] = {
+        pathlib.Path(part.decode("utf-8", "surrogateescape"))
+        for part in cp.stdout.split(b"\0")
+        if part
+    }
+
+    search_paths = _child_runtime_search_paths(executable)
+    roots = _runtime_roots(search_paths)
+    candidates: set[pathlib.Path] = {pathlib.Path(executable).resolve(strict=True)}
+    for root in roots:
+        for dirpath, _dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+            directory = pathlib.Path(dirpath)
+            for filename in filenames:
+                if ".so" not in filename:
+                    continue
+                candidate = directory / filename
+                try:
+                    metadata = candidate.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise RuntimeError(f"native runtime candidate cannot be inspected: {candidate}") from exc
+                if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                    candidates.add(candidate)
+
+    for candidate in sorted(candidates, key=os.fspath):
+        discovered.add(candidate)
+        discovered.update(_ldd_dependency_paths(candidate))
+    discovered.add(pathlib.Path(LDD_BIN))
+
+    result = tuple(sorted(discovered, key=os.fspath))
+    if not result:
+        raise RuntimeError("isolated Python child has no bindable native runtime dependencies")
+    if any(not path.is_absolute() for path in result):
+        raise RuntimeError("native runtime dependency discovery returned a non-absolute path")
+    return result
+
+
+def _runtime_native_sha256(paths: tuple[pathlib.Path, ...]) -> str:
+    records: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for value in paths:
+        lexical = pathlib.Path(value)
+        if not lexical.is_absolute():
+            raise RuntimeError(f"native runtime dependency path is not absolute: {lexical}")
+        identity_path = os.fspath(lexical)
+        if identity_path in seen:
+            continue
+        seen.add(identity_path)
+        try:
+            metadata = lexical.lstat()
+        except OSError as exc:
+            raise RuntimeError(f"native runtime dependency cannot be inspected: {lexical}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                link_target = os.readlink(lexical)
+                resolved_target = lexical.resolve(strict=True)
+                target_metadata = resolved_target.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"native runtime dependency symlink cannot be resolved: {lexical}") from exc
+            if not stat.S_ISREG(target_metadata.st_mode):
+                raise RuntimeError(f"native runtime dependency target is not a regular file: {lexical}")
+            records.append(
+                {
+                    "path": identity_path,
+                    "kind": "symlink-file",
+                    "link_target": link_target,
+                    "resolved_target": os.fspath(resolved_target),
+                    "target_mode": stat.S_IMODE(target_metadata.st_mode),
+                    "target_size": target_metadata.st_size,
+                    "target_sha256": _stable_regular_file_sha256(resolved_target),
+                }
+            )
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"native runtime dependency is not a regular file: {lexical}")
+        records.append(
+            {
+                "path": identity_path,
+                "kind": "file",
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "size": metadata.st_size,
+                "sha256": _stable_regular_file_sha256(lexical),
+            }
+        )
+    if not records:
+        raise RuntimeError("native runtime closure contains no bindable files")
+    digest = hashlib.sha256(canonical(records)).hexdigest()
+    if not SHA64.fullmatch(digest):
+        raise RuntimeError("native runtime identity is invalid")
+    return digest
+
+
 def python_runtime_identity() -> tuple[str, str]:
     executable = pathlib.Path(sys.executable).resolve(strict=True)
     binary_sha256 = _stable_regular_file_sha256(executable)
@@ -352,6 +524,8 @@ def python_runtime_identity() -> tuple[str, str]:
     runtime_search_path_sha256 = hashlib.sha256(canonical(list(runtime_search_paths))).hexdigest()
     runtime_tree_sha256 = _runtime_tree_sha256(_runtime_roots(runtime_search_paths))
     runtime_archive_sha256 = _runtime_archive_sha256(runtime_search_paths)
+    runtime_native_paths = _child_native_runtime_paths(str(executable))
+    runtime_native_sha256 = _runtime_native_sha256(runtime_native_paths)
     material = {
         "policy": RUNTIME_POLICY,
         "implementation": sys.implementation.name,
@@ -361,6 +535,7 @@ def python_runtime_identity() -> tuple[str, str]:
         "runtime_search_path_sha256": runtime_search_path_sha256,
         "runtime_tree_sha256": runtime_tree_sha256,
         "runtime_archive_sha256": runtime_archive_sha256,
+        "runtime_native_sha256": runtime_native_sha256,
         "isolated_flag": "-I",
         "bytecode_flag": "-B",
         "no_site_flag": "-S",
