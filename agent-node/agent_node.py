@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v13"
+RUNTIME_POLICY = "agent-node-python-runtime-v14"
 
 
 def _resolve_git_bin() -> str:
@@ -396,7 +396,7 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
     address_suffix = re.compile(r" \(0x[0-9a-fA-F]+\)\s*$")
     mapped_path = re.compile(r" => (?P<path>/.*)$")
     for raw_line in cp.stdout.splitlines():
-        line = raw_line.lstrip()
+        line = raw_line[1:] if raw_line.startswith("\t") else raw_line
         if not line:
             continue
         body = address_suffix.sub("", line, count=1)
