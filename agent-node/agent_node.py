@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v16"
+RUNTIME_POLICY = "agent-node-python-runtime-v17"
 
 
 def _resolve_git_bin() -> str:
@@ -395,14 +395,24 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
     dependencies: set[pathlib.Path] = set()
     address_suffix = re.compile(r" \(0x[0-9a-fA-F]+\)\s*$")
     mapped_path = re.compile(r" => (?P<path>/.*)$")
+    pseudo_objects = {"linux-vdso.so.1", "linux-gate.so.1"}
+    saw_static_marker = False
+    saw_dependency_record = False
+
     for raw_line in cp.stdout.splitlines():
         line = raw_line[1:] if raw_line.startswith("\t") else raw_line
         if not line:
             continue
         if line == "statically linked":
+            if saw_static_marker or saw_dependency_record:
+                raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+            saw_static_marker = True
             continue
+        if saw_static_marker:
+            raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
         if address_suffix.search(line) is None:
             raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+
         body = address_suffix.sub("", line, count=1)
         candidate = ""
         if body.startswith("/"):
@@ -419,13 +429,18 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
                     candidate = os.fspath(pathlib.Path(body).resolve(strict=True))
                 except OSError as exc:
                     raise RuntimeError(f"direct native dependency cannot be resolved for {path}: {body}") from exc
-        if not candidate:
-            continue
+            elif body in pseudo_objects:
+                saw_dependency_record = True
+                continue
+            else:
+                raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+
         if not candidate.startswith("/"):
             raise RuntimeError(f"native runtime dependency discovery returned non-absolute path for {path}: {candidate}")
         dependencies.add(pathlib.Path(candidate))
-    return tuple(sorted(dependencies, key=os.fspath))
+        saw_dependency_record = True
 
+    return tuple(sorted(dependencies, key=os.fspath))
 
 def _child_native_runtime_paths(executable: str) -> tuple[pathlib.Path, ...]:
     """Return Linux loader/DSO closure for the exact isolated Python runtime."""
