@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - hardening/agent-node-exact-worktree-v1
+      - hardening/execution-receipt-quorum-v1
   pull_request:
     branches:
       - infra/agent-node-bootstrap-v1
+      - hardening/agent-node-exact-worktree-v1
     types: [opened, synchronize, reopened]
 
 permissions: {}
@@ -35,7 +37,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 --version
-          python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_agent_node.py
+          python3 -B -m py_compile agent-node/agent_node.py agent-node/execution_quorum.py agent-node/tests/test_agent_node.py agent-node/tests/test_execution_quorum.py
           python3 -B -m unittest discover -s agent-node/tests -v
       - name: Exercise live authenticated loopback node
         shell: bash
@@ -84,12 +86,7 @@ jobs:
               raise SystemExit("agent node did not become ready")
 
           body = json.dumps({"expected_head": head, "selector": "tests.test_safe"}).encode()
-          unauthorized = urllib.request.Request(
-              base + "/run-tests",
-              data=body,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
+          unauthorized = urllib.request.Request(base + "/run-tests", data=body, headers={"Content-Type": "application/json"}, method="POST")
           try:
               urllib.request.urlopen(unauthorized, timeout=5)
           except urllib.error.HTTPError as exc:
@@ -97,12 +94,7 @@ jobs:
           else:
               raise SystemExit("unauthenticated test execution unexpectedly succeeded")
 
-          authorized = urllib.request.Request(
-              base + "/run-tests",
-              data=body,
-              headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-              method="POST",
-          )
+          authorized = urllib.request.Request(base + "/run-tests", data=body, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
           with urllib.request.urlopen(authorized, timeout=30) as response:
               raw = response.read()
           result = json.loads(raw)
