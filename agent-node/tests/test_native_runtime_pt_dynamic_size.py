@@ -55,11 +55,13 @@ class NativeRuntimePtDynamicSizeTests(unittest.TestCase):
             if elf_class == 2:
                 header_format = prefix + "HHIQQQIHHHHHH"
                 program_format = prefix + "IIQQQQQQ"
+                dynamic_format = prefix + "qQ"
                 filesz_offset = 32
                 filesz_format = prefix + "Q"
             elif elf_class == 1:
                 header_format = prefix + "HHIIIIIHHHHHH"
                 program_format = prefix + "IIIIIIII"
+                dynamic_format = prefix + "iI"
                 filesz_offset = 16
                 filesz_format = prefix + "I"
             else:
@@ -67,6 +69,7 @@ class NativeRuntimePtDynamicSizeTests(unittest.TestCase):
 
             header = struct.unpack_from(header_format, data, 16)
             program_offset, program_entry_size, program_count = header[4], header[8], header[9]
+            dynamic_entry_size = struct.calcsize(dynamic_format)
             dynamic_found = False
             for index in range(program_count):
                 ph_offset = program_offset + index * program_entry_size
@@ -74,7 +77,25 @@ class NativeRuntimePtDynamicSizeTests(unittest.TestCase):
                 if values[0] != 2:
                     continue
                 dynamic_found = True
-                struct.pack_into(filesz_format, data, ph_offset + filesz_offset, 0)
+                dynamic_offset = values[2] if elf_class == 2 else values[1]
+                dynamic_size = values[5] if elf_class == 2 else values[4]
+                entries = []
+                for entry_offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
+                    tag, value = struct.unpack_from(dynamic_format, data, entry_offset)
+                    entries.append((entry_offset, tag, value))
+                    if tag == 0:
+                        break
+                needed = next((entry for entry in entries if entry[1] == 1), None)
+                benign = next((entry for entry in entries if entry[1] not in {0, 1}), None)
+                self.assertIsNotNone(needed, "fixture must contain DT_NEEDED")
+                self.assertIsNotNone(benign, "fixture must contain a non-DT_NEEDED dynamic entry")
+                needed_offset, _needed_tag, _needed_value = needed
+                benign_offset, _benign_tag, _benign_value = benign
+                needed_bytes = bytes(data[needed_offset : needed_offset + dynamic_entry_size])
+                benign_bytes = bytes(data[benign_offset : benign_offset + dynamic_entry_size])
+                data[needed_offset : needed_offset + dynamic_entry_size] = benign_bytes
+                data[benign_offset : benign_offset + dynamic_entry_size] = needed_bytes
+                struct.pack_into(filesz_format, data, ph_offset + filesz_offset, dynamic_entry_size)
                 break
             self.assertTrue(dynamic_found, "fixture must contain PT_DYNAMIC")
             wrapper.write_bytes(data)
