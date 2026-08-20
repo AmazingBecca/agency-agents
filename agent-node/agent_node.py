@@ -10,6 +10,7 @@ import pathlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v5"
+RUNTIME_POLICY = "agent-node-python-runtime-v27"
 
 
 def _resolve_git_bin() -> str:
@@ -48,6 +49,23 @@ def _resolve_git_bin() -> str:
 
 
 GIT_BIN = _resolve_git_bin()
+
+
+def _resolve_ldd_bin() -> str:
+    if not sys.platform.startswith("linux"):
+        return ""
+    path = pathlib.Path("/usr/bin/ldd")
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("Linux native runtime closure requires trusted /usr/bin/ldd") from exc
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
+        raise RuntimeError("Linux native runtime closure requires executable /usr/bin/ldd")
+    return str(resolved)
+
+
+LDD_BIN = _resolve_ldd_bin()
 
 
 def canonical(value: object) -> bytes:
@@ -74,14 +92,23 @@ def _git_env() -> dict[str, str]:
 
 
 def _python_env() -> dict[str, str]:
-    """Remove interpreter and dynamic-loader injection variables for child Python."""
+    """Remove interpreter, loader, and shell-startup injection variables for child Python/tools."""
     env = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("PYTHON")
         and not key.startswith("LD_")
         and not key.startswith("DYLD_")
-        and key not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__"}
+        and not key.startswith("BASH_FUNC_")
+        and key
+        not in {
+            "VIRTUAL_ENV",
+            "__PYVENV_LAUNCHER__",
+            "BASH_ENV",
+            "ENV",
+            "SHELLOPTS",
+            "BASHOPTS",
+        }
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
@@ -345,6 +372,385 @@ def _runtime_archive_sha256(search_paths: tuple[str, ...] | None = None) -> str:
     return digest
 
 
+def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
+    """Read exact DT_NEEDED strings from ELF bytes so ldd line boundaries are not authority."""
+    resolved = path.resolve(strict=True)
+    data = resolved.read_bytes()
+    if len(data) < 16 or data[:4] != b"\x7fELF":
+        raise RuntimeError(f"native runtime candidate is not a supported ELF file: {path}")
+
+    elf_class = data[4]
+    elf_data = data[5]
+    if elf_data == 1:
+        prefix = "<"
+    elif elf_data == 2:
+        prefix = ">"
+    else:
+        raise RuntimeError(f"unsupported ELF byte order for native runtime candidate: {path}")
+
+    if elf_class == 2:
+        header_format = prefix + "HHIQQQIHHHHHH"
+        program_format = prefix + "IIQQQQQQ"
+        dynamic_format = prefix + "qQ"
+    elif elf_class == 1:
+        header_format = prefix + "HHIIIIIHHHHHH"
+        program_format = prefix + "IIIIIIII"
+        dynamic_format = prefix + "iI"
+    else:
+        raise RuntimeError(f"unsupported ELF class for native runtime candidate: {path}")
+
+    header_size = struct.calcsize(header_format)
+    if 16 + header_size > len(data):
+        raise RuntimeError(f"truncated ELF header for native runtime candidate: {path}")
+    header = struct.unpack_from(header_format, data, 16)
+    program_offset = header[4]
+    program_entry_size = header[8]
+    program_count = header[9]
+    required_program_size = struct.calcsize(program_format)
+    if program_count == 0xFFFF or program_entry_size < required_program_size:
+        raise RuntimeError(f"unsupported ELF program-header layout for native runtime candidate: {path}")
+
+    loads: list[tuple[int, int, int, int]] = []
+    dynamic_region: tuple[int, int, int] | None = None
+    for index in range(program_count):
+        offset = program_offset + index * program_entry_size
+        if offset + required_program_size > len(data):
+            raise RuntimeError(f"truncated ELF program headers for native runtime candidate: {path}")
+        values = struct.unpack_from(program_format, data, offset)
+        if elf_class == 2:
+            p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _align = values
+        else:
+            p_type, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _flags, _align = values
+        if p_offset + p_filesz > len(data):
+            raise RuntimeError(f"ELF segment exceeds file bytes for native runtime candidate: {path}")
+        if p_memsz < p_filesz:
+            raise RuntimeError(f"ELF PT_LOAD memory size is smaller than file size for native runtime candidate: {path}")
+        if p_type == 1:
+            loads.append((p_offset, p_vaddr, p_filesz, p_memsz))
+        elif p_type == 2:
+            dynamic_region = (p_offset, p_vaddr, p_filesz)
+
+    if dynamic_region is None:
+        return ()
+
+    try:
+        page_size = int(os.sysconf("SC_PAGESIZE"))
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Linux page size is unavailable for native runtime candidate: {path}") from exc
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise RuntimeError(f"unsupported Linux page size for native runtime candidate: {path}")
+
+    page_mask = page_size - 1
+
+    def validate_loader_page_aliases(
+        range_vaddr: int,
+        range_size: int,
+        mapped_file_offset: int,
+        label: str,
+    ) -> None:
+        if range_size <= 0:
+            raise RuntimeError(f"ELF {label} has an empty loader range for native runtime candidate: {path}")
+        range_end = range_vaddr + range_size
+        authoritative_deltas = {
+            load_offset - load_vaddr
+            for load_offset, load_vaddr, load_filesz, load_memsz in loads
+            if load_vaddr <= range_vaddr
+            and range_end <= load_vaddr + load_filesz
+            and load_offset + (range_vaddr - load_vaddr) == mapped_file_offset
+        }
+        if len(authoritative_deltas) != 1:
+            raise RuntimeError(
+                f"ELF {label} has no unique loader-equivalent mapping for native runtime candidate: {path}"
+            )
+        expected_delta = next(iter(authoritative_deltas))
+        range_page_start = range_vaddr & ~page_mask
+        range_page_end = (range_end + page_mask) & ~page_mask
+
+        for load_offset, load_vaddr, load_filesz, load_memsz in loads:
+            if load_memsz > load_filesz:
+                zero_fill_start = load_vaddr + load_filesz
+                zero_fill_end = load_vaddr + load_memsz
+                zero_fill_overlaps = zero_fill_start < range_end and range_vaddr < zero_fill_end
+                if zero_fill_overlaps:
+                    raise RuntimeError(
+                        f"ELF {label} overlaps PT_LOAD zero-fill range for native runtime candidate: {path}"
+                    )
+            if load_filesz <= 0:
+                # glibc may still map the containing file page for a non-page-aligned
+                # zero-length file range. Treat that page as loader-visible so a conflicting
+                # alternate mapping cannot replace protected PT_DYNAMIC/DT_STRTAB bytes.
+                if (load_vaddr & page_mask) == 0:
+                    continue
+                load_page_start = load_vaddr & ~page_mask
+                load_page_end = load_page_start + page_size
+            else:
+                load_page_start = load_vaddr & ~page_mask
+                load_page_end = (load_vaddr + load_filesz + page_size - 1) & ~page_mask
+            page_overlaps = load_page_start < range_page_end and range_page_start < load_page_end
+            if page_overlaps and load_offset - load_vaddr != expected_delta:
+                raise RuntimeError(
+                    f"ELF {label} page overlaps conflicting PT_LOAD mapping for native runtime candidate: {path}"
+                )
+
+    dynamic_file_offset, dynamic_vaddr, dynamic_size = dynamic_region
+    mapped_offsets: set[int] = set()
+    for load_offset, load_vaddr, load_filesz, load_memsz in loads:
+        if load_vaddr <= dynamic_vaddr and dynamic_vaddr + dynamic_size <= load_vaddr + load_filesz:
+            mapped_offset = load_offset + (dynamic_vaddr - load_vaddr)
+            if mapped_offset + dynamic_size > len(data):
+                raise RuntimeError(f"ELF PT_DYNAMIC virtual mapping exceeds file bytes for native runtime candidate: {path}")
+            mapped_offsets.add(mapped_offset)
+    if len(mapped_offsets) != 1:
+        raise RuntimeError(f"ELF PT_DYNAMIC virtual address has no unique PT_LOAD mapping for native runtime candidate: {path}")
+    dynamic_offset = next(iter(mapped_offsets))
+    if dynamic_file_offset != dynamic_offset:
+        raise RuntimeError(f"ELF PT_DYNAMIC file offset disagrees with loaded virtual-address mapping for native runtime candidate: {path}")
+    validate_loader_page_aliases(dynamic_vaddr, dynamic_size, dynamic_offset, "PT_DYNAMIC")
+    dynamic_entry_size = struct.calcsize(dynamic_format)
+    if dynamic_size % dynamic_entry_size != 0:
+        raise RuntimeError(f"invalid ELF dynamic table for native runtime candidate: {path}")
+
+    needed_offsets: list[int] = []
+    string_table_vaddr: int | None = None
+    string_table_size: int | None = None
+    saw_dynamic_null = False
+    for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
+        tag, value = struct.unpack_from(dynamic_format, data, offset)
+        if tag == 0:
+            saw_dynamic_null = True
+            break
+        if tag == 1:
+            needed_offsets.append(value)
+        elif tag == 5:
+            string_table_vaddr = value
+        elif tag == 10:
+            string_table_size = value
+
+    if not saw_dynamic_null:
+        raise RuntimeError(f"ELF dynamic table lacks DT_NULL within PT_DYNAMIC file region for native runtime candidate: {path}")
+    if not needed_offsets:
+        return ()
+    if string_table_vaddr is None or string_table_size is None:
+        raise RuntimeError(f"ELF dynamic strings are unavailable for native runtime candidate: {path}")
+
+    string_table_offsets: set[int] = set()
+    for p_offset, p_vaddr, p_filesz, p_memsz in loads:
+        if p_vaddr <= string_table_vaddr and string_table_vaddr + string_table_size <= p_vaddr + p_filesz:
+            mapped_offset = p_offset + (string_table_vaddr - p_vaddr)
+            if mapped_offset + string_table_size > len(data):
+                raise RuntimeError(f"ELF dynamic string table mapping exceeds file bytes for native runtime candidate: {path}")
+            string_table_offsets.add(mapped_offset)
+    if len(string_table_offsets) != 1:
+        raise RuntimeError(f"ELF dynamic string table has no unique PT_LOAD mapping for native runtime candidate: {path}")
+    string_table_offset = next(iter(string_table_offsets))
+    validate_loader_page_aliases(
+        string_table_vaddr, string_table_size, string_table_offset, "dynamic string table"
+    )
+    string_table_end = string_table_offset + string_table_size
+    if string_table_end > len(data):
+        raise RuntimeError(f"ELF dynamic string table exceeds file bytes for native runtime candidate: {path}")
+
+    names: list[bytes] = []
+    for needed_offset in needed_offsets:
+        start = string_table_offset + needed_offset
+        if start < string_table_offset or start >= string_table_end:
+            raise RuntimeError(f"ELF DT_NEEDED offset is invalid for native runtime candidate: {path}")
+        end = data.find(b"\0", start, string_table_end)
+        if end < 0:
+            raise RuntimeError(f"ELF DT_NEEDED string is unterminated for native runtime candidate: {path}")
+        names.append(data[start:end])
+    return tuple(names)
+
+
+def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
+    if not sys.platform.startswith("linux") or not LDD_BIN:
+        raise RuntimeError("native runtime dependency discovery is supported only on Linux")
+    if path.exists():
+        needed_names = _elf_needed_name_bytes(path)
+        if any(b"\n" in name or b"\r" in name for name in needed_names):
+            raise RuntimeError(f"unsupported multiline DT_NEEDED record for native runtime candidate: {path}")
+    env = _python_env()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    cp = subprocess.run(
+        [LDD_BIN, os.fspath(path)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=env,
+    )
+    text = cp.stdout + "\n" + cp.stderr
+    if "not found" in text:
+        raise RuntimeError(f"native runtime dependency is unresolved for {path}: {text.strip()}")
+    if cp.returncode != 0:
+        raise RuntimeError(f"native runtime dependency discovery failed for {path}: {text.strip()}")
+
+    dependencies: set[pathlib.Path] = set()
+    address_suffix = re.compile(r" \(0x[0-9a-fA-F]+\)\s*$")
+    mapped_path = re.compile(r" => (?P<path>/.*)$")
+    pseudo_objects = {"linux-vdso.so.1", "linux-gate.so.1"}
+    saw_static_marker = False
+    saw_dependency_record = False
+
+    for raw_line in cp.stdout.splitlines():
+        line = raw_line[1:] if raw_line.startswith("\t") else raw_line
+        if not line:
+            raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+        if line == "statically linked":
+            if saw_static_marker or saw_dependency_record:
+                raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+            saw_static_marker = True
+            continue
+        if saw_static_marker:
+            raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+        if address_suffix.search(line) is None:
+            raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+
+        body = address_suffix.sub("", line, count=1)
+        candidate = ""
+        if body.startswith("/"):
+            candidate = body
+        else:
+            match = mapped_path.search(body)
+            if match:
+                left = body[: match.start()]
+                if "/" in left:
+                    raise RuntimeError(f"ambiguous direct native dependency from ldd for {path}: {body}")
+                candidate = match.group("path")
+            elif "/" in body:
+                try:
+                    candidate = os.fspath(pathlib.Path(body).resolve(strict=True))
+                except OSError as exc:
+                    raise RuntimeError(f"direct native dependency cannot be resolved for {path}: {body}") from exc
+            elif body in pseudo_objects:
+                saw_dependency_record = True
+                continue
+            else:
+                raise RuntimeError(f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")
+
+        if not candidate.startswith("/"):
+            raise RuntimeError(f"native runtime dependency discovery returned non-absolute path for {path}: {candidate}")
+        dependencies.add(pathlib.Path(candidate))
+        saw_dependency_record = True
+
+    return tuple(sorted(dependencies, key=os.fspath))
+
+def _child_native_runtime_paths(executable: str) -> tuple[pathlib.Path, ...]:
+    """Return Linux loader/DSO closure for the exact isolated Python runtime."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("native runtime closure is not implemented for this platform")
+
+    probe = (
+        "import os,sys,unittest;"
+        "paths=set();"
+        "lines=open('/proc/self/maps','r',encoding='utf-8').read().splitlines();"
+        "[(paths.add(parts[5])) for line in lines "
+        "if len((parts:=line.split(None,5)))>=6 and 'x' in parts[1] "
+        "and parts[5].startswith('/') and not parts[5].endswith(' (deleted)')];"
+        "sys.stdout.buffer.write(b'\\0'.join("
+        "p.encode('utf-8','surrogateescape') for p in sorted(paths)))"
+    )
+    cp = subprocess.run(
+        [executable, "-I", "-B", "-S", "-c", probe],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=_python_env(),
+    )
+    discovered: set[pathlib.Path] = {
+        pathlib.Path(part.decode("utf-8", "surrogateescape"))
+        for part in cp.stdout.split(b"\0")
+        if part
+    }
+
+    search_paths = _child_runtime_search_paths(executable)
+    roots = _runtime_roots(search_paths)
+    candidates: set[pathlib.Path] = {pathlib.Path(executable).resolve(strict=True)}
+    for root in roots:
+        for dirpath, _dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+            directory = pathlib.Path(dirpath)
+            for filename in filenames:
+                if ".so" not in filename:
+                    continue
+                candidate = directory / filename
+                try:
+                    metadata = candidate.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise RuntimeError(f"native runtime candidate cannot be inspected: {candidate}") from exc
+                if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                    candidates.add(candidate)
+
+    for candidate in sorted(candidates, key=os.fspath):
+        discovered.add(candidate)
+        discovered.update(_ldd_dependency_paths(candidate))
+    discovered.add(pathlib.Path(LDD_BIN))
+
+    result = tuple(sorted(discovered, key=os.fspath))
+    if not result:
+        raise RuntimeError("isolated Python child has no bindable native runtime dependencies")
+    if any(not path.is_absolute() for path in result):
+        raise RuntimeError("native runtime dependency discovery returned a non-absolute path")
+    return result
+
+
+def _runtime_native_sha256(paths: tuple[pathlib.Path, ...]) -> str:
+    records: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for value in paths:
+        lexical = pathlib.Path(value)
+        if not lexical.is_absolute():
+            raise RuntimeError(f"native runtime dependency path is not absolute: {lexical}")
+        identity_path = os.fspath(lexical)
+        if identity_path in seen:
+            continue
+        seen.add(identity_path)
+        try:
+            metadata = lexical.lstat()
+        except OSError as exc:
+            raise RuntimeError(f"native runtime dependency cannot be inspected: {lexical}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                link_target = os.readlink(lexical)
+                resolved_target = lexical.resolve(strict=True)
+                target_metadata = resolved_target.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"native runtime dependency symlink cannot be resolved: {lexical}") from exc
+            if not stat.S_ISREG(target_metadata.st_mode):
+                raise RuntimeError(f"native runtime dependency target is not a regular file: {lexical}")
+            records.append(
+                {
+                    "path": identity_path,
+                    "kind": "symlink-file",
+                    "link_target": link_target,
+                    "resolved_target": os.fspath(resolved_target),
+                    "target_mode": stat.S_IMODE(target_metadata.st_mode),
+                    "target_size": target_metadata.st_size,
+                    "target_sha256": _stable_regular_file_sha256(resolved_target),
+                }
+            )
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"native runtime dependency is not a regular file: {lexical}")
+        records.append(
+            {
+                "path": identity_path,
+                "kind": "file",
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "size": metadata.st_size,
+                "sha256": _stable_regular_file_sha256(lexical),
+            }
+        )
+    if not records:
+        raise RuntimeError("native runtime closure contains no bindable files")
+    digest = hashlib.sha256(canonical(records)).hexdigest()
+    if not SHA64.fullmatch(digest):
+        raise RuntimeError("native runtime identity is invalid")
+    return digest
+
+
 def python_runtime_identity() -> tuple[str, str]:
     executable = pathlib.Path(sys.executable).resolve(strict=True)
     binary_sha256 = _stable_regular_file_sha256(executable)
@@ -352,6 +758,8 @@ def python_runtime_identity() -> tuple[str, str]:
     runtime_search_path_sha256 = hashlib.sha256(canonical(list(runtime_search_paths))).hexdigest()
     runtime_tree_sha256 = _runtime_tree_sha256(_runtime_roots(runtime_search_paths))
     runtime_archive_sha256 = _runtime_archive_sha256(runtime_search_paths)
+    runtime_native_paths = _child_native_runtime_paths(str(executable))
+    runtime_native_sha256 = _runtime_native_sha256(runtime_native_paths)
     material = {
         "policy": RUNTIME_POLICY,
         "implementation": sys.implementation.name,
@@ -361,6 +769,7 @@ def python_runtime_identity() -> tuple[str, str]:
         "runtime_search_path_sha256": runtime_search_path_sha256,
         "runtime_tree_sha256": runtime_tree_sha256,
         "runtime_archive_sha256": runtime_archive_sha256,
+        "runtime_native_sha256": runtime_native_sha256,
         "isolated_flag": "-I",
         "bytecode_flag": "-B",
         "no_site_flag": "-S",
