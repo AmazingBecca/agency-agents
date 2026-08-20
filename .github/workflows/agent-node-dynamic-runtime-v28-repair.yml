@@ -4,20 +4,26 @@ on:
   push:
     branches:
       - hardening/agent-node-dynamic-runtime-closure-v2
+  pull_request:
+    branches:
+      - hardening/agent-node-native-runtime-closure-v1
+    types: [synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   repair:
-    if: github.event.head_commit.message == 'build: stage v28 dynamic runtime repair'
+    if: >-
+      (github.event_name == 'push' && github.event.head_commit.message == 'build: stage v28 dynamic runtime repair') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'hardening/agent-node-dynamic-runtime-closure-v2')
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
       - name: Fetch exact staging head without workflow credentials
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -48,7 +54,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
