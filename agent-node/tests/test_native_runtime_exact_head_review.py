@@ -227,6 +227,20 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
             "ldd parsing must not trim a dependency pathname onto a decoy file",
         )
 
+    def test_ldd_parser_rejects_multiline_dependency_record(self):
+        fake = subprocess.CompletedProcess(
+            args=["/usr/bin/ldd", "/runtime/python"],
+            returncode=0,
+            stdout=(
+                "\tdir\n"
+                "\t/lib/x86_64-linux-gnu/libc.so.6 (0x00007f0000000000)\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(mod.subprocess, "run", return_value=fake):
+            with self.assertRaisesRegex(RuntimeError, "unsupported or multiline native dependency"):
+                mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
+
 
 if __name__ == "__main__":
     unittest.main()
