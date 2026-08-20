@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v26"
+RUNTIME_POLICY = "agent-node-python-runtime-v27"
 
 
 def _resolve_git_bin() -> str:
@@ -479,7 +479,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
                 # glibc may still map the containing file page for a non-page-aligned
                 # zero-length file range. Treat that page as loader-visible so a conflicting
                 # alternate mapping cannot replace protected PT_DYNAMIC/DT_STRTAB bytes.
-                if load_memsz <= 0 or (load_vaddr & page_mask) == 0:
+                if (load_vaddr & page_mask) == 0:
                     continue
                 load_page_start = load_vaddr & ~page_mask
                 load_page_end = load_page_start + page_size
