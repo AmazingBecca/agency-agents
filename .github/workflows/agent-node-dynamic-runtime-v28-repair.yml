@@ -1,0 +1,62 @@
+name: Agent Node Dynamic Runtime v28 Repair
+
+on:
+  push:
+    branches:
+      - hardening/agent-node-dynamic-runtime-closure-v2
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'build: stage v28 dynamic runtime repair'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Fetch exact staging head without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          unset GITHUB_TOKEN GH_TOKEN
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git hash-object agent-node/agent_node.py)" = '84ab624f9f26a3eb9f9ddbd36e5c2b151afb82e0'
+          test "$(git hash-object agent-node/tests/test_runtime_closure.py)" = '5d333babe635de2325adf3e4a2ef2b23a3ca98e3'
+          test "$(git hash-object agent-node/tests/test_dynamic_native_runtime_gap.py)" = '76307183a9b6f554d3d80a76454194c430fcc06b'
+          test "$(git hash-object agent-node/tools/apply_dynamic_runtime_v28.py)" = 'a2b10a9ae5b21899aaf5f76b8f8ff0d28e0052a0'
+      - name: Apply exact-bound v28 repair and run complete suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 agent-node/tools/apply_dynamic_runtime_v28.py
+          python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_runtime_closure.py agent-node/tests/test_dynamic_native_runtime_gap.py
+          python3 -B -m unittest discover -s agent-node/tests -v
+          git diff --exit-code -- . ':(exclude)agent-node/agent_node.py' ':(exclude)agent-node/tests/test_runtime_closure.py'
+          test -n "$(git diff -- agent-node/agent_node.py)"
+          test -n "$(git diff -- agent-node/tests/test_runtime_closure.py)"
+          echo "V28_SOURCE_BLOB=$(git hash-object agent-node/agent_node.py)"
+          echo "V28_RUNTIME_TEST_BLOB=$(git hash-object agent-node/tests/test_runtime_closure.py)"
+      - name: Publish validated v28 as non-forced fast-forward
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          remote_head="$(git ls-remote origin refs/heads/hardening/agent-node-dynamic-runtime-closure-v2 | awk '{print $1}')"
+          test "$remote_head" = "$EXPECTED_SHA"
+          git config user.name 'AmazingBecca'
+          git config user.email '134438105+AmazingBecca@users.noreply.github.com'
+          git add agent-node/agent_node.py agent-node/tests/test_runtime_closure.py
+          git commit -m 'security: bind executed-child native runtime mappings'
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c http.extraHeader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/hardening/agent-node-dynamic-runtime-closure-v2
