@@ -46,12 +46,11 @@ class RuntimeZipArchiveTests(unittest.TestCase):
             root.mkdir(parents=True)
             (root / "runtime_anchor.py").write_text("VALUE = 'anchor'\n", encoding="utf-8")
             archive = lib / f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+            search_paths = (str(archive), str(root))
 
             self._write_archive(archive, "one")
             self.assertEqual(self._import_from_archive(archive), "one")
-            with mock.patch.object(mod, "_runtime_roots", return_value=(root,)), mock.patch.object(
-                mod.sys, "path", [str(archive), str(root)]
-            ):
+            with mock.patch.object(mod, "_isolated_child_sys_path", return_value=search_paths):
                 _python, before = mod.python_runtime_identity()
                 self._write_archive(archive, "two")
                 self.assertEqual(self._import_from_archive(archive), "two")
@@ -72,12 +71,11 @@ class RuntimeZipArchiveTests(unittest.TestCase):
             (root / "runtime_anchor.py").write_text("VALUE = 'anchor'\n", encoding="utf-8")
             archive = lib / "runtime.zip"
             search_entry = f"{archive}/inside"
+            search_paths = (search_entry, str(root))
 
             self._write_archive(archive, "one", member="inside/runtime_probe.py")
             self.assertEqual(self._import_from_archive(search_entry), "one")
-            with mock.patch.object(mod, "_runtime_roots", return_value=(root,)), mock.patch.object(
-                mod.sys, "path", [search_entry, str(root)]
-            ):
+            with mock.patch.object(mod, "_isolated_child_sys_path", return_value=search_paths):
                 _python, before = mod.python_runtime_identity()
                 self._write_archive(archive, "two", member="inside/runtime_probe.py")
                 self.assertEqual(self._import_from_archive(search_entry), "two")
@@ -99,12 +97,11 @@ class RuntimeZipArchiveTests(unittest.TestCase):
             archive = lib / "runtime.zip"
             search_entry = f"{archive}/../shadow/inside"
             archive_member = "../shadow/inside/runtime_probe.py"
+            search_paths = (search_entry, str(root))
 
             self._write_archive(archive, "one", member=archive_member)
             self.assertEqual(self._import_from_archive(search_entry), "one")
-            with mock.patch.object(mod, "_runtime_roots", return_value=(root,)), mock.patch.object(
-                mod.sys, "path", [search_entry, str(root)]
-            ):
+            with mock.patch.object(mod, "_isolated_child_sys_path", return_value=search_paths):
                 _python, before = mod.python_runtime_identity()
                 self._write_archive(archive, "two", member=archive_member)
                 self.assertEqual(self._import_from_archive(search_entry), "two")

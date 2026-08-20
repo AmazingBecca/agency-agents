@@ -12,7 +12,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import sysconfig
 import tempfile
 import urllib.parse
 import urllib.request
@@ -26,8 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v4"
-RUNTIME_IGNORED_DIRS = frozenset({"site-packages", "dist-packages"})
+RUNTIME_POLICY = "agent-node-python-runtime-v5"
 
 
 def _resolve_git_bin() -> str:
@@ -129,15 +127,100 @@ def _stable_regular_file_sha256(path: pathlib.Path) -> str:
         os.close(fd)
 
 
-def _runtime_roots() -> tuple[pathlib.Path, ...]:
-    roots: list[pathlib.Path] = []
-    for key in ("stdlib", "platstdlib"):
-        value = sysconfig.get_path(key)
-        if not value:
+def _child_runtime_search_paths(executable: str) -> tuple[str, ...]:
+    """Read sys.path from the exact scrubbed isolated child configuration."""
+    probe = (
+        "import sys;"
+        "sys.stdout.buffer.write(b'\\0'.join("
+        "value.encode('utf-8','surrogateescape') for value in sys.path))"
+    )
+    cp = subprocess.run(
+        [executable, "-I", "-B", "-S", "-c", probe],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=_python_env(),
+    )
+    values = tuple(part.decode("utf-8", "surrogateescape") for part in cp.stdout.split(b"\0"))
+    if not values or any(not value for value in values):
+        raise RuntimeError("isolated Python child returned an empty runtime search path")
+    for value in values:
+        if not pathlib.Path(value).is_absolute():
+            raise RuntimeError(f"isolated Python child returned a non-absolute runtime search path: {value}")
+    return values
+
+
+def _runtime_archive_boundary(value: str) -> pathlib.Path | None:
+    """Return the lexical archive file underlying one executable sys.path entry."""
+    if not value:
+        return None
+    candidate = pathlib.Path(value)
+    if not candidate.is_absolute():
+        candidate = pathlib.Path.cwd() / candidate
+    lexical = candidate
+
+    textual_zip_boundary: pathlib.Path | None = None
+    parts = lexical.parts
+    for index in range(1, len(parts) + 1):
+        prefix = pathlib.Path(*parts[:index])
+        if textual_zip_boundary is None and prefix.name.lower().endswith(".zip"):
+            textual_zip_boundary = prefix
+        try:
+            metadata = prefix.lstat()
+        except FileNotFoundError:
             continue
-        root = pathlib.Path(value).resolve(strict=True)
-        if not root.is_dir():
-            raise RuntimeError(f"Python runtime root is not a directory: {root}")
+        except OSError as exc:
+            raise RuntimeError(f"Python runtime search path cannot be inspected: {prefix}") from exc
+
+        if stat.S_ISREG(metadata.st_mode):
+            return prefix
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                resolved_target = prefix.resolve(strict=True)
+                target_metadata = resolved_target.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"Python runtime search-path symlink cannot be resolved: {prefix}") from exc
+            if stat.S_ISREG(target_metadata.st_mode):
+                return prefix
+            if stat.S_ISDIR(target_metadata.st_mode):
+                continue
+            raise RuntimeError(f"Python runtime search-path symlink target is unsupported: {prefix}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"Python runtime search-path component is unsupported: {prefix}")
+
+    return textual_zip_boundary
+
+
+def _runtime_roots(search_paths: tuple[str, ...] | None = None) -> tuple[pathlib.Path, ...]:
+    if search_paths is None:
+        search_paths = _child_runtime_search_paths(str(pathlib.Path(sys.executable).resolve(strict=True)))
+    roots: list[pathlib.Path] = []
+    for value in search_paths:
+        if _runtime_archive_boundary(value) is not None:
+            continue
+        lexical = pathlib.Path(value)
+        try:
+            metadata = lexical.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(f"Python runtime root cannot be inspected: {lexical}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                resolved = lexical.resolve(strict=True)
+                target_metadata = resolved.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"Python runtime root symlink cannot be resolved: {lexical}") from exc
+            if not stat.S_ISDIR(target_metadata.st_mode):
+                raise RuntimeError(f"Python runtime root symlink target is not a directory: {lexical}")
+            root = resolved
+        elif stat.S_ISDIR(metadata.st_mode):
+            root = lexical.resolve(strict=True)
+        elif stat.S_ISREG(metadata.st_mode):
+            continue
+        else:
+            raise RuntimeError(f"Python runtime search root is unsupported: {lexical}")
         if root not in roots:
             roots.append(root)
     if not roots:
@@ -152,7 +235,7 @@ def _runtime_tree_sha256(roots: tuple[pathlib.Path, ...]) -> str:
         if not root.is_dir():
             raise RuntimeError(f"Python runtime root is not a directory: {root}")
         for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-            dirnames[:] = sorted(name for name in dirnames if name not in RUNTIME_IGNORED_DIRS)
+            dirnames[:] = sorted(dirnames)
             directory = pathlib.Path(dirpath)
             for dirname in dirnames:
                 child = directory / dirname
@@ -205,55 +288,16 @@ def _runtime_tree_sha256(roots: tuple[pathlib.Path, ...]) -> str:
     return digest
 
 
-def _runtime_archive_boundary(value: str) -> pathlib.Path | None:
-    """Return the lexical archive file underlying one executable sys.path entry."""
-    if not value:
-        return None
-    candidate = pathlib.Path(value)
-    if not candidate.is_absolute():
-        candidate = pathlib.Path.cwd() / candidate
-    lexical = candidate
-
-    textual_zip_boundary: pathlib.Path | None = None
-    parts = lexical.parts
-    for index in range(1, len(parts) + 1):
-        prefix = pathlib.Path(*parts[:index])
-        if textual_zip_boundary is None and prefix.name.lower().endswith(".zip"):
-            textual_zip_boundary = prefix
-        try:
-            metadata = prefix.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise RuntimeError(f"Python runtime search path cannot be inspected: {prefix}") from exc
-
-        if stat.S_ISREG(metadata.st_mode):
-            return prefix
-        if stat.S_ISLNK(metadata.st_mode):
-            try:
-                resolved_target = prefix.resolve(strict=True)
-                target_metadata = resolved_target.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise RuntimeError(f"Python runtime search-path symlink cannot be resolved: {prefix}") from exc
-            if stat.S_ISREG(target_metadata.st_mode):
-                return prefix
-            if stat.S_ISDIR(target_metadata.st_mode):
-                continue
-            raise RuntimeError(f"Python runtime search-path symlink target is unsupported: {prefix}")
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise RuntimeError(f"Python runtime search-path component is unsupported: {prefix}")
-
-    return textual_zip_boundary
-
-
-def _runtime_archive_sha256() -> str:
+def _runtime_archive_sha256(search_paths: tuple[str, ...] | None = None) -> str:
+    if search_paths is None:
+        search_paths = _child_runtime_search_paths(str(pathlib.Path(sys.executable).resolve(strict=True)))
     records: list[dict[str, object]] = []
     seen: set[str] = set()
-    for value in sys.path:
+    for value in search_paths:
         boundary = _runtime_archive_boundary(value)
         if boundary is None:
             continue
-        lexical = pathlib.Path(os.path.abspath(boundary))
+        lexical = boundary
         identity_path = os.fspath(lexical)
         if identity_path in seen:
             continue
@@ -304,14 +348,17 @@ def _runtime_archive_sha256() -> str:
 def python_runtime_identity() -> tuple[str, str]:
     executable = pathlib.Path(sys.executable).resolve(strict=True)
     binary_sha256 = _stable_regular_file_sha256(executable)
-    runtime_tree_sha256 = _runtime_tree_sha256(_runtime_roots())
-    runtime_archive_sha256 = _runtime_archive_sha256()
+    runtime_search_paths = _child_runtime_search_paths(str(executable))
+    runtime_search_path_sha256 = hashlib.sha256(canonical(list(runtime_search_paths))).hexdigest()
+    runtime_tree_sha256 = _runtime_tree_sha256(_runtime_roots(runtime_search_paths))
+    runtime_archive_sha256 = _runtime_archive_sha256(runtime_search_paths)
     material = {
         "policy": RUNTIME_POLICY,
         "implementation": sys.implementation.name,
         "cache_tag": sys.implementation.cache_tag or "",
         "version": ".".join(str(part) for part in sys.version_info[:3]),
         "binary_sha256": binary_sha256,
+        "runtime_search_path_sha256": runtime_search_path_sha256,
         "runtime_tree_sha256": runtime_tree_sha256,
         "runtime_archive_sha256": runtime_archive_sha256,
         "isolated_flag": "-I",
