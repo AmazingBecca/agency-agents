@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v3"
+RUNTIME_POLICY = "agent-node-python-runtime-v4"
 RUNTIME_IGNORED_DIRS = frozenset({"site-packages", "dist-packages"})
 
 
@@ -205,18 +205,55 @@ def _runtime_tree_sha256(roots: tuple[pathlib.Path, ...]) -> str:
     return digest
 
 
+def _runtime_archive_boundary(value: str) -> pathlib.Path | None:
+    """Return the lexical archive file underlying one executable sys.path entry."""
+    if not value:
+        return None
+    candidate = pathlib.Path(value)
+    if not candidate.is_absolute():
+        candidate = pathlib.Path.cwd() / candidate
+    lexical = pathlib.Path(os.path.abspath(candidate))
+
+    textual_zip_boundary: pathlib.Path | None = None
+    parts = lexical.parts
+    for index in range(1, len(parts) + 1):
+        prefix = pathlib.Path(*parts[:index])
+        if textual_zip_boundary is None and prefix.name.lower().endswith(".zip"):
+            textual_zip_boundary = prefix
+        try:
+            metadata = prefix.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(f"Python runtime search path cannot be inspected: {prefix}") from exc
+
+        if stat.S_ISREG(metadata.st_mode):
+            return prefix
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                resolved_target = prefix.resolve(strict=True)
+                target_metadata = resolved_target.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"Python runtime search-path symlink cannot be resolved: {prefix}") from exc
+            if stat.S_ISREG(target_metadata.st_mode):
+                return prefix
+            if stat.S_ISDIR(target_metadata.st_mode):
+                continue
+            raise RuntimeError(f"Python runtime search-path symlink target is unsupported: {prefix}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"Python runtime search-path component is unsupported: {prefix}")
+
+    return textual_zip_boundary
+
+
 def _runtime_archive_sha256() -> str:
     records: list[dict[str, object]] = []
     seen: set[str] = set()
     for value in sys.path:
-        if not value:
+        boundary = _runtime_archive_boundary(value)
+        if boundary is None:
             continue
-        candidate = pathlib.Path(value)
-        if candidate.suffix.lower() != ".zip":
-            continue
-        if not candidate.is_absolute():
-            candidate = pathlib.Path.cwd() / candidate
-        lexical = pathlib.Path(os.path.abspath(candidate))
+        lexical = pathlib.Path(os.path.abspath(boundary))
         identity_path = os.fspath(lexical)
         if identity_path in seen:
             continue
