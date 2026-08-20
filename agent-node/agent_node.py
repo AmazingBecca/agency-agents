@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v8"
+RUNTIME_POLICY = "agent-node-python-runtime-v9"
 
 
 def _resolve_git_bin() -> str:
@@ -53,18 +53,15 @@ GIT_BIN = _resolve_git_bin()
 def _resolve_ldd_bin() -> str:
     if not sys.platform.startswith("linux"):
         return ""
-    for candidate in ("/usr/bin/ldd", shutil.which("ldd") or ""):
-        if not candidate:
-            continue
-        path = pathlib.Path(candidate)
-        try:
-            resolved = path.resolve(strict=True)
-            metadata = resolved.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        if stat.S_ISREG(metadata.st_mode) and os.access(resolved, os.X_OK):
-            return str(resolved)
-    raise RuntimeError("Linux native runtime closure requires an executable ldd")
+    path = pathlib.Path("/usr/bin/ldd")
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("Linux native runtime closure requires trusted /usr/bin/ldd") from exc
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
+        raise RuntimeError("Linux native runtime closure requires executable /usr/bin/ldd")
+    return str(resolved)
 
 
 LDD_BIN = _resolve_ldd_bin()
@@ -389,16 +386,19 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
 
     dependencies: set[pathlib.Path] = set()
     address_suffix = re.compile(r"\s+\(0x[0-9a-fA-F]+\)\s*$")
+    mapped_path = re.compile(r" => (?P<path>/.*)$")
     for raw_line in cp.stdout.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+        body = address_suffix.sub("", line)
         candidate = ""
-        if " => " in line:
-            _name, rhs = line.rsplit(" => ", 1)
-            candidate = address_suffix.sub("", rhs.strip())
-        elif line.startswith("/"):
-            candidate = address_suffix.sub("", line)
+        if body.startswith("/"):
+            candidate = body
+        else:
+            match = mapped_path.search(body)
+            if match:
+                candidate = match.group("path")
         if not candidate.startswith("/"):
             continue
         dependencies.add(pathlib.Path(candidate))
