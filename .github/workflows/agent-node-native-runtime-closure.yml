@@ -45,5 +45,5 @@ jobs:
             agent-node/tests/test_native_runtime_closure.py \
             agent-node/tests/test_native_runtime_multiline_spoof.py
           test "$(git hash-object agent-node/agent_node.py)" = '40fd9d6beadc3b291a74876b85ff9e6103964907'
-          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'd580bc0bdc3c19d2ce5fe3c4be3372dd2877a214'
+          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'a5f9f72605fc056ca71bdf0d47598c1d2c6da20d'
           python3 -B -m unittest discover -s agent-node/tests -v
