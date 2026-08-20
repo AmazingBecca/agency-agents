@@ -121,15 +121,24 @@ class RuntimeClosureTests(unittest.TestCase):
             yield "a" * 40, "b" * 40, snapshot
 
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="OK\n")
+
+        def fake_run(argv, **_kwargs):
+            receipt_fd = int(argv[-1])
+            mod.os.write(receipt_fd, mod.json.dumps(["/usr/bin/python3"]).encode("utf-8"))
+            return completed
+
         with mock.patch.object(mod, "TEST_ALLOWLIST", ("tests.test_safe",)), \
              mock.patch.object(mod, "python_runtime_identity", side_effect=[("/usr/bin/python3", "c" * 64), ("/usr/bin/python3", "c" * 64)]), \
              mock.patch.object(mod, "committed_snapshot", fake_snapshot), \
-             mock.patch.object(mod.subprocess, "run", return_value=completed) as run:
+             mock.patch.object(mod, "_runtime_native_sha256", return_value="d" * 64), \
+             mock.patch.object(mod.subprocess, "run", side_effect=fake_run) as run:
             result = mod.run_tests("a" * 40, "tests.test_safe")
 
         argv = run.call_args.args[0]
         self.assertEqual(argv[:4], ["/usr/bin/python3", "-I", "-B", "-S"])
         self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["static_runtime_sha256"], "c" * 64)
+        self.assertEqual(result["executed_native_sha256"], "d" * 64)
         self.assertEqual(result["stdout_sha256"], hashlib.sha256(b"OK\n").hexdigest())
 
 
