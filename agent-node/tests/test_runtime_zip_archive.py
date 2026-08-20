@@ -89,6 +89,33 @@ class RuntimeZipArchiveTests(unittest.TestCase):
             "runtime identity must bind a ZIP container referenced through a sys.path subdirectory",
         )
 
+    def test_zip_dot_segment_entry_binds_original_archive(self):
+        """Dot segments after a ZIP boundary must not hide the archive from runtime identity."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lib = pathlib.Path(temp_dir) / "lib"
+            root = lib / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            root.mkdir(parents=True)
+            (root / "runtime_anchor.py").write_text("VALUE = 'anchor'\n", encoding="utf-8")
+            archive = lib / "runtime.zip"
+            search_entry = f"{archive}/../shadow/inside"
+            archive_member = "../shadow/inside/runtime_probe.py"
+
+            self._write_archive(archive, "one", member=archive_member)
+            self.assertEqual(self._import_from_archive(search_entry), "one")
+            with mock.patch.object(mod, "_runtime_roots", return_value=(root,)), mock.patch.object(
+                mod.sys, "path", [search_entry, str(root)]
+            ):
+                _python, before = mod.python_runtime_identity()
+                self._write_archive(archive, "two", member=archive_member)
+                self.assertEqual(self._import_from_archive(search_entry), "two")
+                _python, after = mod.python_runtime_identity()
+
+        self.assertNotEqual(
+            before,
+            after,
+            "runtime identity must bind the original ZIP before dot-segment normalization",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
