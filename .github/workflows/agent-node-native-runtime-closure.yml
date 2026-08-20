@@ -9,84 +9,33 @@ on:
       - hardening/agent-node-runtime-closure-v1
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Fetch exact candidate source
+      - name: Fetch exact candidate source without workflow credentials
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          unset GITHUB_TOKEN GH_TOKEN
           test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
           git init .
           git remote add origin 'https://github.com/AmazingBecca/agency-agents.git'
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-      - name: Repair PT_DYNAMIC truncation boundary and validate exact head
+      - name: Compile and run exact native-runtime regressions
         shell: bash
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BRANCH: hardening/agent-node-native-runtime-closure-v1
-          PREDECESSOR_SOURCE_BLOB: 678f8fa92964601e35843317347cba7e156839ce
-          DISCRIMINATOR_BLOB: 216ab72cf125c5d7a792c1508f6e1cc585b08c01
         run: |
           set -Eeuo pipefail
-          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           python3 --version
           cc --version | head -n 1
-          test "$(git hash-object agent-node/tests/test_native_runtime_pt_dynamic_size.py)" = "$DISCRIMINATOR_BLOB"
-          SOURCE_BLOB="$(git hash-object agent-node/agent_node.py)"
-          if [ "$SOURCE_BLOB" = "$PREDECESSOR_SOURCE_BLOB" ]; then
-            python3 - <<'PY'
-          from pathlib import Path
-
-          source = Path('agent-node/agent_node.py')
-          text = source.read_text(encoding='utf-8')
-          pairs = [
-              (
-                  'RUNTIME_POLICY = "agent-node-python-runtime-v20"',
-                  'RUNTIME_POLICY = "agent-node-python-runtime-v21"',
-              ),
-              (
-                  '    string_table_size: int | None = None\n'
-                  '    for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):\n',
-                  '    string_table_size: int | None = None\n'
-                  '    saw_dynamic_null = False\n'
-                  '    for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):\n',
-              ),
-              (
-                  '        if tag == 0:\n'
-                  '            break\n'
-                  '        if tag == 1:\n',
-                  '        if tag == 0:\n'
-                  '            saw_dynamic_null = True\n'
-                  '            break\n'
-                  '        if tag == 1:\n',
-              ),
-              (
-                  '    if not needed_offsets:\n'
-                  '        return ()\n',
-                  '    if not saw_dynamic_null:\n'
-                  '        raise RuntimeError(f"ELF dynamic table lacks DT_NULL within PT_DYNAMIC file region for native runtime candidate: {path}")\n'
-                  '    if not needed_offsets:\n'
-                  '        return ()\n',
-              ),
-          ]
-          for old, new in pairs:
-              if text.count(old) != 1:
-                  raise SystemExit(f'patch boundary missing or ambiguous: {old!r}')
-              text = text.replace(old, new, 1)
-          source.write_text(text, encoding='utf-8')
-          PY
-          fi
           python3 -B -m py_compile \
             agent-node/agent_node.py \
             agent-node/tests/test_agent_node.py \
@@ -96,17 +45,7 @@ jobs:
             agent-node/tests/test_native_runtime_closure.py \
             agent-node/tests/test_native_runtime_multiline_spoof.py \
             agent-node/tests/test_native_runtime_pt_dynamic_size.py
+          test "$(git hash-object agent-node/agent_node.py)" = '9fb07249a64075ee558dea03255bbbc6346b4e0b'
+          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'ed9a4da9643d5ce6a68017437e34aa0d9f4d35c8'
+          test "$(git hash-object agent-node/tests/test_native_runtime_pt_dynamic_size.py)" = '216ab72cf125c5d7a792c1508f6e1cc585b08c01'
           python3 -B -m unittest discover -s agent-node/tests -v
-          if [ "$(git hash-object agent-node/agent_node.py)" != "$SOURCE_BLOB" ]; then
-            test "${{ github.event_name }}" = 'pull_request'
-            test "${{ github.event.pull_request.head.ref }}" = "$BRANCH"
-            test "${{ github.event.pull_request.head.repo.full_name }}" = 'AmazingBecca/agency-agents'
-            git config user.name 'AmazingBecca Automation'
-            git config user.email 'actions@users.noreply.github.com'
-            git add agent-node/agent_node.py
-            git commit -m 'security: require DT_NULL in inspected PT_DYNAMIC region'
-            git remote set-url origin 'https://x-access-token:${{ github.token }}@github.com/AmazingBecca/agency-agents.git'
-            git fetch --no-tags origin "$BRANCH"
-            test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_SHA"
-            git push origin "HEAD:$BRANCH"
-          fi
