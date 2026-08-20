@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v27"
+RUNTIME_POLICY = "agent-node-python-runtime-v28"
 
 
 def _resolve_git_bin() -> str:
@@ -876,33 +876,144 @@ def repo_index(expected_head: str) -> dict:
 def run_tests(expected_head: str, selector: str) -> dict:
     if not TEST_ALLOWLIST or selector not in TEST_ALLOWLIST:
         raise ValueError("test selector not allowlisted")
-    bootstrap = (
-        "import sys,unittest;"
-        "root,selector=sys.argv[1:3];"
-        "sys.path.insert(0,root);"
-        "suite=unittest.defaultTestLoader.loadTestsFromName(selector);"
-        "result=unittest.TextTestRunner(verbosity=2).run(suite);"
-        "raise SystemExit(0 if result.wasSuccessful() else 1)"
-    )
-    python_bin, runtime_sha256 = python_runtime_identity()
-    with committed_snapshot(expected_head) as (head, tree, snapshot):
-        cp = subprocess.run(
-            [python_bin, "-I", "-B", "-S", "-c", bootstrap, str(snapshot), selector],
-            cwd=snapshot,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=900,
-            env=_python_env(),
-        )
-        returned_output = cp.stdout[-TEST_OUTPUT_LIMIT:]
-    after_python_bin, after_runtime_sha256 = python_runtime_identity()
-    if after_python_bin != python_bin or after_runtime_sha256 != runtime_sha256:
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("execution-time native receipt is implemented only on Linux")
+    bootstrap = r"""
+import json
+import os
+import signal
+import sys
+import unittest
+
+root, selector, receipt_fd_text = sys.argv[1:4]
+receipt_fd = int(receipt_fd_text)
+pid = os.fork()
+if pid == 0:
+    os.close(receipt_fd)
+    sys.path.insert(0, root)
+    suite = unittest.defaultTestLoader.loadTestsFromName(selector)
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    exit_code = 0 if result.wasSuccessful() else 1
+    os.kill(os.getpid(), signal.SIGSTOP)
+    raise SystemExit(exit_code)
+
+def timeout_child(_signum, _frame):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    raise TimeoutError("allowlisted test child timed out before native receipt capture")
+
+signal.signal(signal.SIGALRM, timeout_child)
+signal.alarm(890)
+try:
+    waited, status = os.waitpid(pid, os.WUNTRACED)
+    if waited != pid or not os.WIFSTOPPED(status):
+        raise RuntimeError("allowlisted test child exited before native receipt capture")
+    paths = set()
+    with open(f"/proc/{pid}/maps", "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split(None, 5)
+            if len(parts) < 6 or "x" not in parts[1]:
+                continue
+            value = parts[5]
+            if value.endswith(" (deleted)"):
+                raise RuntimeError(f"executed native mapping was deleted before receipt capture: {value}")
+            if value.startswith("/"):
+                paths.add(value)
+    if not paths:
+        raise RuntimeError("executed child exposed no bindable native mappings")
+    payload = json.dumps(sorted(paths), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(payload) > 60000:
+        raise RuntimeError("executed native mapping receipt exceeds bounded pipe capacity")
+    written = os.write(receipt_fd, payload)
+    if written != len(payload):
+        raise RuntimeError("executed native mapping receipt write was incomplete")
+finally:
+    signal.alarm(0)
+    try:
+        os.close(receipt_fd)
+    except OSError:
+        pass
+    try:
+        os.kill(pid, signal.SIGCONT)
+    except ProcessLookupError:
+        pass
+
+waited, final_status = os.waitpid(pid, 0)
+if waited != pid:
+    raise RuntimeError("allowlisted test child wait identity changed")
+if os.WIFEXITED(final_status):
+    raise SystemExit(os.WEXITSTATUS(final_status))
+if os.WIFSIGNALED(final_status):
+    raise SystemExit(128 + os.WTERMSIG(final_status))
+raise RuntimeError("allowlisted test child ended in an unsupported state")
+"""
+    python_bin, static_runtime_sha256 = python_runtime_identity()
+    receipt_r, receipt_w = os.pipe()
+    try:
+        with committed_snapshot(expected_head) as (head, tree, snapshot):
+            cp = subprocess.run(
+                [python_bin, "-I", "-B", "-S", "-c", bootstrap, str(snapshot), selector, str(receipt_w)],
+                cwd=snapshot,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=900,
+                env=_python_env(),
+                pass_fds=(receipt_w,),
+            )
+            returned_output = cp.stdout[-TEST_OUTPUT_LIMIT:]
+        os.close(receipt_w)
+        receipt_w = -1
+        raw_receipt = bytearray()
+        while True:
+            chunk = os.read(receipt_r, 65536)
+            if not chunk:
+                break
+            raw_receipt.extend(chunk)
+            if len(raw_receipt) > 60000:
+                raise RuntimeError("executed native mapping receipt is oversized")
+        if not raw_receipt:
+            raise RuntimeError("executed child did not produce a native mapping receipt")
+        try:
+            decoded_paths = json.loads(bytes(raw_receipt).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("executed native mapping receipt is malformed") from exc
+        if not isinstance(decoded_paths, list) or not decoded_paths:
+            raise RuntimeError("executed native mapping receipt is empty")
+        native_paths: list[pathlib.Path] = []
+        seen_paths: set[str] = set()
+        for value in decoded_paths:
+            if not isinstance(value, str) or not value.startswith("/") or value in seen_paths:
+                raise RuntimeError("executed native mapping receipt contains an invalid path")
+            seen_paths.add(value)
+            native_paths.append(pathlib.Path(value))
+        executed_native_sha256 = _runtime_native_sha256(tuple(native_paths))
+    finally:
+        if receipt_w >= 0:
+            os.close(receipt_w)
+        os.close(receipt_r)
+    after_python_bin, after_static_runtime_sha256 = python_runtime_identity()
+    if after_python_bin != python_bin or after_static_runtime_sha256 != static_runtime_sha256:
         raise RuntimeError("Python runtime identity changed during test execution")
+    runtime_sha256 = hashlib.sha256(
+        canonical(
+            {
+                "policy": "agent-node-executed-runtime-v1",
+                "static_runtime_sha256": static_runtime_sha256,
+                "executed_native_sha256": executed_native_sha256,
+            }
+        )
+    ).hexdigest()
+    if not SHA64.fullmatch(runtime_sha256):
+        raise RuntimeError("executed runtime identity is invalid")
     return {
         "head": head,
         "tree": tree,
         "runtime_sha256": runtime_sha256,
+        "static_runtime_sha256": static_runtime_sha256,
+        "executed_native_sha256": executed_native_sha256,
         "selector": selector,
         "returncode": cp.returncode,
         "stdout_sha256": hashlib.sha256(returned_output.encode()).hexdigest(),
