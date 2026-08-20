@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v20"
+RUNTIME_POLICY = "agent-node-python-runtime-v27"
 
 
 def _resolve_git_bin() -> str:
@@ -410,7 +410,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
     if program_count == 0xFFFF or program_entry_size < required_program_size:
         raise RuntimeError(f"unsupported ELF program-header layout for native runtime candidate: {path}")
 
-    loads: list[tuple[int, int, int]] = []
+    loads: list[tuple[int, int, int, int]] = []
     dynamic_region: tuple[int, int, int] | None = None
     for index in range(program_count):
         offset = program_offset + index * program_entry_size
@@ -418,22 +418,83 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
             raise RuntimeError(f"truncated ELF program headers for native runtime candidate: {path}")
         values = struct.unpack_from(program_format, data, offset)
         if elf_class == 2:
-            p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, _memsz, _align = values
+            p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _align = values
         else:
-            p_type, p_offset, p_vaddr, _paddr, p_filesz, _memsz, _flags, _align = values
+            p_type, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _flags, _align = values
         if p_offset + p_filesz > len(data):
             raise RuntimeError(f"ELF segment exceeds file bytes for native runtime candidate: {path}")
+        if p_memsz < p_filesz:
+            raise RuntimeError(f"ELF PT_LOAD memory size is smaller than file size for native runtime candidate: {path}")
         if p_type == 1:
-            loads.append((p_offset, p_vaddr, p_filesz))
+            loads.append((p_offset, p_vaddr, p_filesz, p_memsz))
         elif p_type == 2:
             dynamic_region = (p_offset, p_vaddr, p_filesz)
 
     if dynamic_region is None:
         return ()
 
+    try:
+        page_size = int(os.sysconf("SC_PAGESIZE"))
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Linux page size is unavailable for native runtime candidate: {path}") from exc
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise RuntimeError(f"unsupported Linux page size for native runtime candidate: {path}")
+
+    page_mask = page_size - 1
+
+    def validate_loader_page_aliases(
+        range_vaddr: int,
+        range_size: int,
+        mapped_file_offset: int,
+        label: str,
+    ) -> None:
+        if range_size <= 0:
+            raise RuntimeError(f"ELF {label} has an empty loader range for native runtime candidate: {path}")
+        range_end = range_vaddr + range_size
+        authoritative_deltas = {
+            load_offset - load_vaddr
+            for load_offset, load_vaddr, load_filesz, load_memsz in loads
+            if load_vaddr <= range_vaddr
+            and range_end <= load_vaddr + load_filesz
+            and load_offset + (range_vaddr - load_vaddr) == mapped_file_offset
+        }
+        if len(authoritative_deltas) != 1:
+            raise RuntimeError(
+                f"ELF {label} has no unique loader-equivalent mapping for native runtime candidate: {path}"
+            )
+        expected_delta = next(iter(authoritative_deltas))
+        range_page_start = range_vaddr & ~page_mask
+        range_page_end = (range_end + page_mask) & ~page_mask
+
+        for load_offset, load_vaddr, load_filesz, load_memsz in loads:
+            if load_memsz > load_filesz:
+                zero_fill_start = load_vaddr + load_filesz
+                zero_fill_end = load_vaddr + load_memsz
+                zero_fill_overlaps = zero_fill_start < range_end and range_vaddr < zero_fill_end
+                if zero_fill_overlaps:
+                    raise RuntimeError(
+                        f"ELF {label} overlaps PT_LOAD zero-fill range for native runtime candidate: {path}"
+                    )
+            if load_filesz <= 0:
+                # glibc may still map the containing file page for a non-page-aligned
+                # zero-length file range. Treat that page as loader-visible so a conflicting
+                # alternate mapping cannot replace protected PT_DYNAMIC/DT_STRTAB bytes.
+                if (load_vaddr & page_mask) == 0:
+                    continue
+                load_page_start = load_vaddr & ~page_mask
+                load_page_end = load_page_start + page_size
+            else:
+                load_page_start = load_vaddr & ~page_mask
+                load_page_end = (load_vaddr + load_filesz + page_size - 1) & ~page_mask
+            page_overlaps = load_page_start < range_page_end and range_page_start < load_page_end
+            if page_overlaps and load_offset - load_vaddr != expected_delta:
+                raise RuntimeError(
+                    f"ELF {label} page overlaps conflicting PT_LOAD mapping for native runtime candidate: {path}"
+                )
+
     dynamic_file_offset, dynamic_vaddr, dynamic_size = dynamic_region
     mapped_offsets: set[int] = set()
-    for load_offset, load_vaddr, load_filesz in loads:
+    for load_offset, load_vaddr, load_filesz, load_memsz in loads:
         if load_vaddr <= dynamic_vaddr and dynamic_vaddr + dynamic_size <= load_vaddr + load_filesz:
             mapped_offset = load_offset + (dynamic_vaddr - load_vaddr)
             if mapped_offset + dynamic_size > len(data):
@@ -444,6 +505,7 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
     dynamic_offset = next(iter(mapped_offsets))
     if dynamic_file_offset != dynamic_offset:
         raise RuntimeError(f"ELF PT_DYNAMIC file offset disagrees with loaded virtual-address mapping for native runtime candidate: {path}")
+    validate_loader_page_aliases(dynamic_vaddr, dynamic_size, dynamic_offset, "PT_DYNAMIC")
     dynamic_entry_size = struct.calcsize(dynamic_format)
     if dynamic_size % dynamic_entry_size != 0:
         raise RuntimeError(f"invalid ELF dynamic table for native runtime candidate: {path}")
@@ -451,9 +513,11 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
     needed_offsets: list[int] = []
     string_table_vaddr: int | None = None
     string_table_size: int | None = None
+    saw_dynamic_null = False
     for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
         tag, value = struct.unpack_from(dynamic_format, data, offset)
         if tag == 0:
+            saw_dynamic_null = True
             break
         if tag == 1:
             needed_offsets.append(value)
@@ -462,18 +526,26 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         elif tag == 10:
             string_table_size = value
 
+    if not saw_dynamic_null:
+        raise RuntimeError(f"ELF dynamic table lacks DT_NULL within PT_DYNAMIC file region for native runtime candidate: {path}")
     if not needed_offsets:
         return ()
     if string_table_vaddr is None or string_table_size is None:
         raise RuntimeError(f"ELF dynamic strings are unavailable for native runtime candidate: {path}")
 
-    string_table_offset: int | None = None
-    for p_offset, p_vaddr, p_filesz in loads:
-        if p_vaddr <= string_table_vaddr < p_vaddr + p_filesz:
-            string_table_offset = p_offset + (string_table_vaddr - p_vaddr)
-            break
-    if string_table_offset is None:
-        raise RuntimeError(f"ELF dynamic string table is unmapped for native runtime candidate: {path}")
+    string_table_offsets: set[int] = set()
+    for p_offset, p_vaddr, p_filesz, p_memsz in loads:
+        if p_vaddr <= string_table_vaddr and string_table_vaddr + string_table_size <= p_vaddr + p_filesz:
+            mapped_offset = p_offset + (string_table_vaddr - p_vaddr)
+            if mapped_offset + string_table_size > len(data):
+                raise RuntimeError(f"ELF dynamic string table mapping exceeds file bytes for native runtime candidate: {path}")
+            string_table_offsets.add(mapped_offset)
+    if len(string_table_offsets) != 1:
+        raise RuntimeError(f"ELF dynamic string table has no unique PT_LOAD mapping for native runtime candidate: {path}")
+    string_table_offset = next(iter(string_table_offsets))
+    validate_loader_page_aliases(
+        string_table_vaddr, string_table_size, string_table_offset, "dynamic string table"
+    )
     string_table_end = string_table_offset + string_table_size
     if string_table_end > len(data):
         raise RuntimeError(f"ELF dynamic string table exceeds file bytes for native runtime candidate: {path}")
