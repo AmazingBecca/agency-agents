@@ -30,17 +30,15 @@ jobs:
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-      - name: Apply v24 candidate and run exact regressions read-only
+      - name: Compile and run exact committed v24 regressions
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 --version
           cc --version | head -n 1
-          test "$(git hash-object agent-node/agent_node.py)" = '223883bc7ca6f3733dddd77a883bf50c8723af1d'
+          test "$(git hash-object agent-node/agent_node.py)" = '0654ecccd0a26e50ec7e30e3d43f4efe1330f99d'
           test "$(git hash-object agent-node/tests/test_native_runtime_string_table_overlap.py)" = 'c6ce8bf1ed031e41cbbfdb92965a608ae8a7fa5e'
-          python3 agent-node/repair_native_runtime_v24.py
-          PATCHED_SOURCE_BLOB="$(git hash-object agent-node/agent_node.py)"
-          echo "PATCHED_SOURCE_BLOB=$PATCHED_SOURCE_BLOB"
+          test "$(git hash-object agent-node/tests/test_native_runtime_loader_valid_alias.py)" = '5eda7a4f68f42cf076b1981be0307067b41e5569'
           python3 -B -m py_compile \
             agent-node/agent_node.py \
             agent-node/tests/test_agent_node.py \
@@ -50,9 +48,6 @@ jobs:
             agent-node/tests/test_native_runtime_closure.py \
             agent-node/tests/test_native_runtime_multiline_spoof.py \
             agent-node/tests/test_native_runtime_pt_dynamic_size.py \
-            agent-node/tests/test_native_runtime_string_table_overlap.py
+            agent-node/tests/test_native_runtime_string_table_overlap.py \
+            agent-node/tests/test_native_runtime_loader_valid_alias.py
           python3 -B -m unittest discover -s agent-node/tests -v
-          echo "PATCHED_SOURCE_BASE64_BEGIN"
-          base64 -w0 agent-node/agent_node.py
-          echo
-          echo "PATCHED_SOURCE_BASE64_END"
