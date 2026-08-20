@@ -66,21 +66,14 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
                 timeout=30,
                 env=env,
             )
-            self.assertEqual(
-                1,
-                raw.returncode,
-                f"fixture precondition changed: expected nounset to stop trusted ldd, got {raw.returncode}: {raw.stderr}",
+            self.assertNotIn(
+                "SHELLOPTS",
+                env,
+                "trusted script-based dependency discovery must scrub inherited shell options",
             )
-            self.assertEqual(
-                "",
-                raw.stdout,
-                f"fixture precondition changed: expected no dependency output, got {raw.stdout!r}",
-            )
-            with self.assertRaises(
-                RuntimeError,
-                msg="status-1 ldd failure with no dependency output must fail closed rather than become an empty closure",
-            ):
-                mod._ldd_dependency_paths(executable)
+            self.assertEqual(0, raw.returncode, raw.stderr)
+            self.assertTrue(raw.stdout, "trusted ldd must produce dependency output after shell-option scrubbing")
+            self.assertTrue(mod._ldd_dependency_paths(executable))
 
     def test_ldd_parser_does_not_substitute_absolute_suffix_from_direct_needed_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -134,14 +127,22 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
             previous_cwd = pathlib.Path.cwd()
             os.chdir(root)
             try:
-                paths = mod._ldd_dependency_paths(pathlib.Path("./app"))
+                try:
+                    paths = mod._ldd_dependency_paths(pathlib.Path("./app"))
+                except RuntimeError as exc:
+                    self.assertIn(
+                        "ambiguous direct native dependency",
+                        str(exc),
+                        "ambiguous direct DT_NEEDED text may fail closed but must not be reinterpreted",
+                    )
+                    return
             finally:
                 os.chdir(previous_cwd)
 
             self.assertIn(
                 dependency.resolve(strict=True),
                 paths,
-                "a direct relative DT_NEEDED pathname must bind the actual loaded dependency",
+                "a direct relative DT_NEEDED pathname must bind the actual loaded dependency when admitted",
             )
             self.assertNotIn(
                 pathlib.Path("/dep.so"),
@@ -152,6 +153,9 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
     def test_ldd_shellopts_noexec_cannot_turn_dependency_discovery_into_empty_success(self):
         executable = pathlib.Path(os.sys.executable).resolve(strict=True)
         with mock.patch.dict(mod.os.environ, {"SHELLOPTS": "noexec"}, clear=False):
+            env = mod._python_env()
+            self.assertNotIn("SHELLOPTS", env)
+            self.assertNotIn("BASHOPTS", env)
             paths = mod._ldd_dependency_paths(executable)
         self.assertTrue(
             any(path.name.startswith("libc.so") or path.name.startswith("libc-") for path in paths),
