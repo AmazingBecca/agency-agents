@@ -129,6 +129,44 @@ class NativeRuntimeClosureTests(unittest.TestCase):
 
         self.assertNotEqual(before, after, "changing executable shared-library bytes must change native identity")
 
+    def test_ldd_discovery_scrubs_shell_startup_environment(self):
+        self.assertTrue(hasattr(mod, "_ldd_dependency_paths"), "native dependency discovery helper is required")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            marker = root / "bash-env-ran"
+            startup = root / "startup.sh"
+            startup.write_text('printf injected > "$AGENT_NODE_BASH_ENV_MARKER"\n', encoding="utf-8")
+            with mock.patch.dict(
+                mod.os.environ,
+                {
+                    "BASH_ENV": str(startup),
+                    "ENV": str(startup),
+                    "AGENT_NODE_BASH_ENV_MARKER": str(marker),
+                },
+                clear=False,
+            ):
+                child_env = mod._python_env()
+                self.assertNotIn("BASH_ENV", child_env)
+                self.assertNotIn("ENV", child_env)
+                mod._ldd_dependency_paths(pathlib.Path(sys.executable))
+            self.assertFalse(marker.exists(), "ldd discovery must not execute inherited Bash startup code")
+
+    def test_ldd_dependency_parser_preserves_whitespace_in_absolute_path(self):
+        self.assertTrue(hasattr(mod, "_ldd_dependency_paths"), "native dependency discovery helper is required")
+        fake = subprocess.CompletedProcess(
+            args=["ldd", "/runtime/python"],
+            returncode=0,
+            stdout=(
+                "libdep.so => /opt/Python Runtime/libdep.so (0x00007f0000000000)\n"
+                "/lib64/ld-linux-x86-64.so.2 (0x00007f0000001000)\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(mod.subprocess, "run", return_value=fake):
+            paths = mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
+        self.assertIn(pathlib.Path("/opt/Python Runtime/libdep.so"), paths)
+        self.assertIn(pathlib.Path("/lib64/ld-linux-x86-64.so.2"), paths)
+
     def test_runtime_receipt_includes_native_dependency_digest(self):
         self.assertTrue(hasattr(mod, "_child_native_runtime_paths"), "native dependency discovery is required")
         self.assertTrue(hasattr(mod, "_runtime_native_sha256"), "native runtime digest helper is required")
