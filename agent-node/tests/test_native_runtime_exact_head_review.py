@@ -173,6 +173,7 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
             decoy = root / body
             decoy.parent.mkdir(parents=True, exist_ok=True)
             decoy.write_bytes(b"decoy dependency")
+            decoy_resolved = decoy.resolve(strict=True)
             fake = subprocess.CompletedProcess(
                 args=["/usr/bin/ldd", "/runtime/python"],
                 returncode=0,
@@ -188,16 +189,16 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
-        self.assertIn(
-            actual,
-            paths,
-            "ordinary ldd mappings must bind the loaded absolute target even when a colliding whole-body decoy exists",
-        )
-        self.assertNotIn(
-            decoy.resolve(strict=True),
-            paths,
-            "filesystem decoys must not determine whether ambiguous ldd text is treated as a direct dependency",
-        )
+            self.assertIn(
+                actual,
+                paths,
+                "ordinary ldd mappings must bind the loaded absolute target even when a colliding whole-body decoy exists",
+            )
+            self.assertNotIn(
+                decoy_resolved,
+                paths,
+                "filesystem decoys must not determine whether ambiguous ldd text is treated as a direct dependency",
+            )
 
 
 if __name__ == "__main__":
