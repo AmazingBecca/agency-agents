@@ -212,7 +212,7 @@ def _runtime_archive_boundary(value: str) -> pathlib.Path | None:
     candidate = pathlib.Path(value)
     if not candidate.is_absolute():
         candidate = pathlib.Path.cwd() / candidate
-    lexical = pathlib.Path(os.path.abspath(candidate))
+    lexical = candidate
 
     textual_zip_boundary: pathlib.Path | None = None
     parts = lexical.parts
