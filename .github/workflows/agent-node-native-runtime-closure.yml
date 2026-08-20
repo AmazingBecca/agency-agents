@@ -1,27 +1,25 @@
-name: Agent Node Native Runtime Closure V25 Repair
+name: Agent Node Native Runtime Closure Validation
 
 on:
+  push:
+    branches:
+      - hardening/agent-node-native-runtime-closure-v1
   pull_request:
     branches:
       - hardening/agent-node-runtime-closure-v1
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  repair:
-    if: >-
-      github.repository == 'AmazingBecca/agency-agents' &&
-      github.event.pull_request.head.repo.full_name == 'AmazingBecca/agency-agents' &&
-      github.event.pull_request.head.ref == 'hardening/agent-node-native-runtime-closure-v1'
+  validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Fetch exact repair head without workflow credentials
+      - name: Fetch exact candidate source without workflow credentials
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -32,26 +30,16 @@ jobs:
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-      - name: Apply, validate, and fast-forward exact v25 source
+      - name: Compile and run exact committed v25 regressions
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          EXPECTED_PARENT: ${{ github.event.pull_request.head.sha }}
-          TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -Eeuo pipefail
-          export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-          test "$(git hash-object agent-node/agent_node.py)" = '0654ecccd0a26e50ec7e30e3d43f4efe1330f99d'
-          test "$(git hash-object agent-node/tests/test_native_runtime_zero_fill_alias.py)" = 'c60bac2e06a0c1b8f2715901af253447b9ab9a6b'
-          test "$(git hash-object agent-node/tests/apply_native_runtime_zero_fill_v25.py)" = '21349604a608c0c0a28e303df8c6432dc392ac38'
-          test "$(git hash-object agent-node/tests/test_native_runtime_zero_fill_candidate_builder.py)" = '0a572b85aa22b4dfb7250f09c148bf09d64664e3'
-
-          python3 agent-node/tests/apply_native_runtime_zero_fill_v25.py
-          test "$(git hash-object agent-node/agent_node.py)" = '6d58e0dee61de0f8b0feb6b05684695f2751db37'
-          git rm agent-node/tests/test_native_runtime_zero_fill_candidate_builder.py
-
           python3 --version
           cc --version | head -n 1
+          test "$(git hash-object agent-node/agent_node.py)" = '6d58e0dee61de0f8b0feb6b05684695f2751db37'
+          test "$(git hash-object agent-node/tests/test_native_runtime_string_table_overlap.py)" = 'c6ce8bf1ed031e41cbbfdb92965a608ae8a7fa5e'
+          test "$(git hash-object agent-node/tests/test_native_runtime_loader_valid_alias.py)" = '5eda7a4f68f42cf076b1981be0307067b41e5569'
+          test "$(git hash-object agent-node/tests/test_native_runtime_zero_fill_alias.py)" = 'c60bac2e06a0c1b8f2715901af253447b9ab9a6b'
           python3 -B -m py_compile \
             agent-node/agent_node.py \
             agent-node/tests/test_agent_node.py \
@@ -65,15 +53,3 @@ jobs:
             agent-node/tests/test_native_runtime_loader_valid_alias.py \
             agent-node/tests/test_native_runtime_zero_fill_alias.py
           python3 -B -m unittest discover -s agent-node/tests -v
-
-          git add agent-node/agent_node.py
-          test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' 'agent-node/agent_node.py' 'agent-node/tests/test_native_runtime_zero_fill_candidate_builder.py' | sort)"
-          git config user.name 'AmazingBecca Runtime Closure'
-          git config user.email 'actions@users.noreply.github.com'
-          git commit -m 'security: reject native PT_LOAD zero-fill aliases'
-          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
-          echo "V25_COMMIT=$(git rev-parse HEAD)"
-          remote_head="$(git ls-remote origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
-          test "$remote_head" = "$EXPECTED_PARENT"
-          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
-          git -c http.extraHeader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$TARGET_BRANCH"
