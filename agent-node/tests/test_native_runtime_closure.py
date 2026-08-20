@@ -151,6 +151,31 @@ class NativeRuntimeClosureTests(unittest.TestCase):
                 mod._ldd_dependency_paths(pathlib.Path(sys.executable))
             self.assertFalse(marker.exists(), "ldd discovery must not execute inherited Bash startup code")
 
+    def test_ldd_discovery_scrubs_exported_bash_functions(self):
+        self.assertTrue(hasattr(mod, "_ldd_dependency_paths"), "native dependency discovery helper is required")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            marker = root / "bash-function-ran"
+            function_value = (
+                '() { echo injected > "$AGENT_NODE_BASH_FUNC_MARKER"; '
+                'builtin printf "$@"; }'
+            )
+            with mock.patch.dict(
+                mod.os.environ,
+                {
+                    "BASH_FUNC_printf%%": function_value,
+                    "AGENT_NODE_BASH_FUNC_MARKER": str(marker),
+                },
+                clear=False,
+            ):
+                child_env = mod._python_env()
+                self.assertFalse(
+                    any(key.startswith("BASH_FUNC_") for key in child_env),
+                    "script-based dependency discovery must not inherit exported Bash functions",
+                )
+                mod._ldd_dependency_paths(pathlib.Path(sys.executable))
+            self.assertFalse(marker.exists(), "ldd discovery must not import an inherited Bash function")
+
     def test_ldd_dependency_parser_preserves_whitespace_in_absolute_path(self):
         self.assertTrue(hasattr(mod, "_ldd_dependency_paths"), "native dependency discovery helper is required")
         fake = subprocess.CompletedProcess(
@@ -166,6 +191,20 @@ class NativeRuntimeClosureTests(unittest.TestCase):
             paths = mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
         self.assertIn(pathlib.Path("/opt/Python Runtime/libdep.so"), paths)
         self.assertIn(pathlib.Path("/lib64/ld-linux-x86-64.so.2"), paths)
+
+    def test_ldd_dependency_parser_uses_final_separator(self):
+        self.assertTrue(hasattr(mod, "_ldd_dependency_paths"), "native dependency discovery helper is required")
+        fake = subprocess.CompletedProcess(
+            args=["ldd", "/runtime/python"],
+            returncode=0,
+            stdout=(
+                "lib=>dep.so => /opt/Python Runtime/lib=>dep.so (0x00007f0000000000)\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(mod.subprocess, "run", return_value=fake):
+            paths = mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
+        self.assertIn(pathlib.Path("/opt/Python Runtime/lib=>dep.so"), paths)
 
     def test_runtime_receipt_includes_native_dependency_digest(self):
         self.assertTrue(hasattr(mod, "_child_native_runtime_paths"), "native dependency discovery is required")
