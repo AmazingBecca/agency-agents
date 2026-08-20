@@ -26,7 +26,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v22"
+RUNTIME_POLICY = "agent-node-python-runtime-v23"
 
 
 def _resolve_git_bin() -> str:
@@ -470,6 +470,26 @@ def _elf_needed_name_bytes(path: pathlib.Path) -> tuple[bytes, ...]:
         return ()
     if string_table_vaddr is None or string_table_size is None:
         raise RuntimeError(f"ELF dynamic strings are unavailable for native runtime candidate: {path}")
+
+    try:
+        page_size = int(os.sysconf("SC_PAGESIZE"))
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Linux page size is unavailable for native runtime candidate: {path}") from exc
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise RuntimeError(f"unsupported Linux page size for native runtime candidate: {path}")
+
+    string_table_end_vaddr = string_table_vaddr + string_table_size
+    string_page_start = string_table_vaddr & ~(page_size - 1)
+    string_page_end = (string_table_end_vaddr + page_size - 1) & ~(page_size - 1)
+    for p_offset, p_vaddr, p_filesz in loads:
+        if p_filesz <= 0:
+            continue
+        load_page_start = p_vaddr & ~(page_size - 1)
+        load_page_end = (p_vaddr + p_filesz + page_size - 1) & ~(page_size - 1)
+        page_overlaps = load_page_start < string_page_end and string_page_start < load_page_end
+        fully_covers = p_vaddr <= string_table_vaddr and string_table_end_vaddr <= p_vaddr + p_filesz
+        if page_overlaps and not fully_covers:
+            raise RuntimeError(f"ELF dynamic string table page overlaps partial PT_LOAD mapping for native runtime candidate: {path}")
 
     string_table_offsets: set[int] = set()
     for p_offset, p_vaddr, p_filesz in loads:
