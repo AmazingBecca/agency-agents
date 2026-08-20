@@ -1,4 +1,5 @@
 name: Agent Node Exact PT_DYNAMIC Repair
+# Exact-bound one-shot repair; this file deletes itself after a green repair.
 
 on:
   push:
