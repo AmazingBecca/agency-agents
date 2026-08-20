@@ -9,8 +9,7 @@ on:
       - hardening/agent-node-runtime-closure-v1
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   validate:
@@ -31,41 +30,20 @@ jobs:
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-      - name: Apply exact-bound empty-record repair and validate
+      - name: Compile and run exact native-runtime regressions
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          EXPECTED_SOURCE_BLOB: a725005ada729c61b67a4804a61c19eac083e478
-          EXPECTED_TEST_BLOB: d580bc0bdc3c19d2ce5fe3c4be3372dd2877a214
         run: |
           set -Eeuo pipefail
-          test "$(git hash-object agent-node/agent_node.py)" = "$EXPECTED_SOURCE_BLOB"
-          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = "$EXPECTED_TEST_BLOB"
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('agent-node/agent_node.py')
-          text = path.read_text(encoding='utf-8')
-          old_policy = 'RUNTIME_POLICY = "agent-node-python-runtime-v17"'
-          new_policy = 'RUNTIME_POLICY = "agent-node-python-runtime-v18"'
-          old = '        if not line:\n            continue\n'
-          new = (
-              '        if not line:\n'
-              '            raise RuntimeError('\
-              'f"unsupported or multiline native dependency from ldd for {path}: {raw_line}")\n'
-          )
-          if text.count(old_policy) != 1:
-              raise SystemExit('unexpected runtime policy source')
-          if text.count(old) != 1:
-              raise SystemExit('unexpected empty-record parser source')
-          text = text.replace(old_policy, new_policy, 1).replace(old, new, 1)
-          path.write_text(text, encoding='utf-8')
-          PY
-          test "$(git diff --name-only)" = 'agent-node/agent_node.py'
-          python3 -B -m py_compile agent-node/agent_node.py agent-node/tests/test_native_runtime_multiline_spoof.py
+          python3 --version
+          cc --version | head -n 1
+          python3 -B -m py_compile \
+            agent-node/agent_node.py \
+            agent-node/tests/test_agent_node.py \
+            agent-node/tests/test_agent_node_adversarial_paths.py \
+            agent-node/tests/test_runtime_closure.py \
+            agent-node/tests/test_runtime_zip_archive.py \
+            agent-node/tests/test_native_runtime_closure.py \
+            agent-node/tests/test_native_runtime_multiline_spoof.py
+          test "$(git hash-object agent-node/agent_node.py)" = '40fd9d6beadc3b291a74876b85ff9e6103964907'
+          test "$(git hash-object agent-node/tests/test_native_runtime_multiline_spoof.py)" = 'd580bc0bdc3c19d2ce5fe3c4be3372dd2877a214'
           python3 -B -m unittest discover -s agent-node/tests -v
-          git config user.name 'AmazingBecca Agent Node Repair'
-          git config user.email 'actions@users.noreply.github.com'
-          git add agent-node/agent_node.py
-          git commit -m 'security: reject empty ldd dependency records'
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/AmazingBecca/agency-agents.git"
-          git push origin HEAD:hardening/agent-node-native-runtime-closure-v1
