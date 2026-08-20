@@ -50,54 +50,41 @@ jobs:
 
           source = Path('agent-node/agent_node.py')
           text = source.read_text(encoding='utf-8')
-          if text.count('RUNTIME_POLICY = "agent-node-python-runtime-v20"') != 1:
-              raise SystemExit('runtime policy boundary missing')
-          text = text.replace('RUNTIME_POLICY = "agent-node-python-runtime-v20"', 'RUNTIME_POLICY = "agent-node-python-runtime-v21"', 1)
-          old = '''    needed_offsets: list[int] = []
-              string_table_vaddr: int | None = None
-              string_table_size: int | None = None
-              for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
-                  tag, value = struct.unpack_from(dynamic_format, data, offset)
-                  if tag == 0:
-                      break
-                  if tag == 1:
-                      needed_offsets.append(value)
-                  elif tag == 5:
-                      string_table_vaddr = value
-                  elif tag == 10:
-                      string_table_size = value
-
-              if not needed_offsets:
-                  return ()
-          '''
-          # Dedent the source-shaped boundary before matching.
-          import textwrap
-          old = textwrap.dedent(old)
-          new = '''    needed_offsets: list[int] = []
-              string_table_vaddr: int | None = None
-              string_table_size: int | None = None
-              saw_dynamic_null = False
-              for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):
-                  tag, value = struct.unpack_from(dynamic_format, data, offset)
-                  if tag == 0:
-                      saw_dynamic_null = True
-                      break
-                  if tag == 1:
-                      needed_offsets.append(value)
-                  elif tag == 5:
-                      string_table_vaddr = value
-                  elif tag == 10:
-                      string_table_size = value
-
-              if not saw_dynamic_null:
-                  raise RuntimeError(f"ELF dynamic table lacks DT_NULL within PT_DYNAMIC file region for native runtime candidate: {path}")
-              if not needed_offsets:
-                  return ()
-          '''
-          new = textwrap.dedent(new)
-          if text.count(old) != 1:
-              raise SystemExit('dynamic-table parse boundary missing')
-          source.write_text(text.replace(old, new, 1), encoding='utf-8')
+          pairs = [
+              (
+                  'RUNTIME_POLICY = "agent-node-python-runtime-v20"',
+                  'RUNTIME_POLICY = "agent-node-python-runtime-v21"',
+              ),
+              (
+                  '    string_table_size: int | None = None\n'
+                  '    for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):\n',
+                  '    string_table_size: int | None = None\n'
+                  '    saw_dynamic_null = False\n'
+                  '    for offset in range(dynamic_offset, dynamic_offset + dynamic_size, dynamic_entry_size):\n',
+              ),
+              (
+                  '        if tag == 0:\n'
+                  '            break\n'
+                  '        if tag == 1:\n',
+                  '        if tag == 0:\n'
+                  '            saw_dynamic_null = True\n'
+                  '            break\n'
+                  '        if tag == 1:\n',
+              ),
+              (
+                  '    if not needed_offsets:\n'
+                  '        return ()\n',
+                  '    if not saw_dynamic_null:\n'
+                  '        raise RuntimeError(f"ELF dynamic table lacks DT_NULL within PT_DYNAMIC file region for native runtime candidate: {path}")\n'
+                  '    if not needed_offsets:\n'
+                  '        return ()\n',
+              ),
+          ]
+          for old, new in pairs:
+              if text.count(old) != 1:
+                  raise SystemExit(f'patch boundary missing or ambiguous: {old!r}')
+              text = text.replace(old, new, 1)
+          source.write_text(text, encoding='utf-8')
           PY
           fi
           python3 -B -m py_compile \
