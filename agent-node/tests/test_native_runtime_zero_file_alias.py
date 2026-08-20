@@ -159,10 +159,12 @@ class NativeRuntimeZeroFileAliasTests(unittest.TestCase):
                 ]
                 == b"Xlong"
             )
-            needed_file_offset = strtab_file_offset + target_needed_offset
             needed_vaddr = strtab_vaddr + target_needed_offset
 
-            alias_vaddr = needed_vaddr - 1
+            # The logical zero-fill range ends exactly where DT_STRTAB begins, so v25's
+            # byte-range overlap guard does not fire. Linux nevertheless maps the containing
+            # file page for this non-page-aligned p_filesz=0 segment.
+            alias_vaddr = strtab_vaddr - 1
             alias_page_vaddr = alias_vaddr & ~page_mask
             owner_page_file_offset = owner[2] + (alias_page_vaddr - owner[3])
             self.assertGreaterEqual(owner_page_file_offset, 0)
@@ -203,10 +205,10 @@ class NativeRuntimeZeroFileAliasTests(unittest.TestCase):
                 struct.pack_into(program_format, data, phoff + index * phentsize, *entry)
             candidate.write_bytes(data)
 
-            # Linux maps the file page containing the zero-length file range, so the alternate
-            # page can replace the DT_STRTAB bytes even though the logical zero-fill ends just
-            # before the dependency string. Execution therefore switches from Xlong (7) to X (9).
+            # The alternate mapped page changes the loader-visible dependency from Xlong to X,
+            # while the on-disk authoritative string table still says Xlong.
             self.assertEqual(execute(), 9)
+            self.assertIn(b"Xlong", mod._elf_needed_name_bytes(candidate))
             with self.assertRaises(RuntimeError):
                 mod._elf_needed_name_bytes(candidate)
 
