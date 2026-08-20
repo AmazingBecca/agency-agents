@@ -149,6 +149,52 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
                 "text inside a direct DT_NEEDED pathname must not be reinterpreted as an ldd mapping target",
             )
 
+    def test_ldd_shellopts_noexec_cannot_turn_dependency_discovery_into_empty_success(self):
+        executable = pathlib.Path(os.sys.executable).resolve(strict=True)
+        with mock.patch.dict(mod.os.environ, {"SHELLOPTS": "noexec"}, clear=False):
+            paths = mod._ldd_dependency_paths(executable)
+        self.assertTrue(
+            any(path.name.startswith("libc.so") or path.name.startswith("libc-") for path in paths),
+            "inherited SHELLOPTS=noexec must not let trusted ldd exit successfully with an empty dependency closure",
+        )
+
+    def test_ldd_mapping_cannot_be_shadowed_by_whole_body_decoy_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            actual_dir = root / "actual"
+            actual_dir.mkdir()
+            actual = actual_dir / "libd.so"
+            actual.write_bytes(b"actual dependency")
+            body = f"libd.so => {actual}"
+            decoy = root / body
+            decoy.parent.mkdir(parents=True, exist_ok=True)
+            decoy.write_bytes(b"decoy dependency")
+            fake = subprocess.CompletedProcess(
+                args=["/usr/bin/ldd", "/runtime/python"],
+                returncode=0,
+                stdout=f"{body} (0x00007f0000000000)\n",
+                stderr="",
+            )
+
+            previous_cwd = pathlib.Path.cwd()
+            os.chdir(root)
+            try:
+                with mock.patch.object(mod.subprocess, "run", return_value=fake):
+                    paths = mod._ldd_dependency_paths(pathlib.Path("/runtime/python"))
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertIn(
+            actual,
+            paths,
+            "ordinary ldd mappings must bind the loaded absolute target even when a colliding whole-body decoy exists",
+        )
+        self.assertNotIn(
+            decoy.resolve(strict=True),
+            paths,
+            "filesystem decoys must not determine whether ambiguous ldd text is treated as a direct dependency",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
