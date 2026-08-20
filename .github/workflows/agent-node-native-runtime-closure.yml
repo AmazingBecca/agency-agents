@@ -30,16 +30,17 @@ jobs:
           git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-      - name: Compile and run exact committed v25 regressions
+      - name: Compile and run exact committed v26 regressions
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 --version
           cc --version | head -n 1
-          test "$(git hash-object agent-node/agent_node.py)" = '6d58e0dee61de0f8b0feb6b05684695f2751db37'
+          test "$(git hash-object agent-node/agent_node.py)" = 'febd1f2ae6be05eaf0b53901722ca9ae3484dc16'
           test "$(git hash-object agent-node/tests/test_native_runtime_string_table_overlap.py)" = 'c6ce8bf1ed031e41cbbfdb92965a608ae8a7fa5e'
           test "$(git hash-object agent-node/tests/test_native_runtime_loader_valid_alias.py)" = '5eda7a4f68f42cf076b1981be0307067b41e5569'
           test "$(git hash-object agent-node/tests/test_native_runtime_zero_fill_alias.py)" = 'c60bac2e06a0c1b8f2715901af253447b9ab9a6b'
+          test "$(git hash-object agent-node/tests/test_native_runtime_zero_file_alias.py)" = '303f26b10680ff3e88c9f7bc2c7af3fe4b183ecd'
           python3 -B -m py_compile \
             agent-node/agent_node.py \
             agent-node/tests/test_agent_node.py \
@@ -51,5 +52,6 @@ jobs:
             agent-node/tests/test_native_runtime_pt_dynamic_size.py \
             agent-node/tests/test_native_runtime_string_table_overlap.py \
             agent-node/tests/test_native_runtime_loader_valid_alias.py \
-            agent-node/tests/test_native_runtime_zero_fill_alias.py
+            agent-node/tests/test_native_runtime_zero_fill_alias.py \
+            agent-node/tests/test_native_runtime_zero_file_alias.py
           python3 -B -m unittest discover -s agent-node/tests -v
