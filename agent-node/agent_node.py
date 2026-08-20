@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v9"
+RUNTIME_POLICY = "agent-node-python-runtime-v10"
 
 
 def _resolve_git_bin() -> str:
@@ -381,7 +381,7 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
     text = cp.stdout + "\n" + cp.stderr
     if "not found" in text:
         raise RuntimeError(f"native runtime dependency is unresolved for {path}: {text.strip()}")
-    if cp.returncode not in {0, 1}:
+    if cp.returncode != 0:
         raise RuntimeError(f"native runtime dependency discovery failed for {path}: {text.strip()}")
 
     dependencies: set[pathlib.Path] = set()
@@ -393,12 +393,21 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
             continue
         body = address_suffix.sub("", line)
         candidate = ""
-        if body.startswith("/"):
-            candidate = body
-        else:
-            match = mapped_path.search(body)
-            if match:
-                candidate = match.group("path")
+        if "/" in body:
+            direct = pathlib.Path(body)
+            try:
+                resolved_direct = direct.resolve(strict=True)
+            except OSError:
+                resolved_direct = None
+            if resolved_direct is not None:
+                candidate = os.fspath(resolved_direct)
+        if not candidate:
+            if body.startswith("/"):
+                candidate = body
+            else:
+                match = mapped_path.search(body)
+                if match:
+                    candidate = match.group("path")
         if not candidate.startswith("/"):
             continue
         dependencies.add(pathlib.Path(candidate))
