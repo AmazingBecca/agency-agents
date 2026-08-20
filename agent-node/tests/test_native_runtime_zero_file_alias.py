@@ -206,9 +206,9 @@ class NativeRuntimeZeroFileAliasTests(unittest.TestCase):
             candidate.write_bytes(data)
 
             # The alternate mapped page changes the loader-visible dependency from Xlong to X,
-            # while the on-disk authoritative string table still says Xlong.
+            # while the on-disk authoritative string table still says Xlong. Receipt generation
+            # must therefore reject the ambiguous zero-file mapping.
             self.assertEqual(execute(), 9)
-            self.assertIn(b"Xlong", mod._elf_needed_name_bytes(candidate))
             with self.assertRaises(RuntimeError):
                 mod._elf_needed_name_bytes(candidate)
 
