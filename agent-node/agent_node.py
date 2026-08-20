@@ -25,7 +25,7 @@ MODEL_ENDPOINT = os.environ.get("AGENT_NODE_MODEL_ENDPOINT", "http://127.0.0.1:1
 MODEL_NAME = os.environ.get("AGENT_NODE_MODEL", "")
 TEST_ALLOWLIST = tuple(x.strip() for x in os.environ.get("AGENT_NODE_TEST_ALLOWLIST", "").split(",") if x.strip())
 TEST_OUTPUT_LIMIT = 20_000
-RUNTIME_POLICY = "agent-node-python-runtime-v11"
+RUNTIME_POLICY = "agent-node-python-runtime-v12"
 
 
 def _resolve_git_bin() -> str:
@@ -99,7 +99,15 @@ def _python_env() -> dict[str, str]:
         and not key.startswith("LD_")
         and not key.startswith("DYLD_")
         and not key.startswith("BASH_FUNC_")
-        and key not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "BASH_ENV", "ENV"}
+        and key
+        not in {
+            "VIRTUAL_ENV",
+            "__PYVENV_LAUNCHER__",
+            "BASH_ENV",
+            "ENV",
+            "SHELLOPTS",
+            "BASHOPTS",
+        }
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
@@ -393,23 +401,24 @@ def _ldd_dependency_paths(path: pathlib.Path) -> tuple[pathlib.Path, ...]:
             continue
         body = address_suffix.sub("", line)
         candidate = ""
-        if not body.startswith("/") and "/" in body:
-            direct = pathlib.Path(body)
-            try:
-                resolved_direct = direct.resolve(strict=True)
-            except OSError:
-                resolved_direct = None
-            if resolved_direct is not None:
-                candidate = os.fspath(resolved_direct)
+        if body.startswith("/"):
+            candidate = body
+        else:
+            match = mapped_path.search(body)
+            if match:
+                left = body[: match.start()]
+                if "/" in left:
+                    raise RuntimeError(f"ambiguous direct native dependency from ldd for {path}: {body}")
+                candidate = match.group("path")
+            elif "/" in body:
+                try:
+                    candidate = os.fspath(pathlib.Path(body).resolve(strict=True))
+                except OSError as exc:
+                    raise RuntimeError(f"direct native dependency cannot be resolved for {path}: {body}") from exc
         if not candidate:
-            if body.startswith("/"):
-                candidate = body
-            else:
-                match = mapped_path.search(body)
-                if match:
-                    candidate = match.group("path")
-        if not candidate.startswith("/"):
             continue
+        if not candidate.startswith("/"):
+            raise RuntimeError(f"native runtime dependency discovery returned non-absolute path for {path}: {candidate}")
         dependencies.add(pathlib.Path(candidate))
     return tuple(sorted(dependencies, key=os.fspath))
 
