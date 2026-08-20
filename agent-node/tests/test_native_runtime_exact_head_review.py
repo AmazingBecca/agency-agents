@@ -51,6 +51,104 @@ class NativeRuntimeExactHeadReviewTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     mod._resolve_ldd_bin()
 
+    def test_ldd_shellopts_nounset_failure_is_not_accepted_as_empty_closure(self):
+        executable = pathlib.Path(os.sys.executable).resolve(strict=True)
+        with mock.patch.dict(mod.os.environ, {"SHELLOPTS": "nounset"}, clear=False):
+            env = mod._python_env()
+            env["LC_ALL"] = "C"
+            env["LANG"] = "C"
+            raw = subprocess.run(
+                [mod.LDD_BIN, os.fspath(executable)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(
+                1,
+                raw.returncode,
+                f"fixture precondition changed: expected nounset to stop trusted ldd, got {raw.returncode}: {raw.stderr}",
+            )
+            self.assertEqual(
+                "",
+                raw.stdout,
+                f"fixture precondition changed: expected no dependency output, got {raw.stdout!r}",
+            )
+            with self.assertRaises(
+                RuntimeError,
+                msg="status-1 ldd failure with no dependency output must fail closed rather than become an empty closure",
+            ):
+                mod._ldd_dependency_paths(executable)
+
+    def test_ldd_parser_does_not_substitute_absolute_suffix_from_direct_needed_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            direct_dir = root / "dir => "
+            direct_dir.mkdir()
+            dependency = direct_dir / "dep.so"
+            (root / "dep.c").write_text("int dep(void){return 7;}\n", encoding="utf-8")
+            (root / "main.c").write_text(
+                "extern int dep(void); int main(void){return dep()==7?0:1;}\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["/usr/bin/cc", "-shared", "-fPIC", "dep.c", "-o", "dir => /dep.so"],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                env=mod._python_env(),
+            )
+            subprocess.run(
+                ["/usr/bin/cc", "main.c", "./dir => /dep.so", "-o", "app"],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                env=mod._python_env(),
+            )
+            raw_env = mod._python_env()
+            raw_env["LC_ALL"] = "C"
+            raw_env["LANG"] = "C"
+            raw = subprocess.run(
+                [mod.LDD_BIN, "./app"],
+                cwd=root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                env=raw_env,
+            )
+            self.assertEqual(0, raw.returncode, raw.stderr)
+            self.assertIn(
+                "./dir => /dep.so (0x",
+                raw.stdout,
+                f"fixture precondition changed: trusted ldd did not expose the direct DT_NEEDED spelling: {raw.stdout}",
+            )
+
+            previous_cwd = pathlib.Path.cwd()
+            os.chdir(root)
+            try:
+                paths = mod._ldd_dependency_paths(pathlib.Path("./app"))
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertIn(
+                dependency.resolve(strict=True),
+                paths,
+                "a direct relative DT_NEEDED pathname must bind the actual loaded dependency",
+            )
+            self.assertNotIn(
+                pathlib.Path("/dep.so"),
+                paths,
+                "text inside a direct DT_NEEDED pathname must not be reinterpreted as an ldd mapping target",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
