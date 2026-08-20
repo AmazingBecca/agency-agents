@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - hardening/agent-node-native-runtime-closure-v1
+  pull_request:
+    branches:
+      - hardening/agent-node-runtime-closure-v1
+    types: [opened, synchronize, reopened]
 
 permissions: {}
 
@@ -15,7 +19,7 @@ jobs:
       - name: Generate and validate exact PT_DYNAMIC repair without repository write
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -Eeuo pipefail
           export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
