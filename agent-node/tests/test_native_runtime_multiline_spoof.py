@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import importlib.util
 import os
 import pathlib
@@ -100,10 +99,6 @@ class NativeRuntimeMultilineSpoofTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
 
-            # The first physical ldd segment is deliberately shaped like a complete
-            # address-bearing record while the next segment points at an existing
-            # system library. The DT_NEEDED value itself is one newline-containing
-            # pathname and must therefore be rejected before per-line parsing.
             with self.assertRaisesRegex(RuntimeError, "multiline|DT_NEEDED|dependency"):
                 mod._ldd_dependency_paths(wrapper)
 
@@ -147,10 +142,20 @@ class NativeRuntimeMultilineSpoofTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
 
-            # Prove the loader consumes the real p_vaddr-backed dynamic table.
-            loaded = ctypes.CDLL(str(wrapper))
-            loaded.wrapper_value.restype = ctypes.c_int
-            self.assertEqual(loaded.wrapper_value(), 7)
+            probe = (
+                "import ctypes,sys;"
+                "lib=ctypes.CDLL(sys.argv[1]);"
+                "lib.wrapper_value.restype=ctypes.c_int;"
+                "print(lib.wrapper_value())"
+            )
+            executed = subprocess.run(
+                [os.sys.executable, "-I", "-B", "-S", "-c", probe, str(wrapper)],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(executed.stdout.strip(), "7")
 
             data = bytearray(wrapper.read_bytes())
             self.assertEqual(data[:4], b"\x7fELF")
@@ -173,12 +178,11 @@ class NativeRuntimeMultilineSpoofTests(unittest.TestCase):
             program_offset = header[4]
             program_entry_size = header[8]
             program_count = header[9]
-            program_size = struct.calcsize(program_format)
             dynamic_found = False
             for index in range(program_count):
                 ph_offset = program_offset + index * program_entry_size
                 values = struct.unpack_from(program_format, data, ph_offset)
-                if values[0] != 2:  # PT_DYNAMIC
+                if values[0] != 2:
                     continue
                 dynamic_found = True
                 p_filesz = values[5] if elf_class == 2 else values[4]
@@ -190,9 +194,6 @@ class NativeRuntimeMultilineSpoofTests(unittest.TestCase):
             self.assertTrue(dynamic_found, "test fixture must contain PT_DYNAMIC")
             wrapper.write_bytes(data)
 
-            # The mutated PT_DYNAMIC file offset points to harmless zeros, but its
-            # p_vaddr still identifies the real loaded dynamic table. Trusted ldd
-            # therefore succeeds and glibc still resolves the newline-bearing DSO.
             ldd = subprocess.run(
                 ["/usr/bin/ldd", str(wrapper)],
                 check=False,
@@ -203,8 +204,6 @@ class NativeRuntimeMultilineSpoofTests(unittest.TestCase):
             self.assertEqual(ldd.returncode, 0, ldd.stdout + ldd.stderr)
             self.assertIn("lib/x86_64-linux-gnu/libc.so.6", ldd.stdout)
 
-            # Receipt discovery must not accept the spoofed p_offset table. It may
-            # either recover DT_NEEDED via the p_vaddr/PT_LOAD mapping or fail closed.
             with self.assertRaisesRegex(RuntimeError, "dynamic|DT_NEEDED|ELF|multiline|dependency"):
                 mod._ldd_dependency_paths(wrapper)
 
