@@ -65,6 +65,7 @@ jobs:
           PY
           export AB_AGENT_QUEUE_ROOT="$queue"
           export AB_AGENT_STATE_ROOT="$state"
+          export AB_AGENT_WORKSPACE_ROOTS="$work"
           bash agent-node/agentic_worker.sh start
           trap 'bash agent-node/agentic_worker.sh stop >/dev/null 2>&1 || true' EXIT
 
