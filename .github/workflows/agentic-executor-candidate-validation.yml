@@ -34,16 +34,18 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          bash -n agent-node/agentic_worker.sh
           python3 -B -m py_compile agent-node/agentic_executor.py agent-node/tests/test_agentic_executor.py
           python3 -B -m unittest agent-node/tests/test_agentic_executor.py -v
 
-      - name: Exercise queue and deterministic fallback
+      - name: Exercise autonomous queue worker and deterministic fallback
         shell: bash
         run: |
           set -Eeuo pipefail
           work="$RUNNER_TEMP/work"
           queue="$RUNNER_TEMP/queue"
-          mkdir -p "$work" "$queue"
+          state="$RUNNER_TEMP/state"
+          mkdir -p "$work" "$queue" "$state"
           printf 'value = 1\n' > "$work/example.py"
           python3 - "$work" "$RUNNER_TEMP/task.json" <<'PY'
           import json,sys
@@ -62,8 +64,13 @@ jobs:
           open(out,'w',encoding='utf-8').write(json.dumps(task,sort_keys=True,separators=(',',':'))+'\n')
           PY
           export AB_AGENT_QUEUE_ROOT="$queue"
+          export AB_AGENT_STATE_ROOT="$state"
+          bash agent-node/agentic_worker.sh start
+          trap 'bash agent-node/agentic_worker.sh stop >/dev/null 2>&1 || true' EXIT
           python3 -B agent-node/agentic_executor.py submit "$RUNNER_TEMP/task.json"
-          done_path="$(python3 -B agent-node/agentic_executor.py work-once)"
+          done_path="$queue/ci-static-audit.done.json"
+          for _ in $(seq 1 80); do [[ -f "$done_path" ]] && break; sleep .1; done
+          test -f "$done_path"
           python3 - "$done_path" <<'PY'
           import json,sys
           r=json.load(open(sys.argv[1],encoding='utf-8'))
@@ -73,5 +80,6 @@ jobs:
           assert r['promotion_authorized'] is False
           assert r['completion_authorized'] is False
           assert len(r['receipt_sha256'])==64
-          print('LIVE_AGENTIC_QUEUE_OK=' + r['receipt_sha256'])
+          print('LIVE_AGENTIC_DAEMON_OK=' + r['receipt_sha256'])
           PY
+          bash agent-node/agentic_worker.sh status
