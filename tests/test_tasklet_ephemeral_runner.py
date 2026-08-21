@@ -33,15 +33,11 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(mod.BootstrapError):
                 mod._validate_runner_name(bad)
 
-    def test_private_root_rejects_symlink(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            target = base / "target"
-            target.mkdir()
-            link = base / "runner"
-            link.symlink_to(target, target_is_directory=True)
-            with self.assertRaises(mod.BootstrapError):
-                mod._prepare_private_root(link)
+    def test_target_and_install_root_are_not_caller_selectable(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        for forbidden in ("--repo", "--runner-version", "--runner-sha256", "--root"):
+            self.assertNotIn(forbidden, source)
+        self.assertIn('tempfile.mkdtemp(prefix="ab-ephemeral-runner-", dir="/tmp")', source)
 
     def test_child_environment_is_minimal_and_isolated(self):
         old = dict(os.environ)
