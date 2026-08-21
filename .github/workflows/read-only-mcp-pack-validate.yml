@@ -1,0 +1,71 @@
+name: Read-only MCP Pack Validation
+
+on:
+  pull_request:
+    paths:
+      - 'mcp_pack/**'
+      - '.github/workflows/read-only-mcp-pack-validate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact head identity
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          printf 'expected_head=%s\nactual_head=%s\n' "$EXPECTED_HEAD" "$actual"
+          test "$actual" = "$EXPECTED_HEAD"
+      - name: Compile Python sources on exact head
+        run: python3 -m compileall -q mcp_pack
+      - name: Validate capability catalog JSON on exact head
+        run: python3 -m json.tool mcp_pack/catalog.json >/dev/null
+      - name: Run browser policy tests on exact head
+        run: python3 -m unittest discover -s mcp_pack/tests -v
+
+  merge-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout GitHub synthetic PR merge with parents
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify ordered synthetic-merge parents
+        env:
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          merge = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          parents = subprocess.check_output(["git", "show", "-s", "--format=%P", "HEAD"], text=True).strip().split()
+          expected = [os.environ["EXPECTED_BASE"], os.environ["EXPECTED_HEAD"]]
+          print(f"synthetic_merge={merge}")
+          print(f"parents={parents}")
+          print(f"expected={expected}")
+          if parents != expected:
+              raise SystemExit(f"ordered parents mismatch: {parents} != {expected}")
+          PY
+      - name: Compile Python sources on synthetic merge
+        run: python3 -m compileall -q mcp_pack
+      - name: Validate capability catalog JSON on synthetic merge
+        run: python3 -m json.tool mcp_pack/catalog.json >/dev/null
+      - name: Run browser policy tests on synthetic merge
+        run: python3 -m unittest discover -s mcp_pack/tests -v
