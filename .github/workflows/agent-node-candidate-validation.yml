@@ -6,11 +6,13 @@ on:
       - hardening/agent-node-exact-worktree-v1
       - hardening/execution-receipt-quorum-v1
       - hardening/execution-capsule-toolchain-v1
+      - hardening/local-capability-lab-v1
   pull_request:
     branches:
       - infra/agent-node-bootstrap-v1
       - hardening/agent-node-exact-worktree-v1
       - hardening/execution-receipt-quorum-v1
+      - hardening/execution-capsule-toolchain-v1
     types: [opened, synchronize, reopened]
 
 permissions: {}
@@ -62,6 +64,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 --version
+          bash -n agent-node/capability_lab.sh
           python3 -B -m py_compile \
             agent-node/agent_node.py \
             agent-node/execution_quorum.py \
@@ -70,7 +73,8 @@ jobs:
             agent-node/toolchain_fingerprint.py \
             agent-node/tests/test_agent_node.py \
             agent-node/tests/test_execution_quorum.py \
-            agent-node/tests/test_execution_capsule.py
+            agent-node/tests/test_execution_capsule.py \
+            agent-node/tests/test_capability_lab_contract.py
           python3 -B -m unittest discover -s agent-node/tests -v
 
       - name: Exercise live authenticated loopback capsule service
