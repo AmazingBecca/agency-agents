@@ -39,11 +39,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Checkout GitHub synthetic PR merge
+      - name: Checkout GitHub synthetic PR merge with parents
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 2
       - name: Verify ordered synthetic-merge parents
         env:
           EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
