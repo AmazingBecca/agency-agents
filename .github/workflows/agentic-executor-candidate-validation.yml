@@ -69,8 +69,22 @@ jobs:
           trap 'bash agent-node/agentic_worker.sh stop >/dev/null 2>&1 || true' EXIT
           python3 -B agent-node/agentic_executor.py submit "$RUNNER_TEMP/task.json"
           done_path="$queue/ci-static-audit.done.json"
-          for _ in $(seq 1 80); do [[ -f "$done_path" ]] && break; sleep .1; done
-          test -f "$done_path"
+          failed_path="$queue/ci-static-audit.failed.json"
+          for _ in $(seq 1 300); do
+            [[ -f "$done_path" ]] && break
+            if [[ -f "$failed_path" ]]; then
+              cat "$failed_path" >&2
+              exit 1
+            fi
+            sleep .1
+          done
+          if [[ ! -f "$done_path" ]]; then
+            echo 'agentic worker timed out' >&2
+            bash agent-node/agentic_worker.sh status >&2 || true
+            cat "$state/log/worker.log" >&2 || true
+            find "$queue" -maxdepth 1 -type f -print -exec cat {} \; >&2 || true
+            exit 1
+          fi
           python3 - "$done_path" <<'PY'
           import json,sys
           r=json.load(open(sys.argv[1],encoding='utf-8'))
