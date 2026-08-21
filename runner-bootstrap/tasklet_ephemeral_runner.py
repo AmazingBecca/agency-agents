@@ -20,7 +20,6 @@ SCHEMA = "amazingbecca-tasklet-ephemeral-runner/v1"
 TARGET_REPOSITORY = "AmazingBecca/Zo"
 RUNNER_VERSION = "2.336.0"
 RUNNER_ARCHIVE_SHA256 = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
-RUNNER_ROOT = Path("/tasklet/agent/home/oracle-ephemeral-runner")
 REQUIRED_LABELS = ("linux", "oracle", "codex", "zo")
 MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
@@ -154,29 +153,6 @@ def _require_regular_executable(path: Path, label: str) -> None:
         os.chmod(path, st.st_mode | stat.S_IXUSR)
 
 
-def _prepare_private_root(path: Path) -> Path:
-    try:
-        parent = os.lstat(path.parent)
-    except OSError as exc:
-        raise BootstrapError(f"runner root parent is unavailable: {exc}") from exc
-    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
-        raise BootstrapError("runner root parent must be a real directory")
-    try:
-        current = os.lstat(path)
-    except FileNotFoundError:
-        try:
-            os.mkdir(path, 0o700)
-        except OSError as exc:
-            raise BootstrapError(f"unable to create runner root: {exc}") from exc
-        current = os.lstat(path)
-    if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
-        raise BootstrapError("runner root must be a real directory")
-    if current.st_uid != os.geteuid():
-        raise BootstrapError("runner root must be owned by the current execution identity")
-    os.chmod(path, 0o700)
-    return path
-
-
 def _child_env(*, home: Path, tmpdir: Path) -> dict[str, str]:
     env = {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -215,9 +191,8 @@ def bootstrap(args: argparse.Namespace) -> dict[str, object]:
     if os.environ.get("TASKLET_ZERO_SPEND_ONLY") != "1":
         raise BootstrapError("TASKLET_ZERO_SPEND_ONLY=1 is required")
 
-    root = _prepare_private_root(RUNNER_ROOT)
     started = time.time()
-    tmp = Path(tempfile.mkdtemp(prefix="ab-ephemeral-runner-", dir=root))
+    tmp = Path(tempfile.mkdtemp(prefix="ab-ephemeral-runner-", dir="/tmp"))
     os.chmod(tmp, 0o700)
     archive = tmp / "runner.tar.gz"
     install = tmp / "runner"
