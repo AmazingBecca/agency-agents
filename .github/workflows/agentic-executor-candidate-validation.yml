@@ -1,0 +1,77 @@
+name: Bounded Agentic Executor Validation
+
+on:
+  push:
+    branches:
+      - hardening/bounded-agentic-executor-v1
+  pull_request:
+    branches:
+      - hardening/local-capability-lab-v1
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Fetch exact candidate without workflow credentials
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          unset GITHUB_TOKEN GH_TOKEN
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin https://github.com/AmazingBecca/agency-agents.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Compile and run executor authority tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B -m py_compile agent-node/agentic_executor.py agent-node/tests/test_agentic_executor.py
+          python3 -B -m unittest agent-node/tests/test_agentic_executor.py -v
+
+      - name: Exercise queue and deterministic fallback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$RUNNER_TEMP/work"
+          queue="$RUNNER_TEMP/queue"
+          mkdir -p "$work" "$queue"
+          printf 'value = 1\n' > "$work/example.py"
+          python3 - "$work" "$RUNNER_TEMP/task.json" <<'PY'
+          import json,sys
+          work,out=sys.argv[1:3]
+          task={
+            'schema':'amazingbecca-agentic-task/v1',
+            'task_id':'ci-static-audit',
+            'objective':'static_python_audit',
+            'workspace':work,
+            'max_attempts':2,
+            'network_access':'none',
+            'advisory_only':True,
+            'promotion_authorized':False,
+            'completion_authorized':False,
+          }
+          open(out,'w',encoding='utf-8').write(json.dumps(task,sort_keys=True,separators=(',',':'))+'\n')
+          PY
+          export AB_AGENT_QUEUE_ROOT="$queue"
+          python3 -B agent-node/agentic_executor.py submit "$RUNNER_TEMP/task.json"
+          done_path="$(python3 -B agent-node/agentic_executor.py work-once)"
+          python3 - "$done_path" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert r['schema']=='amazingbecca-agentic-receipt/v1'
+          assert r['success'] is True
+          assert r['advisory_only'] is True
+          assert r['promotion_authorized'] is False
+          assert r['completion_authorized'] is False
+          assert len(r['receipt_sha256'])==64
+          print('LIVE_AGENTIC_QUEUE_OK=' + r['receipt_sha256'])
+          PY
