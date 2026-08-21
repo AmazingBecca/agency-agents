@@ -29,7 +29,7 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(mod.BootstrapError):
                 mod._validate_version(bad)
 
-    def test_child_environment_scrubs_token_proxy_loader_python(self):
+    def test_child_environment_is_minimal_and_isolated(self):
         old = dict(os.environ)
         try:
             os.environ.update({
@@ -39,16 +39,19 @@ class ValidationTests(unittest.TestCase):
                 "HTTPS_PROXY": "http://evil",
                 "LD_PRELOAD": "/tmp/evil.so",
                 "PYTHONPATH": "/tmp/evil",
-                "KEEP_ME": "ok",
+                "KEEP_ME": "must-not-inherit",
             })
-            env = mod._child_env()
+            env = mod._child_env(home=Path("/isolated/home"), tmpdir=Path("/isolated/tmp"))
+            self.assertEqual(env["HOME"], "/isolated/home")
+            self.assertEqual(env["TMPDIR"], "/isolated/tmp")
+            self.assertEqual(env["LANG"], "C.UTF-8")
             self.assertNotIn("GITHUB_TOKEN", env)
             self.assertNotIn("GH_TOKEN", env)
             self.assertNotIn("GITHUB_RUNNER_REGISTRATION_TOKEN", env)
             self.assertNotIn("HTTPS_PROXY", env)
             self.assertNotIn("LD_PRELOAD", env)
             self.assertNotIn("PYTHONPATH", env)
-            self.assertEqual(env["KEEP_ME"], "ok")
+            self.assertNotIn("KEEP_ME", env)
         finally:
             os.environ.clear(); os.environ.update(old)
 
@@ -74,6 +77,20 @@ class ValidationTests(unittest.TestCase):
             mod._safe_extract(archive, dest)
             self.assertEqual((dest / "config.sh").read_bytes(), b"x")
             self.assertEqual((dest / "bin/run").read_bytes(), b"y")
+
+    def test_safe_extract_rejects_expansion_over_policy(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / "a.tar.gz"
+            dest = root / "out"; dest.mkdir()
+            self._archive(archive, [("payload", b"xx", "file")])
+            old_limit = mod.MAX_EXTRACTED_BYTES
+            try:
+                mod.MAX_EXTRACTED_BYTES = 1
+                with self.assertRaises(mod.BootstrapError):
+                    mod._safe_extract(archive, dest)
+            finally:
+                mod.MAX_EXTRACTED_BYTES = old_limit
 
     def test_safe_extract_rejects_traversal_and_symlink(self):
         for members in [
