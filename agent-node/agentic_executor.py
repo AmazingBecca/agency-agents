@@ -27,6 +27,7 @@ SAFE_OBJECTIVES = {
     "static_python_audit",
     "python_repo_validation",
 }
+CODE_EXEC_OBJECTIVES = {"static_python_audit", "python_repo_validation"}
 
 
 def canonical(value: Any) -> bytes:
@@ -79,10 +80,25 @@ def run_fixed(argv: list[str], *, cwd: pathlib.Path | None = None, timeout: int 
     }
 
 
-def normalize_workspace(raw: str | None) -> pathlib.Path:
+def configured_workspace_roots() -> tuple[pathlib.Path, ...]:
+    raw = os.environ.get("AB_AGENT_WORKSPACE_ROOTS", "")
+    roots: list[pathlib.Path] = []
+    for item in raw.split(os.pathsep):
+        if not item:
+            continue
+        roots.append(pathlib.Path(item).resolve(strict=True))
+    return tuple(roots)
+
+
+def normalize_workspace(raw: str | None, *, require_allowlist: bool = False) -> pathlib.Path:
     root = pathlib.Path(raw or os.getcwd()).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("workspace must be an existing directory")
+    roots = configured_workspace_roots()
+    if require_allowlist and not roots:
+        raise ValueError("code-executing objectives require AB_AGENT_WORKSPACE_ROOTS")
+    if roots and not any(root == allowed or allowed in root.parents for allowed in roots):
+        raise ValueError("workspace is outside executor-authorized roots")
     return root
 
 
@@ -272,7 +288,7 @@ def validate_task(task: dict[str, Any]) -> dict[str, Any]:
 
 def execute_task(task: dict[str, Any]) -> dict[str, Any]:
     task = validate_task(task)
-    workspace = normalize_workspace(task.get("workspace"))
+    workspace = normalize_workspace(task.get("workspace"), require_allowlist=task["objective"] in CODE_EXEC_OBJECTIVES)
     task_bytes = canonical(task)
     attempts = []
     outcome: dict[str, Any] | None = None
@@ -339,8 +355,8 @@ def submit(path: pathlib.Path) -> pathlib.Path:
     task = validate_task(load_json(path))
     QUEUE_ROOT.mkdir(parents=True, exist_ok=True)
     dest = QUEUE_ROOT / f"{task['task_id']}.pending.json"
-    if dest.exists() or (QUEUE_ROOT / f"{task['task_id']}.done.json").exists():
-        raise RuntimeError("task_id already exists")
+    if any(QUEUE_ROOT.glob(f"{task['task_id']}.*.json")):
+        raise RuntimeError("task_id already exists in queue history")
     write_json(dest, task)
     return dest
 
@@ -352,7 +368,10 @@ def work_once() -> pathlib.Path | None:
         return None
     src = pending[0]
     running = src.with_name(src.name.replace(".pending.json", ".running.json"))
-    os.replace(src, running)
+    try:
+        os.replace(src, running)
+    except FileNotFoundError:
+        return None
     try:
         task = load_json(running)
         receipt = execute_task(task)
@@ -362,7 +381,17 @@ def work_once() -> pathlib.Path | None:
         return done
     except Exception as exc:
         failed = running.with_name(running.name.replace(".running.json", ".failed.json"))
-        write_json(failed, {"schema": SCHEMA_RECEIPT, "success": False, "error": f"{type(exc).__name__}: {exc}"})
+        failure = {
+            "schema": SCHEMA_RECEIPT,
+            "task_id": running.name.removesuffix(".running.json"),
+            "success": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "advisory_only": True,
+            "promotion_authorized": False,
+            "completion_authorized": False,
+        }
+        failure["receipt_sha256"] = sha256_bytes(canonical(failure))
+        write_json(failed, failure)
         running.unlink(missing_ok=True)
         return failed
 
