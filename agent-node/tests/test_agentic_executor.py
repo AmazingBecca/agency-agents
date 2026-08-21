@@ -69,6 +69,19 @@ class AgenticExecutorTests(unittest.TestCase):
         self.assertFalse(receipt["completion_authorized"])
         self.assertEqual(len(receipt["receipt_sha256"]), 64)
 
+    def test_code_execution_requires_executor_authorized_workspace_root(self):
+        with tempfile.TemporaryDirectory() as allowed_td, tempfile.TemporaryDirectory() as outside_td:
+            outside = pathlib.Path(outside_td)
+            (outside / "x.py").write_text("x = 1\n", encoding="utf-8")
+            code_task = task(objective="static_python_audit", workspace=str(outside), max_attempts=1)
+            with mock.patch.dict(mod.os.environ, {"AB_AGENT_WORKSPACE_ROOTS": allowed_td}, clear=False):
+                with self.assertRaisesRegex(ValueError, "outside executor-authorized roots"):
+                    mod.execute_task(code_task)
+            with mock.patch.dict(mod.os.environ, {}, clear=False):
+                mod.os.environ.pop("AB_AGENT_WORKSPACE_ROOTS", None)
+                with self.assertRaisesRegex(ValueError, "require AB_AGENT_WORKSPACE_ROOTS"):
+                    mod.execute_task(code_task)
+
     def test_static_python_audit_has_deterministic_fallback_without_optional_tools(self):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
@@ -83,7 +96,7 @@ class AgenticExecutorTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["python_file_count"], 1)
 
-    def test_queue_transitions_pending_to_done_receipt(self):
+    def test_queue_transitions_pending_to_done_and_replay_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             queue = pathlib.Path(td) / "queue"
             source = pathlib.Path(td) / "task.json"
@@ -93,11 +106,39 @@ class AgenticExecutorTests(unittest.TestCase):
                  mock.patch.object(mod, "inventory", return_value={"stable": True}):
                 pending = mod.submit(source)
                 self.assertTrue(pending.name.endswith(".pending.json"))
+                with self.assertRaisesRegex(RuntimeError, "queue history"):
+                    mod.submit(source)
                 done = mod.work_once()
                 self.assertIsNotNone(done)
                 receipt = json.loads(done.read_text(encoding="utf-8"))
+                with self.assertRaisesRegex(RuntimeError, "queue history"):
+                    mod.submit(source)
         self.assertTrue(receipt["success"])
         self.assertEqual(receipt["schema"], mod.SCHEMA_RECEIPT)
+
+    def test_lost_queue_claim_race_returns_idle_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as td:
+            queue = pathlib.Path(td)
+            pending = queue / "race.pending.json"
+            pending.write_bytes(mod.canonical(task(task_id="race")))
+            with mock.patch.object(mod, "QUEUE_ROOT", queue), mock.patch.object(mod.os, "replace", side_effect=FileNotFoundError):
+                self.assertIsNone(mod.work_once())
+
+    def test_failed_queue_receipt_is_hash_bound_and_nonpromotional(self):
+        with tempfile.TemporaryDirectory() as td:
+            queue = pathlib.Path(td) / "queue"
+            source = pathlib.Path(td) / "task.json"
+            code_task = task(task_id="fail", objective="static_python_audit", workspace=td, max_attempts=1)
+            source.write_bytes(mod.canonical(code_task))
+            with mock.patch.object(mod, "QUEUE_ROOT", queue), mock.patch.dict(mod.os.environ, {}, clear=False):
+                mod.os.environ.pop("AB_AGENT_WORKSPACE_ROOTS", None)
+                mod.submit(source)
+                failed = mod.work_once()
+                receipt = json.loads(failed.read_text(encoding="utf-8"))
+        claimed = receipt.pop("receipt_sha256")
+        self.assertEqual(claimed, mod.sha256_bytes(mod.canonical(receipt)))
+        self.assertFalse(receipt["promotion_authorized"])
+        self.assertFalse(receipt["completion_authorized"])
 
 
 if __name__ == "__main__":
