@@ -30,6 +30,8 @@ BASE = [
     "hypothesis>=6.0.0,<7",
 ]
 
+# Mirrors the composition primitives used by upstream MiroFish. OASIS 0.2.5
+# declares Python >=3.10,<3.12, so this profile intentionally requires 3.11.
 MIROFISH = [
     "flask>=3.0.0,<4",
     "flask-cors>=6.0.0,<7",
@@ -42,12 +44,29 @@ MIROFISH = [
     "chardet>=5.0.0,<6",
 ]
 
-PROFILES = {"base": BASE, "mirofish": BASE + MIROFISH}
-SOURCES = {"mirofish": "https://github.com/666ghj/MiroFish", "oasis": "https://github.com/camel-ai/oasis", "camel": "https://github.com/camel-ai/camel"}
+PROFILES = {
+    "base": BASE,
+    "mirofish": BASE + MIROFISH,
+}
 
-def sha256_bytes(data: bytes) -> str: return hashlib.sha256(data).hexdigest()
-def python_bin() -> Path: return VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-def run(cmd: list[str]) -> None: subprocess.run(cmd, check=True)
+SOURCES = {
+    "mirofish": "https://github.com/666ghj/MiroFish",
+    "oasis": "https://github.com/camel-ai/oasis",
+    "camel": "https://github.com/camel-ai/camel",
+}
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def python_bin() -> Path:
+    return VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def run(cmd: list[str]) -> None:
+    subprocess.run(cmd, check=True)
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Install the shared composition stack in a repo-local venv.")
@@ -55,20 +74,52 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--recreate", action="store_true")
     args = ap.parse_args()
-    if args.profile == "mirofish" and sys.version_info[:2] != (3, 11):
-        raise SystemExit("mirofish profile requires CPython 3.11 because camel-oasis==0.2.5 declares Python <3.12; current interpreter is " + sys.version.split()[0])
-    selected = PROFILES[args.profile]
-    manifest = {"schema":"amazingbecca-shared-composition-stack-v1","profile":args.profile,"python":sys.version.split()[0],"requirements":selected,"sources":SOURCES}
-    manifest["manifest_sha256"] = sha256_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
-    if args.dry_run:
-        print(json.dumps(manifest, indent=2, sort_keys=True)); return 0
-    if args.recreate and VENV.exists():
-        import shutil; shutil.rmtree(VENV)
-    if not VENV.exists(): venv.EnvBuilder(with_pip=True, clear=False, symlinks=os.name != "nt").create(VENV)
-    py = python_bin(); run([str(py),"-m","pip","install","--disable-pip-version-check","--no-input",*selected])
-    freeze = subprocess.check_output([str(py),"-m","pip","freeze","--all"], text=True)
-    RECEIPTS.mkdir(parents=True, exist_ok=True)
-    receipt = {**manifest,"created_unix":int(time.time()),"venv":str(VENV),"freeze_sha256":sha256_bytes(freeze.encode()),"installed":sorted(line for line in freeze.splitlines() if line.strip())}
-    out = RECEIPTS / f"{args.profile}.json"; out.write_text(json.dumps(receipt, indent=2, sort_keys=True)+"\n", encoding="utf-8"); print(out); return 0
 
-if __name__ == "__main__": raise SystemExit(main())
+    if args.profile == "mirofish" and sys.version_info[:2] != (3, 11):
+        raise SystemExit(
+            "mirofish profile requires CPython 3.11 because camel-oasis==0.2.5 declares Python <3.12; "
+            f"current interpreter is {sys.version.split()[0]}"
+        )
+
+    selected = PROFILES[args.profile]
+    manifest = {
+        "schema": "amazingbecca-shared-composition-stack-v1",
+        "profile": args.profile,
+        "python": sys.version.split()[0],
+        "requirements": selected,
+        "sources": SOURCES,
+    }
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    manifest["manifest_sha256"] = sha256_bytes(canonical)
+
+    if args.dry_run:
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+        return 0
+
+    if args.recreate and VENV.exists():
+        import shutil
+        shutil.rmtree(VENV)
+
+    if not VENV.exists():
+        venv.EnvBuilder(with_pip=True, clear=False, symlinks=os.name != "nt").create(VENV)
+
+    py = python_bin()
+    run([str(py), "-m", "pip", "install", "--disable-pip-version-check", "--no-input", *selected])
+    freeze = subprocess.check_output([str(py), "-m", "pip", "freeze", "--all"], text=True)
+
+    RECEIPTS.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        **manifest,
+        "created_unix": int(time.time()),
+        "venv": str(VENV),
+        "freeze_sha256": sha256_bytes(freeze.encode()),
+        "installed": sorted(line for line in freeze.splitlines() if line.strip()),
+    }
+    out = RECEIPTS / f"{args.profile}.json"
+    out.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
