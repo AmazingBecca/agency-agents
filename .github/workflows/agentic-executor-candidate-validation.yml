@@ -38,7 +38,7 @@ jobs:
           python3 -B -m py_compile agent-node/agentic_executor.py agent-node/tests/test_agentic_executor.py
           python3 -B -m unittest agent-node/tests/test_agentic_executor.py -v
 
-      - name: Exercise autonomous queue worker and deterministic fallback
+      - name: Exercise autonomous queue worker, contention rejection and fallback
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -67,6 +67,15 @@ jobs:
           export AB_AGENT_STATE_ROOT="$state"
           bash agent-node/agentic_worker.sh start
           trap 'bash agent-node/agentic_worker.sh stop >/dev/null 2>&1 || true' EXIT
+
+          set +e
+          AB_AGENT_STATE_ROOT="$RUNNER_TEMP/second-state" AB_AGENT_QUEUE_ROOT="$queue" bash agent-node/agentic_worker.sh start >"$RUNNER_TEMP/second.out" 2>"$RUNNER_TEMP/second.err"
+          second_rc=$?
+          set -e
+          test "$second_rc" -ne 0
+          grep -F 'agentic worker failed to start' "$RUNNER_TEMP/second.err"
+          echo 'SINGLE_WORKER_LOCK_OK'
+
           python3 -B agent-node/agentic_executor.py submit "$RUNNER_TEMP/task.json"
           done_path="$queue/ci-static-audit.done.json"
           failed_path="$queue/ci-static-audit.failed.json"
