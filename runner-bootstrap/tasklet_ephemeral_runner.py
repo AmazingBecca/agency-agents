@@ -19,24 +19,11 @@ from typing import Iterable
 SCHEMA = "amazingbecca-tasklet-ephemeral-runner/v1"
 REQUIRED_LABELS = ("linux", "oracle", "codex", "zo")
 MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
 ALLOWED_DOWNLOAD_HOSTS = (
     "github.com",
     "githubusercontent.com",
 )
-SECRET_ENV_NAMES = {
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "ACTIONS_RUNTIME_TOKEN",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "GITHUB_RUNNER_REGISTRATION_TOKEN",
-}
-SCRUB_PREFIXES = ("LD_", "DYLD_", "PYTHON")
-SCRUB_EXACT = {
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-    "VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH",
-}
-
 
 class BootstrapError(RuntimeError):
     pass
@@ -141,6 +128,9 @@ def _safe_extract(archive: Path, destination: Path) -> None:
         members = tf.getmembers()
         if not members:
             raise BootstrapError("runner archive has no members")
+        extracted_bytes = sum(member.size for member in members if member.isfile())
+        if extracted_bytes < 1 or extracted_bytes > MAX_EXTRACTED_BYTES:
+            raise BootstrapError("runner archive extracted size is outside policy")
         for member in members:
             _safe_member_name(member.name)
             if member.issym() or member.islnk() or member.isdev() or member.isfifo():
@@ -181,14 +171,16 @@ def _require_regular_executable(path: Path, label: str) -> None:
         os.chmod(path, st.st_mode | stat.S_IXUSR)
 
 
-def _child_env() -> dict[str, str]:
-    env: dict[str, str] = {}
-    for key, value in os.environ.items():
-        if key in SECRET_ENV_NAMES or key in SCRUB_EXACT or any(key.startswith(prefix) for prefix in SCRUB_PREFIXES):
-            continue
-        env[key] = value
-    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    env["RUNNER_ALLOW_RUNASROOT"] = "1" if os.geteuid() == 0 else env.get("RUNNER_ALLOW_RUNASROOT", "")
+def _child_env(*, home: Path, tmpdir: Path) -> dict[str, str]:
+    env = {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(tmpdir),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    if os.geteuid() == 0:
+        env["RUNNER_ALLOW_RUNASROOT"] = "1"
     return env
 
 
@@ -211,7 +203,7 @@ def bootstrap(args: argparse.Namespace) -> dict[str, object]:
     version = _validate_version(args.runner_version)
     expected_sha = _validate_sha256(args.runner_sha256)
     name = _validate_runner_name(args.runner_name)
-    token = os.environ.get("GITHUB_RUNNER_REGISTRATION_TOKEN", "")
+    token = os.environ.pop("GITHUB_RUNNER_REGISTRATION_TOKEN", "")
     if not token or len(token) < 20 or any(ch.isspace() for ch in token):
         raise BootstrapError("GITHUB_RUNNER_REGISTRATION_TOKEN is required")
     if os.environ.get("TASKLET_ZERO_SPEND_ONLY") != "1":
@@ -248,7 +240,11 @@ def bootstrap(args: argparse.Namespace) -> dict[str, object]:
         run = install / "run.sh"
         _require_regular_executable(config, "config.sh")
         _require_regular_executable(run, "run.sh")
-        env = _child_env()
+        isolated_home = tmp / "home"
+        isolated_tmp = tmp / "tmp"
+        isolated_home.mkdir(mode=0o700)
+        isolated_tmp.mkdir(mode=0o700)
+        env = _child_env(home=isolated_home, tmpdir=isolated_tmp)
         config_result = _run_checked(
             [
                 str(config),
