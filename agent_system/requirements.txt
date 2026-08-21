@@ -1,0 +1,6 @@
+httpx>=0.27,<1
+fastmcp>=2,<3
+# Optional primary Python harness after compatibility validation:
+# pydantic-ai-slim[mcp]>=1.101,<2
+# Optional local/open-weight second-engine harness:
+# qwen-agent[mcp]
