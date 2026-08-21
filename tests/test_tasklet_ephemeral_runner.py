@@ -17,17 +17,31 @@ spec.loader.exec_module(mod)
 
 
 class ValidationTests(unittest.TestCase):
-    def test_identity_validation(self):
-        self.assertEqual(mod._validate_repo("AmazingBecca/Zo"), "AmazingBecca/Zo")
-        self.assertEqual(mod._validate_version("2.336.0"), "2.336.0")
-        self.assertEqual(mod._validate_sha256("a" * 64), "a" * 64)
+    def test_identity_and_release_are_pinned(self):
+        self.assertEqual(mod.TARGET_REPOSITORY, "AmazingBecca/Zo")
+        self.assertEqual(mod.RUNNER_VERSION, "2.336.0")
+        self.assertEqual(
+            mod.RUNNER_ARCHIVE_SHA256,
+            "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d",
+        )
+        self.assertEqual(
+            mod._download_url(),
+            "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz",
+        )
         self.assertEqual(mod._validate_runner_name("oracle-tasklet-01"), "oracle-tasklet-01")
-        for bad in ("x", "../x", "a/b/c", "a b/c"):
+        for bad in ("", "a/b", "name with spaces", "x" * 65):
             with self.assertRaises(mod.BootstrapError):
-                mod._validate_repo(bad)
-        for bad in ("2.336", "v2.336.0", "2.336.0-rc"):
+                mod._validate_runner_name(bad)
+
+    def test_private_root_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "target"
+            target.mkdir()
+            link = base / "runner"
+            link.symlink_to(target, target_is_directory=True)
             with self.assertRaises(mod.BootstrapError):
-                mod._validate_version(bad)
+                mod._prepare_private_root(link)
 
     def test_child_environment_is_minimal_and_isolated(self):
         old = dict(os.environ)
