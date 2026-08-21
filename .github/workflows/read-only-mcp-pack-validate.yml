@@ -1,0 +1,26 @@
+name: Read-only MCP Pack Validation
+
+on:
+  pull_request:
+    paths:
+      - 'mcp_pack/**'
+      - '.github/workflows/read-only-mcp-pack-validate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Compile Python sources
+        run: python3 -m compileall -q mcp_pack
+      - name: Validate capability catalog JSON
+        run: python3 -m json.tool mcp_pack/catalog.json >/dev/null
+      - name: Run dependency-free browser policy tests
+        run: python3 -m unittest discover -s mcp_pack/tests -v

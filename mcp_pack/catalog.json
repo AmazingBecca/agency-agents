@@ -1,0 +1,157 @@
+[
+  {
+    "id": "pydantic-ai",
+    "category": "agent-framework",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/pydantic/pydantic-ai",
+      "https://github.com/pydantic/pydantic-ai/blob/main/docs/capabilities/mcp.md",
+      "https://github.com/pydantic/pydantic-ai/blob/main/docs/timeouts.md",
+      "https://github.com/pydantic/pydantic-ai/blob/main/docs/multi-agent-applications.md"
+    ],
+    "value": "Model-agnostic Python agent harness with MCP, multi-agent patterns, usage limits, and explicit timeout controls.",
+    "risk": "Must be compatibility-tested with the chosen MCP SDK/version and local model endpoint before becoming runtime authority.",
+    "next_validation": "Install in isolated environment; run a local stdio MCP smoke test and timeout/failure tests."
+  },
+  {
+    "id": "qwen-agent",
+    "category": "agent-framework",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/QwenLM/Qwen-Agent"
+    ],
+    "value": "Open-weight-friendly second-engine candidate with tool calling, memory/RAG, code-interpreter examples, and MCP configuration support.",
+    "risk": "Bundled code execution must not be treated as a production sandbox; model/tool compatibility needs a local test.",
+    "next_validation": "Run Qwen-Agent against the same read-only MCP pack with an isolated local model and compare outputs independently."
+  },
+  {
+    "id": "ollama",
+    "category": "model-runtime",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/ollama/ollama/blob/main/docs/api/openai-compatibility.mdx",
+      "https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx"
+    ],
+    "value": "Local OpenAI-compatible model endpoint with tool calling and no required cloud dependency for local inference.",
+    "risk": "OpenAI compatibility is partial and model-specific tool quality varies.",
+    "next_validation": "Detect an owned host with Ollama, start one tool-capable model, and run exact timeout/tool-call smoke tests."
+  },
+  {
+    "id": "google-adk",
+    "category": "agent-interop",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/google/adk-python",
+      "https://github.com/google/adk-python/blob/main/docs/guides/tools/mcp_tool/agent_to_mcp/index.md"
+    ],
+    "value": "A2A/MCP interop path that can expose an entire ADK agent as a standard MCP server.",
+    "risk": "Adds another agent runtime; only useful if A2A or agent-as-MCP interoperability closes a real integration gap.",
+    "next_validation": "Build one tiny agent-to-MCP example in isolation and measure whether it removes custom adapter code."
+  },
+  {
+    "id": "browser-use",
+    "category": "browser-computer-use",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/browser-use/browser-use",
+      "https://github.com/browser-use/browser-use/blob/main/browser_use/mcp/manifest.json"
+    ],
+    "value": "Local browser MCP path with configured allowed domains, sensitive-data masking, operation timeouts, and maximum step counts.",
+    "risk": "Browser actions are externally stateful; allowlists and an independent approval/policy gate must be wired in front of the executor rather than merely documented.",
+    "next_validation": "Run local MCP in a disposable profile with a single harmless allowlisted site and prove deny/approval behavior before broader use."
+  },
+  {
+    "id": "agent-tars-ui-tars",
+    "category": "browser-computer-use",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/bytedance/UI-TARS",
+      "https://github.com/bytedance/UI-TARS-desktop/blob/main/multimodal/agent-tars/core/README.md"
+    ],
+    "value": "ByteDance multimodal GUI/browser stack with hybrid GUI/DOM browser control and an MCP-native kernel.",
+    "risk": "High-authority computer-use surface; must be isolated from credentials, production sessions, and unrestricted filesystem/network access.",
+    "next_validation": "Evaluate only in a disposable local desktop/browser profile behind the browser-policy MCP and explicit action approvals."
+  },
+  {
+    "id": "letta-memfs",
+    "category": "durable-memory",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/letta-ai/letta-code/blob/main/README.md",
+      "https://github.com/letta-ai/letta-docs-md/blob/main/concepts/memfs/index.md",
+      "https://github.com/letta-ai/lettabot/blob/main/docs/configuration.md"
+    ],
+    "value": "Git-backed memory filesystem with versioned Markdown memory, subagent worktrees, shared-memory repositories, and background memory maintenance.",
+    "risk": "Agents can edit their own memory/context; direct self-mutation must not become execution or policy authority.",
+    "next_validation": "Prototype a proposal-only memory lane where agent changes land on reviewable git refs and cannot alter runtime policy until independently admitted."
+  },
+  {
+    "id": "litellm",
+    "category": "model-mcp-gateway",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/BerriAI/litellm"
+    ],
+    "value": "Self-hosted OpenAI-compatible gateway spanning many model providers plus A2A and MCP bridge/gateway functions.",
+    "risk": "Central gateway can concentrate provider credentials and authority; not justified until there are multiple real backends to route.",
+    "next_validation": "Defer deployment; when two model backends are live, test a loopback-only gateway with per-provider credentials and bounded MCP approval semantics."
+  },
+  {
+    "id": "goose",
+    "category": "coding-workflow-agent",
+    "status": "VALIDATED_DESIGN",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/aaif-goose/goose",
+      "https://github.com/aaif-goose/goose/blob/main/documentation/docs/getting-started/providers.md",
+      "https://github.com/aaif-goose/goose/blob/main/documentation/docs/getting-started/using-extensions.md"
+    ],
+    "value": "Local open-source CLI/desktop/API agent with local Ollama support, MCP extensions, per-extension timeouts, and ACP providers.",
+    "risk": "Built-in developer/computer-controller extensions have much broader authority than the narrow control-plane MCPs designed here.",
+    "next_validation": "Test a custom goose distribution/session with only the read-only MCP pack enabled and all broad built-ins disabled."
+  },
+  {
+    "id": "bettermemory",
+    "category": "durable-memory",
+    "status": "DISCOVERED",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/0Mattias/bettermemory"
+    ],
+    "value": "Promising trust-layer memory approach surfaced through the MCP registry, designed around checking memory against filesystem/git before belief.",
+    "risk": "Source, release provenance, write scope, and current exact version have not yet been independently verified in this program.",
+    "next_validation": "Inspect current release/source/license, enumerate MCP tools and write permissions, and test stale-memory rejection on a disposable repository."
+  },
+  {
+    "id": "trace-mem",
+    "category": "durable-memory",
+    "status": "DISCOVERED",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/bettyguo/agent-memory"
+    ],
+    "value": "Research-grade verifiable memory with source-span citations, content hashes, HMAC anchoring, replay/tamper checks, and explicit threat-model caveats.",
+    "risk": "Alpha research implementation; current store and agent share a process, so key extraction remains in threat model.",
+    "next_validation": "Reproduce its deterministic citation/tamper tests locally and compare its provenance model with the existing content-addressed handoff design."
+  },
+  {
+    "id": "noema",
+    "category": "durable-memory",
+    "status": "DISCOVERED",
+    "researched_at": "2026-08-20",
+    "primary_sources": [
+      "https://github.com/Fail-Safe/Noema"
+    ],
+    "value": "Local-first Markdown source-of-truth memory with SQLite FTS5 index, MCP transport, audit events, and federation/vector-clock concepts.",
+    "risk": "Federated writable memory increases merge/authority complexity and requires source/release/security review before adoption.",
+    "next_validation": "Inspect MCP mutation tools and prove an immutable/proposal-only mode can be enforced before considering integration."
+  }
+]
