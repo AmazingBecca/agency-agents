@@ -17,6 +17,10 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 SCHEMA = "amazingbecca-tasklet-ephemeral-runner/v1"
+TARGET_REPOSITORY = "AmazingBecca/Zo"
+RUNNER_VERSION = "2.336.0"
+RUNNER_ARCHIVE_SHA256 = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+RUNNER_ROOT = Path("/tasklet/agent/home/oracle-ephemeral-runner")
 REQUIRED_LABELS = ("linux", "oracle", "codex", "zo")
 MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
@@ -33,37 +37,16 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
-def _validate_repo(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
-        raise BootstrapError("repo must be owner/name")
-    owner, repo = value.split("/", 1)
-    if owner in {".", ".."} or repo in {".", ".."} or owner.startswith("-") or repo.startswith("-"):
-        raise BootstrapError("repo contains unsafe path-like component")
-    return value
-
-
-def _validate_version(value: str) -> str:
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
-        raise BootstrapError("runner version must be N.N.N")
-    return value
-
-
-def _validate_sha256(value: str) -> str:
-    if not re.fullmatch(r"[0-9a-f]{64}", value):
-        raise BootstrapError("runner sha256 must be 64 lowercase hex")
-    return value
-
-
 def _validate_runner_name(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value):
         raise BootstrapError("runner name contains unsafe characters")
     return value
 
 
-def _download_url(version: str) -> str:
+def _download_url() -> str:
     return (
         "https://github.com/actions/runner/releases/download/"
-        f"v{version}/actions-runner-linux-x64-{version}.tar.gz"
+        f"v{RUNNER_VERSION}/actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz"
     )
 
 
@@ -171,6 +154,29 @@ def _require_regular_executable(path: Path, label: str) -> None:
         os.chmod(path, st.st_mode | stat.S_IXUSR)
 
 
+def _prepare_private_root(path: Path) -> Path:
+    try:
+        parent = os.lstat(path.parent)
+    except OSError as exc:
+        raise BootstrapError(f"runner root parent is unavailable: {exc}") from exc
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        raise BootstrapError("runner root parent must be a real directory")
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError:
+        try:
+            os.mkdir(path, 0o700)
+        except OSError as exc:
+            raise BootstrapError(f"unable to create runner root: {exc}") from exc
+        current = os.lstat(path)
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+        raise BootstrapError("runner root must be a real directory")
+    if current.st_uid != os.geteuid():
+        raise BootstrapError("runner root must be owned by the current execution identity")
+    os.chmod(path, 0o700)
+    return path
+
+
 def _child_env(*, home: Path, tmpdir: Path) -> dict[str, str]:
     env = {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -199,9 +205,9 @@ def _run_checked(argv: list[str], *, cwd: Path, env: dict[str, str], timeout: in
 
 
 def bootstrap(args: argparse.Namespace) -> dict[str, object]:
-    repo = _validate_repo(args.repo)
-    version = _validate_version(args.runner_version)
-    expected_sha = _validate_sha256(args.runner_sha256)
+    repo = TARGET_REPOSITORY
+    version = RUNNER_VERSION
+    expected_sha = RUNNER_ARCHIVE_SHA256
     name = _validate_runner_name(args.runner_name)
     token = os.environ.pop("GITHUB_RUNNER_REGISTRATION_TOKEN", "")
     if not token or len(token) < 20 or any(ch.isspace() for ch in token):
@@ -209,9 +215,7 @@ def bootstrap(args: argparse.Namespace) -> dict[str, object]:
     if os.environ.get("TASKLET_ZERO_SPEND_ONLY") != "1":
         raise BootstrapError("TASKLET_ZERO_SPEND_ONLY=1 is required")
 
-    root = Path(args.root).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    root = _prepare_private_root(RUNNER_ROOT)
     started = time.time()
     tmp = Path(tempfile.mkdtemp(prefix="ab-ephemeral-runner-", dir=root))
     os.chmod(tmp, 0o700)
@@ -231,7 +235,7 @@ def bootstrap(args: argparse.Namespace) -> dict[str, object]:
         "status": "prepared",
     }
     try:
-        size, observed_sha = _download_and_hash(_download_url(version), archive)
+        size, observed_sha = _download_and_hash(_download_url(), archive)
         if observed_sha != expected_sha:
             raise BootstrapError(f"runner archive sha256 mismatch: expected={expected_sha} observed={observed_sha}")
         receipt["archive_size"] = size
@@ -294,11 +298,7 @@ def bootstrap(args: argparse.Namespace) -> dict[str, object]:
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Zero-spend one-job Tasklet GitHub runner bootstrap")
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--runner-version", required=True)
-    parser.add_argument("--runner-sha256", required=True)
     parser.add_argument("--runner-name", required=True)
-    parser.add_argument("--root", default="/tasklet/agent/home")
     parser.add_argument("--max-seconds", type=int, default=1800)
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.max_seconds < 60 or args.max_seconds > 3600:
